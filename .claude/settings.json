@@ -1,0 +1,47 @@
+{
+  "effortLevel": "medium",
+  "permissions": {
+    "allow": [
+      "Bash(git status:*)",
+      "Bash(git log:*)",
+      "Bash(git diff:*)",
+      "Bash(git show:*)",
+      "Bash(git branch --show-current:*)",
+      "Bash(stat:*)",
+      "Bash(nix build:*)",
+      "Bash(nix eval:*)",
+      "Bash(shellcheck:*)"
+    ],
+    "deny": [
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(git stash:*)",
+      "Bash(rm -rf:*)",
+      "Bash(nixos-rebuild switch:*)",
+      "Bash(nixos-rebuild boot:*)",
+      "Bash(nixos-rebuild test:*)",
+      "Bash(sudo nixos-rebuild switch:*)",
+      "Bash(sudo nixos-rebuild boot:*)",
+      "Bash(sudo nixos-rebuild test:*)",
+      "Bash(pkexec nixos-rebuild switch:*)",
+      "Bash(pkexec nixos-rebuild boot:*)",
+      "Bash(pkexec nixos-rebuild test:*)",
+      "Bash(just rebuild:*)",
+      "Bash(just switch:*)",
+      "Bash(just update:*)",
+      "Bash(just update-all:*)",
+      "Bash(sudo just rebuild:*)",
+      "Bash(sudo just switch:*)",
+      "Bash(sudo just update:*)",
+      "Bash(sudo just update-all:*)",
+      "Bash(pkexec just rebuild:*)",
+      "Bash(pkexec just switch:*)",
+      "Bash(pkexec just update:*)",
+      "Bash(pkexec just update-all:*)",
+      "Bash(nix flake check:*)",
+      "Bash(sudo nix flake check:*)",
+      "Bash(pkexec nix flake check:*)"
+    ]
+  }
+}
