@@ -7,14 +7,23 @@
 # finds them on PATH. nixos-rebuild, systemctl, journalctl and coredumpctl
 # come from the running system for the same reason.
 { lib, writeShellApplication, makeDesktopItem, symlinkJoin
-, coreutils, findutils, gnugrep, jq, curl, zenity, libnotify, glib, xdg-terminal-exec }:
+, coreutils, findutils, gnugrep, jq, curl, zenity, libnotify, glib, xdg-terminal-exec
+, util-linux }:
 
 let
-  script = writeShellApplication {
+  # The script with a given set of runtime inputs. writeShellApplication puts
+  # them *in front of* PATH, so the contract check (checks.<system>.contract)
+  # builds it without curl, zenity, libnotify and xdg-terminal-exec: the test
+  # stubs for those must win. Same text, same shellcheck, same `set -euo`.
+  mkScript = runtimeInputs: writeShellApplication {
     name = "vexos-ai";
-    runtimeInputs = [ coreutils findutils gnugrep jq curl zenity libnotify glib xdg-terminal-exec ];
+    inherit runtimeInputs;
     text = builtins.readFile ../bin/vexos-ai.sh;
   };
+
+  script = mkScript [
+    coreutils findutils gnugrep jq curl zenity libnotify glib xdg-terminal-exec util-linux
+  ];
 
   desktopItem = makeDesktopItem {
     name = "vexos-ai";
@@ -34,6 +43,7 @@ in
 symlinkJoin {
   name = "vexos-ai";
   paths = [ script desktopItem ];
+  passthru = { inherit mkScript; };
   meta = {
     description = "VexOS AI assistant launcher and helpers";
     license = lib.licenses.mit;

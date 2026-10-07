@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# Stub curl for the usage endpoint. Records argv and stdin (where the token
+# arrives), then answers as STUB_CURL_* say:
+#   STUB_CURL_FAIL=<rc>          exit with that code, as a transport error
+#   STUB_CURL_STATUS=<code>      HTTP status (default 200)
+#   STUB_CURL_BODY=<file>        response body (default: $STUB_LOG/usage-body.json)
+#   STUB_CURL_RETRY_AFTER=<n>    adds a Retry-After header
+log=${STUB_LOG:?}
+printf '%s\n' "$@" >>"$log/curl.argv"
+echo call >>"$log/curl.count"
+hdrfile="" outfile="" fmt=""
+while (($#)); do
+  case "$1" in
+  -D) hdrfile=$2; shift ;;
+  -o) outfile=$2; shift ;;
+  -w) fmt=$2; shift ;;
+  -H) if [[ $2 == @- ]]; then cat >>"$log/curl.stdin"; fi; shift ;;
+  esac
+  shift
+done
+if [[ -n ${STUB_CURL_FAIL:-} ]]; then exit "$STUB_CURL_FAIL"; fi
+status=${STUB_CURL_STATUS:-200}
+if [[ -n $hdrfile ]]; then
+  {
+    printf 'HTTP/2 %s\r\n' "$status"
+    [[ -z ${STUB_CURL_RETRY_AFTER:-} ]] || printf 'Retry-After: %s\r\n' "$STUB_CURL_RETRY_AFTER"
+    printf '\r\n'
+  } >"$hdrfile"
+fi
+if [[ -n $outfile ]]; then cat "${STUB_CURL_BODY:-$log/usage-body.json}" >"$outfile"; fi
+if [[ $fmt == *http_code* ]]; then printf '%s' "$status"; fi

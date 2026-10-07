@@ -26,7 +26,7 @@
 
       devShells = forAllSystems (pkgs: {
         default = pkgs.mkShell {
-          packages = with pkgs; [ shellcheck shfmt jq ];
+          packages = with pkgs; [ shellcheck shfmt jq bats util-linux ];
         };
       });
 
@@ -64,6 +64,28 @@
             check ${opencode} "($scope.bash | keys_unsorted[0]) == \"*\" and $scope.bash[\"*\"] == \"ask\""
             check ${opencode} "[$scope.bash | to_entries[] | select(.key != \"*\") | .value] | all(. == \"deny\")"
           done
+          touch $out
+        '';
+
+        # The CLI's machine contract (docs/contract.md), black-box: the real
+        # script under a fake HOME, with stub claude/curl/systemctl/zenity/…
+        # first on PATH. The script is built without curl, zenity, libnotify and
+        # xdg-terminal-exec in its runtime inputs, which would otherwise be put
+        # in front of the stubs; everything else is identical to the package.
+        contract = let
+          vexosAi = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
+          script = vexosAi.passthru.mkScript (with pkgs; [
+            coreutils findutils gnugrep jq glib util-linux
+          ]);
+        in pkgs.runCommand "vexos-ai-contract" {
+          nativeBuildInputs = with pkgs; [ bats jq coreutils findutils gnugrep util-linux ];
+        } ''
+          export VEXOS_AI_BIN=${script}/bin/vexos-ai
+          cp -r ${./tests/contract} contract
+          chmod -R u+w contract
+          chmod +x contract/stubs/*
+          patchShebangs contract # the sandbox may have no /usr/bin/env
+          bats --print-output-on-failure contract
           touch $out
         '';
       });

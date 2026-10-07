@@ -1,7 +1,7 @@
 # vexos-ai: refined, robust, GNOME-native — spec
 
 Status: **decided 2026-10-06** (A: VexPortal deep link · B: Rust, Phase 1 in bash ·
-C: both agents ask · D: top-bar extension last). Phase 0 done; Phase 1 next.
+C: both agents ask · D: top-bar extension last). Phases 0 and 1 done; Phase 2 next.
 
 Researched 2026-10-06 against:
 

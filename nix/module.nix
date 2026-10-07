@@ -10,8 +10,8 @@
 #   - claude-code + opencode (packages are options; vexos-nix passes unstable)
 #   - vexos-ai: launcher, first-run picker, Claude accounts and usage
 #     warnings, theme sync, "diagnose with AI"
-#   - the VexOS skills at /etc/vexos/ai/skills, linked into ~/.claude/skills,
-#     which both Claude Code and OpenCode read
+#   - the VexOS skills at /etc/vexos/ai/skills, linked into ~/.claude/skills
+#     (Claude Code and OpenCode read it) and ~/.agents/skills (the generic spot)
 #   - system-wide (managed) agent policy: never apply (switch/boot/rebuild
 #     denied), always ask (no auto-approving modes); see nix/policy.nix
 #   - user services: crash watcher, usage timer, theme watcher, welcome
@@ -70,9 +70,11 @@ in
 
     # One link per skill (not the whole directory) so the user's own skills in
     # ~/.claude/skills are left alone. L+ only replaces the link itself.
-    systemd.user.tmpfiles.rules = map
-      (s: "L+ %h/.claude/skills/${s} - - - - /etc/vexos/ai/skills/${s}")
-      skills;
+    # OpenCode reads ~/.claude/skills too; ~/.agents/skills is the generic
+    # location other agents use, so the skills are linked there as well.
+    systemd.user.tmpfiles.rules = lib.concatMap
+      (dir: map (s: "L+ %h/${dir}/${s} - - - - /etc/vexos/ai/skills/${s}") skills)
+      [ ".claude/skills" ".agents/skills" ];
 
     # ── Agent policy ─────────────────────────────────────────────────────────
     # Never apply, always ask: see nix/policy.nix.
@@ -80,7 +82,12 @@ in
     environment.etc."opencode/opencode.json".text = builtins.toJSON policy.opencode;
 
     # ── User services ────────────────────────────────────────────────────────
-    systemd.user.services.vexos-ai-crash-watch = userService "Offer AI diagnosis when a program crashes" "crash-watch";
+    # `vexos-ai crash-capture off` creates the flag file; the unit then does not
+    # start (a skipped condition is not a failure). The path is the default
+    # ~/.config one: specifiers cannot see an XDG_CONFIG_HOME override.
+    systemd.user.services.vexos-ai-crash-watch = lib.recursiveUpdate
+      (userService "Offer AI diagnosis when a program crashes" "crash-watch")
+      { unitConfig.ConditionPathExists = "!%h/.config/vexos/ai/crash-capture-off"; };
     systemd.user.services.vexos-ai-theme-watch = userService "Keep the AI assistant's theme in sync with the desktop" "theme-watch";
     # Simple, not oneshot: it waits on the notification for as long as the
     # user leaves it, which would trip a oneshot's start timeout.
@@ -92,12 +99,15 @@ in
       serviceConfig.Type = "oneshot";
       serviceConfig.ExecStart = "${package}/bin/vexos-ai usage-check";
     };
+    # Ticks every 3 minutes, the fastest probe interval (an account near its
+    # limit). The script decides per account whether a probe is due: every 10
+    # minutes for the active one, 60 for the others, and never during a backoff.
     systemd.user.timers.vexos-ai-usage = {
-      description = "Check Claude subscription usage every 10 minutes";
+      description = "Refresh Claude subscription usage when it is due";
       wantedBy = [ "timers.target" ];
       timerConfig = {
         OnStartupSec = "2min";
-        OnUnitActiveSec = "10min";
+        OnUnitActiveSec = "3min";
       };
     };
   };

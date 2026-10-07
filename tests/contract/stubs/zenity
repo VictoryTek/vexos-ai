@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Any call is a dialog the user would see.
+printf '%s\n' "$*" >>"${STUB_LOG:?}/zenity.log"
+echo "${STUB_ZENITY_ANSWER:-}"

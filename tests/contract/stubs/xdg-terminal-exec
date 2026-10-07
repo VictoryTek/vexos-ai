@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# Any call is a terminal window the user would see.
+printf '%s\n' "$*" >>"${STUB_LOG:?}/terminal.log"

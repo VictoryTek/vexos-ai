@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Stub claude: records how it was started; `auth login` "signs in".
+log=${STUB_LOG:?}
+{
+  echo "argc=$#"
+  for a in "$@"; do echo "arg=$a"; done
+  echo "config=${CLAUDE_CONFIG_DIR:-}"
+  echo "pwd=$PWD"
+} >>"$log/claude.log"
+if [[ ${1:-} == auth && ${2:-} == login ]]; then
+  [[ -z ${STUB_CLAUDE_LOGIN_FAIL:-} ]] || exit 1
+  mkdir -p "${CLAUDE_CONFIG_DIR:?}"
+  printf '{"claudeAiOauth":{"accessToken":"stub","refreshToken":"stub","expiresAt":9999999999999}}\n' \
+    >"$CLAUDE_CONFIG_DIR/.credentials.json"
+fi
+exit 0

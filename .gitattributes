@@ -1,0 +1,6 @@
+* text=auto eol=lf
+*.sh text eol=lf
+*.nix text eol=lf
+*.bats text eol=lf
+*.bash text eol=lf
+tests/contract/stubs/* text eol=lf

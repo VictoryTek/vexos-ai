@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+log=${STUB_LOG:?}
+{
+  echo "argc=$#"
+  for a in "$@"; do echo "arg=$a"; done
+} >>"$log/opencode.log"

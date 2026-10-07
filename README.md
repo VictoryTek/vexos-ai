@@ -20,9 +20,11 @@ install-only (`programs.vexos-ai.enable`).
 ## Layout
 
 - `bin/vexos-ai.sh` — launcher and helpers
-- `skills/` — agent skills, linked into `~/.claude/skills`
+- `skills/` — agent skills, linked into `~/.claude/skills` and `~/.agents/skills`
 - `nix/package.nix`, `nix/module.nix`
 - `nix/policy.nix` — the managed agent policy (asserted by `checks.policy`)
+- `docs/contract.md` — argv, exit codes and `status --json` for callers (VexPortal)
+- `tests/contract/` — the black-box bats suite for that contract (`checks.contract`)
 - `docs/spec.md` — roadmap and decisions
 
 ## Safety limits
@@ -36,4 +38,4 @@ is skipped; check `/status` → "Setting sources" inside Claude Code.
 ## Development
 
 `nix develop`, then `nix build` (shellcheck runs as part of the build) and
-`nix flake check` (adds the policy check).
+`nix flake check` (adds the policy and contract checks).
