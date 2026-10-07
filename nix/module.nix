@@ -12,7 +12,8 @@
 #     warnings, theme sync, "diagnose with AI"
 #   - the VexOS skills at /etc/vexos/ai/skills, linked into ~/.claude/skills,
 #     which both Claude Code and OpenCode read
-#   - system-wide (managed) agent policy denying switch/boot/rebuild
+#   - system-wide (managed) agent policy: never apply (switch/boot/rebuild
+#     denied), always ask (no auto-approving modes); see nix/policy.nix
 #   - user services: crash watcher, usage timer, theme watcher, welcome
 { mkVexosAi }:
 { config, lib, pkgs, ... }:
@@ -20,17 +21,7 @@ let
   cfg = config.programs.vexos-ai;
   package = mkVexosAi pkgs;
 
-  # Commands that apply a configuration, or evaluate every output at once.
-  # Agents must hand these to the user. Rules match the command text the
-  # agent writes, so they are a guardrail; the real gate is that applying
-  # needs root and the agent has no terminal to answer sudo with.
-  appliers = [
-    "nixos-rebuild switch" "nixos-rebuild boot" "nixos-rebuild test"
-    "just rebuild" "just switch" "just update" "just update-all"
-    "nix flake check"
-  ];
-  privileged = cmd: [ cmd "sudo ${cmd}" "pkexec ${cmd}" ];
-  denied = lib.concatMap privileged appliers;
+  policy = import ./policy.nix { inherit lib; };
 
   skills = [ "vexos" "vexos-diagnose" ];
 
@@ -84,20 +75,9 @@ in
       skills;
 
     # ── Agent policy ─────────────────────────────────────────────────────────
-    # Claude Code: a managed-settings.d drop-in, so it merges with any other
-    # admin policy instead of owning managed-settings.json. Managed values
-    # cannot be overridden by user or project settings.
-    environment.etc."claude-code/managed-settings.d/50-vexos.json".text = builtins.toJSON {
-      permissions.deny = map (c: "Bash(${c} *)") denied;
-    };
-
-    # OpenCode: system-wide managed config, merged above the user's own.
-    # Deny entries only, so the user's own permission defaults still apply.
-    environment.etc."opencode/opencode.json".text = builtins.toJSON {
-      "$schema" = "https://opencode.ai/config.json";
-      autoupdate = false; # updated by Nix with the rest of the system
-      permission.bash = lib.genAttrs (map (c: "${c}*") denied) (_: "deny");
-    };
+    # Never apply, always ask: see nix/policy.nix.
+    environment.etc."claude-code/managed-settings.d/50-vexos.json".text = builtins.toJSON policy.claude;
+    environment.etc."opencode/opencode.json".text = builtins.toJSON policy.opencode;
 
     # ── User services ────────────────────────────────────────────────────────
     systemd.user.services.vexos-ai-crash-watch = userService "Offer AI diagnosis when a program crashes" "crash-watch";

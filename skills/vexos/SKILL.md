@@ -38,6 +38,9 @@ editing the running system**. A change takes effect only when the user runs
    `printf '%s' "$content" | pkexec tee /etc/nixos/local.nix >/dev/null`.
    Each `pkexec` is a request for the user's approval: batch your edits, and
    say what you are about to write before you ask.
+6. **Plan first.** Before editing anything, say which files you will change
+   and how, and wait for the user to agree. Every edit and command asks for
+   approval anyway; a plan makes those approvals easy to judge.
 
 ## Know the machine first
 

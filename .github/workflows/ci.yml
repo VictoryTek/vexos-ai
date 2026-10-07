@@ -15,5 +15,7 @@ jobs:
       - uses: DeterminateSystems/nix-installer-action@v13
       - name: Build (runs shellcheck via writeShellApplication)
         run: nix build
+      - name: Flake checks (safety policy)
+        run: nix flake check
       - name: Evaluate NixOS module
         run: nix eval .#nixosModules.default --apply 'm: builtins.typeOf m'
