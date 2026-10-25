@@ -4,6 +4,7 @@ Status: **Phase 1 (research and specification)**, 2026-10-24. No code changed.
 Mockup (approved by the user): https://claude.ai/artifact/7kNYWvE47wDGZkQp8uuj9G
 Builds on `docs/spec.md` (decided 2026-10-06). Phases 0 and 1 of that plan are
 done; its Phase 2 (Rust core) is next and is a prerequisite here.
+**Multi-account is deferred** (2026-10-24): the core uses the user's default Claude login and never sets or reads `CLAUDE_CONFIG_DIR`.
 
 ## 1. Request
 
@@ -115,7 +116,7 @@ costs two backends, two permission mechanisms and two event models.
 
 | Component | Where | What |
 |---|---|---|
-| `crates/vexos-ai-core` | this repo (`docs/spec.md` Phase 2) | status types, accounts, usage. Shared. |
+| `crates/vexos-ai-core` | this repo (`docs/spec.md` Phase 2) | the ACP session layer: launch, mode pinning, the approval options filter, deny on timeout. Shared. |
 | `crates/vexos-ai-panel` | this repo | GTK4 + libadwaita app. App-id `io.github.victorytek.VexosAssistant`, `DBusActivatable=true`. Actions: `toggle`, `show`, `hide`, `diagnose-crash(pid)`, `diagnose-rebuild`, `prompt(text)`. Holds the ACP session, renders the transcript (markdown via `pulldown-cmark` to text tags; code blocks, diffs, tool cards), the approval cards, the composer, history. Falls back to a normal centred window when the extension is absent (also Hyprland/COSMIC). |
 | `vexos-ai toggle` (and `vexos-ai prompt` opens the panel when it can) | CLI | thin wrapper over `gapplication action`. Additive argv, so `docs/contract.md` and the bats suite are updated together. |
 | `extension/vexos-ai@victorytek/` | this repo, shipped in `share/gnome-shell/extensions/` | `metadata.json` (`shell-version: ["50"]`), `extension.js` (indicator, tile, window placement), no tokens, no network. |
@@ -157,7 +158,7 @@ with argv arrays.
 
 | Step | Work | Verify |
 |---|---|---|
-| 2 (existing) | Rust core, CLI port, skill-drift test, per `docs/spec.md`. **Prerequisite.** | bats `contract` check passes unchanged against the Rust CLI |
+| 2 (existing) | Rust core (`crates/vexos-ai-core`, ACP only), per `docs/spec.md` without accounts. The CLI port and skill-drift test follow separately: the contract still has the `account` commands. **Prerequisite.** | `checks.core`: fake-agent tests for the four safety rules, clippy |
 | 2a | **Spike, no shipping:** run `claude-agent-acp` and `opencode acp` with a throwaway ACP client under the real managed settings and `CLAUDE_CONFIG_DIR`. | (a) `nixos-rebuild switch` is denied; (b) an unlisted command arrives as `request_permission`; (c) no auto-approval; (d) account dir honoured. **If (a)-(c) fail, stop and report; fall back to the stream-json route.** |
 | 3 | `vexos-ai-panel`: window, ACP client, transcript, approval cards, composer, usage header, desktop file, D-Bus service, `toggle` argv. | Rust unit tests with a fake ACP agent (never auto-approves, only Approve/Deny, `cancelled` on close); `nix build`; `contract` check; `policy` check |
 | 4 | Extension: tile, menu, placement. | `gnome-shell --devkit`/nested session smoke test on GNOME 50 by the user; `eslint`-clean; `disable()` leaves no actors or signals |

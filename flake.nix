@@ -26,7 +26,7 @@
 
       devShells = forAllSystems (pkgs: {
         default = pkgs.mkShell {
-          packages = with pkgs; [ shellcheck shfmt jq bats util-linux ];
+          packages = with pkgs; [ shellcheck shfmt jq bats util-linux cargo rustc clippy rustfmt ];
         };
       });
 
@@ -90,6 +90,21 @@
           bats --print-output-on-failure contract
           touch $out
         '';
+
+        # The ACP core (crates/vexos-ai-core): its safety tests against a fake
+        # agent, plus clippy. A library, so there is nothing to install.
+        core = pkgs.rustPlatform.buildRustPackage {
+          pname = "vexos-ai-core";
+          version = "0.1.0";
+          src = pkgs.lib.fileset.toSource {
+            root = ./.;
+            fileset = pkgs.lib.fileset.unions [ ./Cargo.toml ./Cargo.lock ./crates ];
+          };
+          cargoLock.lockFile = ./Cargo.lock;
+          nativeBuildInputs = [ pkgs.clippy ];
+          postCheck = "cargo clippy --offline --all-targets -- -D warnings";
+          installPhase = "touch $out";
+        };
       });
     };
 }

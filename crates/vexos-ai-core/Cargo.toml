@@ -1,0 +1,14 @@
+[package]
+name = "vexos-ai-core"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT"
+description = "VexOS assistant core: an ACP client that keeps the agent asking"
+
+[dependencies]
+serde_json = "1"
+tokio = { version = "1", features = ["io-util", "process", "rt", "sync", "time"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["io-util", "macros", "process", "rt", "sync", "test-util", "time"] }
