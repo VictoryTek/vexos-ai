@@ -1,0 +1,174 @@
+# Assistant panel: ACP validation spike — results
+
+Date: 2026-10-24. Spec under test: `assistant_panel_spec.md` (section 7, step 2a).
+Spike code: `spike/acp/` (throwaway; raw logs in `spike/acp/out/`, gitignored).
+No production code, `nix/policy.nix` or `docs/spec.md` changed.
+
+## Setup, and how it differs from a real install
+
+| Item | Value |
+|---|---|
+| Claude adapter | `claude-agent-acp` **0.88.0**, from vexos-nix's `nixpkgs-unstable` pin `fe13242`. Its nixpkgs wrapper sets `CLAUDE_CODE_EXECUTABLE` to claude-code **2.1.300** (the deployed version). ACP protocol pinned with `CLAUDE_AGENT_ACP_PROTOCOL=v1`. |
+| OpenCode | `opencode acp`, **1.19.0** (the deployed version, same pin). No provider login on this machine, so the default free OpenCode Zen model `opencode/big-pickle` was used. Test prompts (scratch paths, harmless commands) went to that hosted service. |
+| Client | `spike/acp/acp_client.py`: ACP v1, no `fs`/`terminal` capability. Answers **every** `session/request_permission` with `reject_once` (else `reject_always`, else `cancelled`). Never selects an allow option. |
+| Managed policy | **Not installed system-wide on this machine** (`/etc/claude-code` and `/etc/opencode` do not exist). The files were rendered from this repo's NixOS module (`config.environment.etc.<path>.text` of a `nixosSystem` with `programs.vexos-ai.enable = true`), so they are byte-identical to what the module installs. They were bind-mounted at the real managed paths inside a bwrap mount namespace (`spike/acp/sandbox.sh`). Not substituted settings, but not a real install either. Differences: owned by the user, not root; only inside the namespace. If you consider this a substitute, read tests 1–4 as "not run" and re-run them on a host with the feature enabled. |
+| Safety net | `nixos-rebuild` was shadowed inside the namespace by a stub that only logs (`spike/acp/out/nixos-rebuild.calls`). Working dirs were scratch dirs outside any repo, so no `CLAUDE.md` influenced the model. |
+| Control | `SPIKE_NO_MANAGED=1` runs the same sandbox without the policy files. |
+
+The first test 1 attempt used a scratch dir inside this repo. Claude read the
+repo's `CLAUDE.md` and refused on its own, so that run was discarded. All
+results below come from neutral scratch dirs.
+
+## Results
+
+| # | Test | Claude (`claude-agent-acp`) | OpenCode (`opencode acp`) |
+|---|---|---|---|
+| 1 | Deny rule | **PASS** | **PASS** |
+| 2 | Approval routing | **PASS** (read-only commands don't ask: by design) | **PASS** |
+| 3 | Auto-approve escape hatches | **FAIL as shipped; PASS with a client mode reset** | **FAIL as shipped; PASS only if the client also restricts the mode** |
+| 4 | `CLAUDE_CONFIG_DIR` | **PASS** (login, state, settings); deny rules with it set **NOT RUN** | n/a |
+| 5 | Package versions | reported below | reported below |
+| 6 | Terms | reported below | n/a |
+
+### 1. Deny rule (`nixos-rebuild switch --dry-run`)
+
+Both: the call was denied before running, **no permission request reached the client**, and the stub logged nothing.
+
+- Claude tool call `status: failed`, content: `Permission to use Bash with command nixos-rebuild switch --dry-run has been denied.` (`out/t1-claude.jsonl`)
+- OpenCode tool call `status: failed`, content: `The user has specified a rule which prevents you from using this specific tool call. Here are some of the relevant rules [...{"permission":"bash","pattern":"*","action":"ask"},{"permission":"bash","pattern":"just rebuild*","action":"deny"}...` (`out/t1-opencode.jsonl`)
+- **Control (Claude, no managed policy):** the same command arrived as an ordinary `request_permission` (`out/ctl-claude-nomanaged.jsonl`). So the outright deny comes from the managed policy, not from the adapter or the model.
+
+### 2. Approval routing (scratch dir, every request rejected)
+
+| Agent | Command | Request reached client | Scratch dir at request time | Result |
+|---|---|---|---|---|
+| Claude | `touch spike-touch.txt` | yes (`allow_once`, `reject_once`) | empty | failed, not run |
+| Claude | `echo hello > spike-echo.txt` | yes (**also offered `allow_always`**: "Yes, and allow access to t2-claude-a/ and echo hello * commands") | empty | failed, not run |
+| Claude | `mkdir spike-dir` | yes | empty | failed, not run |
+| OpenCode | `touch` / `echo … >` / `mkdir` / `echo spike-readonly` | yes, each (offered `allow_once`, **`allow_always`**, `reject_once`) | empty | failed, not run |
+
+Scratch dirs were empty afterwards (`ls -A` printed nothing). The client waits
+2 s before answering, and the listing was taken at request time.
+
+Notes:
+- **Claude runs read-only commands without asking** (`echo spike-readonly`, `ls -la`, `date`: `completed`, 0 requests; `out/t2b-claude-readonly.jsonl`). This is Claude Code's documented `default`-mode behaviour, and the same in the terminal today. The spec's "everything else asks" is too strong for Claude: the UI must show these as completed tool cards. OpenCode asks even for `echo` (`bash "*": "ask"`).
+- **OpenCode ends the turn after a rejection** (a 3-command prompt produced one request). Claude carries on with the next command. This affects the UI flow, not safety.
+
+### 3. Auto-approve escape hatches
+
+Each case is a fresh session asked to `touch` a file, with every request rejected. "Ran" means the file was created with no request.
+
+**Claude**
+
+| Route | Who controls it | Outcome | Evidence |
+|---|---|---|---|
+| `session/set_mode auto` | client | **refused** | `Cannot set permission mode to auto: auto mode disabled by settings` |
+| `session/set_mode bypassPermissions` | client | **refused** | `Mode bypassPermissions is not available in this session` |
+| `session/new _meta.claudeCode.options.permissionMode = bypassPermissions` | client | ignored: started `default`, asked | `out/t3-claude-meta-bypass.jsonl` |
+| `session/set_mode acceptEdits` | client | **honoured: `touch` ran, 0 requests** | `out/t3-claude-setmode-acceptEdits.jsonl` |
+| `<cwd>/.claude/settings.json` `defaultMode: acceptEdits` / `bypassPermissions` | files in the working dir | ignored (the adapter filters escalating modes from repo-committed sources); asked | `out/t3-claude-proj-*.jsonl` |
+| `<cwd>/.claude/settings.local.json` `defaultMode: auto` | files in the working dir | ignored: started `default`, asked | `out/t3-claude-local-auto.jsonl` |
+| **`<cwd>/.claude/settings.local.json` `defaultMode: acceptEdits`** | **files in the working dir** | **honoured: session started in `acceptEdits`, `touch` ran, 0 requests** | `out/t3-claude-local-acceptEdits.jsonl` |
+| `$CLAUDE_CONFIG_DIR/settings.json` (user level) `defaultMode: acceptEdits` | user config | **session starts in `acceptEdits`** (see test 4) | `out/t4-claude-settings-acceptEdits.jsonl` |
+| same file, `defaultMode: bypassPermissions` | user config | clamped to `default` by the managed policy (control without policy: `bypassPermissions`) | `out/t4-claude-settings-bypassPermissions*.jsonl` |
+| same file, `defaultMode: auto` | user config | **reported `auto`** at session start. Not live-tested: this config dir had no login, and the logged-in `local` case above started in `default`. **Open question.** | `out/t4-claude-settings-auto.jsonl` |
+| env vars | — | none found: the adapter reads no permission-mode env var (source scan of `dist/`) | — |
+
+Not covered by managed policy today: `acceptEdits`. `disableAutoMode` and `disableBypassPermissionsMode` do not restrict it, and a non-committed settings file (local or user) can make it the starting mode.
+
+**Client mitigation, tested:** with the `settings.local.json` acceptEdits case, the client sent `session/set_mode default` right after `session/new`. `touch` then came back as a request and did not run (`out/t3-claude-local-reset.jsonl`).
+
+**OpenCode**
+
+The only ACP mode surface is `configOptions` id `mode` (`build`, `plan`, plus any custom primary agents), set with `session/set_config_option`. Effective config was checked with `opencode debug config` inside the sandbox, then live where needed.
+
+| Route | Who controls it | Outcome | Evidence |
+|---|---|---|---|
+| `OPENCODE_CONFIG=<file with allow>` | env | ignored: managed wins (`bash "*": ask`) | debug config |
+| `OPENCODE_CONFIG_CONTENT=<allow>` | env | ignored: managed wins | debug config |
+| `<cwd>/opencode.json` with allow | files in the working dir | ignored: managed wins | debug config |
+| `OPENCODE_PERMISSION='{"bash":"allow","edit":"allow"}'` | env | **replaces the global `permission`** (`bash: allow`), but `agent.build` keeps `ask` and its denies. Live: `touch` asked; `nixos-rebuild switch` denied; stub not called | `out/t3-oc-env.jsonl` |
+| **`<cwd>/.opencode/agent/yolo.md` (`mode: primary`, `permission: {bash: allow, edit: allow}`), client selects `mode=yolo`** | files in the working dir **+ client choice** | **honoured: `touch` ran, and `nixos-rebuild switch --dry-run` RAN (stub logged `switch --dry-run`), 0 requests, no deny** | `out/t3-oc-agent.jsonl`, `out/nixos-rebuild.calls.t3-oc-agent` |
+| **same agent file + `<cwd>/opencode.json` `{"default_agent":"yolo"}`, no client choice** | **files in the working dir only** | **honoured: session started in `yolo`, `touch` ran, 0 requests** | `out/t3-oc-default.jsonl` |
+
+The managed denies are repeated for the four built-in agents only (`build`,
+`general`, `plan`, `explore`). A custom agent's own rules are evaluated after
+the global ones, so its `allow` beats the global denies. `docs/spec.md`
+section 0.2 noted this as residual risk; this shows it also **bypasses the
+deny list**, and that a project file can make it the default.
+
+**This is not ACP-specific.** The same files are read by the OpenCode TUI that
+ships today. Not tested in the TUI, but the config mechanism is the same.
+
+**Client mitigation, tested:** same files, with the client sending `set_config_option mode=build` after `session/new`. `touch` came back as a request and did not run (`out/t3-oc-default-reset.jsonl`). The client must also never offer custom modes.
+
+Read in the adapter source but not exercised live: after plan mode, Claude's
+permission options can include switching to `auto` or `bypassPermissions`
+(`dist/permissions/options/tools.js`); the adapter falls back from `auto` to
+`acceptEdits` when the model lacks auto support (`dist/session-mode.js`,
+`AUTO_MODE_FALLBACK = "acceptEdits"`).
+
+### 4. `CLAUDE_CONFIG_DIR` (Claude)
+
+| Check | Result | Evidence |
+|---|---|---|
+| Login comes from that dir | **PASS**: empty dir gives `{"code": -32000, "message": "Authentication required"}` on prompt (the default `~/.claude` is logged in) | `out/t4-claude-configdir.jsonl` |
+| State is written there, not home | **PASS**: `.claude.json`, `sessions/`, `projects/`, `backups/` created in the scratch dir; `~/.claude.json` and `~/.claude/.credentials.json` mtime and size unchanged | — |
+| Settings come from that dir | **PASS**: its `settings.json` `defaultMode: acceptEdits` gives a session in `acceptEdits` | `out/t4-claude-settings-acceptEdits.jsonl` |
+| Managed policy still read with it set | **PASS (partial)**: `defaultMode: bypassPermissions` there was clamped to `default`; without the policy it started in `bypassPermissions` | `out/t4-claude-settings-bypassPermissions*.jsonl` |
+| Deny rules still apply with it set | **NOT RUN**: needs a logged-in account in that dir. I did not copy or link your credentials. To run it: `CLAUDE_CONFIG_DIR=<dir> claude auth login`, then repeat test 1 with that variable | — |
+
+### 5. Package versions (`nix eval` against the actual revisions)
+
+| Package | this repo's lock, nixos-26.05 `b253099` | vexos-nix `nixpkgs-unstable` pin `fe13242` (what vexos-nix passes) | nixos-unstable head today |
+|---|---|---|---|
+| claude-agent-acp | 0.36.1 | **0.88.0** (tested) | 0.93.0 |
+| opencode | 1.15.10 | **1.19.0** (tested; also on this machine) | 2.1.1 |
+| claude-code | 2.1.223 | **2.1.300** (tested; also on this machine) | 2.1.308 |
+
+Reconciled with `docs/spec.md` (recorded 2026-10-06): opencode **1.18.34** and
+claude-code **2.1.287** were the unstable versions at that date, not
+26.05 versions. Unstable has since moved to 1.19.0 and 2.1.300 at vexos-nix's
+pin. The **1.4.0** in `assistant_panel_spec.md` came from the package search
+tool's index and is wrong for every revision above. The module's own
+defaults (`pkgs.claude-code`, `pkgs.opencode` from 26.05) would give
+2.1.223 and 1.15.10. vexos-nix overrides both with unstable. A
+`claudeAcpPackage` default from 26.05 would be **0.36.1**, which is far behind;
+vexos-nix must pass the unstable one. 0.36.1 was not tested.
+
+Side observation, not part of the brief: vexos-nix's `nixpkgs-stable` input is
+`ed583b5`, not this repo's `b253099`, although `CLAUDE.md` says they share a rev.
+
+### 6. Terms (quoted, not interpreted)
+
+- [Agent SDK overview](https://code.claude.com/docs/en/agent-sdk/overview): "Unless previously approved, Anthropic does not allow third party developers to offer claude.ai login or rate limits for their products, including agents built on the Claude Agent SDK. Use the API key authentication methods described in the Quickstart instead."
+- Same page, branding: "Not permitted: 'Claude Code' or 'Claude Code Agent' … Your product should maintain its own branding and not appear to be Claude Code or any Anthropic product." It also says use of the SDK "is governed by Anthropic's Commercial Terms of Service".
+- [Legal and compliance](https://code.claude.com/docs/en/legal-and-compliance): "OAuth authentication is intended exclusively for purchasers of Claude Free, Pro, Max, Team, and Enterprise subscription plans and is designed to support ordinary use of Claude Code and other native Anthropic applications." "Developers building products or services that interact with Claude's capabilities, including those using the Agent SDK, should use API key authentication … Anthropic does not permit third-party developers to offer Claude.ai login into their own applications, or to route requests through Free, Pro, or Max plan credentials on behalf of their users. Moreover, developers may not collect, store, or intermediate Claude.ai credentials or session tokens — sign-in to a Claude account must complete through Anthropic's own flow." And: "Nor does it prevent an end user from signing in to the unmodified Claude Code binary with their own Claude subscription …"
+- Same page: "Advertised usage limits for Pro and Max plans assume ordinary, individual usage of Claude Code and the Agent SDK."
+- Secondary reports conflict on how the wording changed in 2026 ([AlternativeTo, Feb 2026](https://alternativeto.net/news/2026/2/anthropic-officially-bans-using-subscription-authentication-for-third-party-claude-use), [HN thread](https://news.ycombinator.com/item?id=47446703)). The two official pages above are the current text as fetched today.
+
+## Open questions
+
+1. Does a user-level `defaultMode: auto` really run in auto under the managed `disableAutoMode`? The session *reported* `auto` (unauthenticated config dir). Needs a logged-in account dir.
+2. Deny rules with `CLAUDE_CONFIG_DIR` set (test 4, last row), with a logged-in account dir.
+3. Can managed policy close the two file routes itself? Candidates, **untested**: Claude managed `permissions.defaultMode: "default"`; OpenCode managed `default_agent: "build"`, plus a way to disable or constrain custom agents (none found yet).
+4. Whether the TUI path shipped today is exposed to the OpenCode custom-agent route (same config mechanism; not tested).
+5. Which side of the quoted terms a personal, self-hosted panel on the user's own machine falls under. The sources don't address it directly; this is your call or Anthropic's, not this spike's.
+
+## Recommendation: **proceed with ACP, with changes**
+
+ACP held for the parts it controls. One protocol carried both agents. Denies
+came from the managed policy over ACP, every non-read-only action reached the
+client as a request, and nothing ran before or after a rejection. Both
+escalations found are **agent configuration** issues (settings files and
+custom agents), not ACP issues. They would apply equally to the stream-json and
+`opencode serve` fallback. ACP reports the session mode, and a client reset
+was shown to close both, so the fallback buys nothing.
+
+Changes required before or with the panel:
+
+1. **Mode pinning in the client (required).** After `session/new`/`load`/`resume`, and on every `current_mode_update` or `config_option_update`, force Claude to `default` (or `plan`) and OpenCode to `build` (or `plan`). Refuse to send a prompt until the reported mode is one of those. Never offer `acceptEdits`, `auto`, `bypassPermissions` or custom OpenCode agents in the UI.
+2. **Options filter (required).** Show only `allow_once` and `reject_once`. Never present `allow_always`/`reject_always` or plan-exit mode switches. Answer `cancelled` on close.
+3. **Policy follow-up, separate from the panel (recommended, needs its own spec and review).** Try closing the file routes in `nix/policy.nix` (open question 3), and add a `checks.policy` assertion for whatever works. The OpenCode custom-agent bypass likely affects the shipped TUI today (open question 4), so treat it as a safety fix in its own right.
+4. **Spec corrections.** Claude read-only commands run without a card. OpenCode ends a turn on rejection. The `claudeAcpPackage` default must not be 26.05's 0.36.1. Remove "opencode 1.4.0".
+5. **Terms and branding.** Settle open question 5 before building on a subscription login. Don't label the agent "Claude Code" in the panel UI (the mockup's header does).

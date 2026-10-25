@@ -1,0 +1,5 @@
+#!/bin/sh
+# THROWAWAY SPIKE stub: records that it ran, does nothing else.
+printf '%s %s\n' "$(date -Is)" "$*" >> /home/nimda/Projects/vexos-ai/spike/acp/out/nixos-rebuild.calls
+echo "spike stub: nixos-rebuild not run" >&2
+exit 1
