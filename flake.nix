@@ -47,6 +47,12 @@
           check ${claude} 'has("disableAutoMode") | not'
           check ${claude} '.permissions.disableBypassPermissionsMode == "disable"'
           check ${claude} '.permissions.defaultMode == "default"'
+          # acceptEdits (also in a subagent's frontmatter) must not skip these.
+          for r in Edit Write MultiEdit NotebookEdit \
+                   "Bash(mkdir *)" "Bash(touch *)" "Bash(rm *)" "Bash(rmdir *)" \
+                   "Bash(mv *)" "Bash(cp *)" "Bash(sed *)"; do
+            check ${claude} ".permissions.ask | index(\"$r\") != null"
+          done
           check ${opencode} '.default_agent == "build"'
           for c in "nixos-rebuild switch" "nixos-rebuild boot" "nixos-rebuild test" \
                    "just rebuild" "just switch" "just update" "just update-all" "nix flake check"; do

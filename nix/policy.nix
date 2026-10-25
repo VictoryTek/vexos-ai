@@ -21,6 +21,15 @@ let
   privileged = cmd: [ cmd "sudo ${cmd}" "pkexec ${cmd}" ];
   denied = lib.concatMap privileged appliers;
 
+  # What Claude's acceptEdits mode approves without asking: every file write,
+  # and these filesystem commands. A subagent whose frontmatter sets
+  # acceptEdits gets the same, unseen by the session. Ask rules hold in every
+  # mode and beat any allow rule, so these always ask. File tools are named
+  # bare: a path rule on Write, NotebookEdit or MultiEdit never matches.
+  fileTools = [ "Edit" "Write" "MultiEdit" "NotebookEdit" ];
+  fileCommands = [ "mkdir" "touch" "rm" "rmdir" "mv" "cp" "sed" ];
+  asked = fileTools ++ map (c: "Bash(${c} *)") fileCommands;
+
   # OpenCode allows every tool by default and uses the last matching rule.
   # "*" sorts first in builtins.toJSON, so the denies after it win.
   opencodePermission = {
@@ -29,21 +38,22 @@ let
   };
 in
 {
-  inherit denied;
+  inherit denied asked;
 
   # Claude Code: a managed-settings.d drop-in, so it merges with any other
   # admin policy instead of owning managed-settings.json. Managed values cannot
   # be overridden by user or project settings. Since v2.1.283 an interactive
   # session starts in auto mode, where a classifier approves actions instead of
   # the user; disabling it (and bypass) keeps every session asking. Nothing
-  # disables acceptEdits, but a managed defaultMode outranks one set in user or
-  # local settings, so every session at least starts asking.
+  # disables acceptEdits; a managed defaultMode outranks one set in user or
+  # local settings, and the ask rules take away what acceptEdits would skip.
   claude = {
     permissions = {
       defaultMode = "default";
       disableAutoMode = "disable";
       disableBypassPermissionsMode = "disable";
       deny = map (c: "Bash(${c} *)") denied;
+      ask = asked;
     };
   };
 

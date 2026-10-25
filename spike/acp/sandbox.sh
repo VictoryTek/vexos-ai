@@ -22,6 +22,8 @@ done
   --dir /etc/opencode
   --ro-bind "${SPIKE_OPENCODE_MANAGED:-$here/managed/opencode_opencode.json}" /etc/opencode/opencode.json
 )
+# SPIKE_BIND="src:dest": one extra bind inside the namespace (dest must exist).
+[[ -n ${SPIKE_BIND-} ]] && args+=(--bind "${SPIKE_BIND%%:*}" "${SPIKE_BIND#*:}")
 args+=(
   --ro-bind "$here/stub/nixos-rebuild" "$(readlink -f /run/current-system/sw/bin/nixos-rebuild)"
 )

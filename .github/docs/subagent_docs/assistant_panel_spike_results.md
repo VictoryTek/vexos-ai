@@ -404,3 +404,57 @@ subagent's actions never reach `request_permission`.
 3. **Research:** whether Claude Code has a managed setting that disables
    filesystem subagents, or limits their `permissionMode`. Not researched in
    this task.
+
+## Subagent route fix
+
+2026-10-24. Managed `ask` rules in `nix/policy.nix`, asserted by
+`checks.policy`. Runner: `spike/acp/subagent/run-sub.sh` (test agent
+`yolo.md`: `permissionMode: acceptEdits`, tools Bash, Read, Write, Edit),
+through the core's `examples/smoke.rs`, every request denied. **User level**
+means a temporary `CLAUDE_CONFIG_DIR` with `agents/yolo.md`; only the real
+credentials file is bind-mounted into it, inside the namespace (no copy).
+The real `~/.claude/agents` was never created, and the credentials file's
+mtime is unchanged.
+
+**Docs** ([permissions](https://code.claude.com/docs/en/permissions),
+[permission modes](https://code.claude.com/docs/en/permission-modes)):
+- "Rules are evaluated in order: deny, then ask, then allow", so a managed `ask`
+  beats any `allow`.
+- Ask rules prompt in every mode ("Actions no mode auto-approves: tools
+  matched by an explicit ask rule"), and match subcommands and past leading
+  variables and wrappers.
+- A path rule on `Write`, `NotebookEdit` or legacy `MultiEdit` "never
+  matches"; "to match every use … write only the tool name". That is why the
+  first variant (bare `Edit` only) missed `Write`.
+- acceptEdits auto-approves file edits and `mkdir`, `touch`, `rm`, `rmdir`,
+  `mv`, `cp` and `sed`.
+
+**Rules added** (`permissions.ask`): `Edit`, `Write`, `MultiEdit`,
+`NotebookEdit`, `Bash(mkdir *)`, `Bash(touch *)`, `Bash(rm *)`,
+`Bash(rmdir *)`, `Bash(mv *)`, `Bash(cp *)`, `Bash(sed *)`.
+
+| Run | Before | After |
+|---|---|---|
+| Project subagent (`.claude/agents/yolo.md`) via `Task`: `touch`, `Write`, `Read`+`Edit` | 0 requests; all three ran; `existing.txt` changed | **closed**: `touch`, `Write` and `Edit` each reached the UI as `[ApproveOnce, DenyOnce]` and were denied. Only `Read` ran. No new files; `existing.txt` unchanged |
+| User-level subagent (`$CLAUDE_CONFIG_DIR/agents/yolo.md`), same steps | 0 requests; all three ran | **closed**: same as the project case |
+| R5: client `set_mode acceptEdits` (raw spike client; the core never sends it), then `touch`, `Write` | `touch` ran unasked (earlier runs) | **closed**: both asked, both denied, no files |
+| Test 1, both agents: `nixos-rebuild switch` | denied | **unchanged**: denied with no request; stub not called |
+| Test 2, both agents: `touch`, `mkdir` | asked | **unchanged**: asked, denied, nothing created |
+| Claude read-only: `echo`, `ls -la`, `cat f.txt`, `sed -n 1p f.txt` | all ran unasked | `echo`, `ls`, `cat` still run unasked. **`sed -n 1p` now asks** (the `Bash(sed *)` rule) |
+
+No "matches no tool" warning for `MultiEdit` appeared in the adapter output
+(the terminal UI was not checked).
+
+**Negative tests:** removing each of the 11 rules from `nix/policy.nix`, one at
+a time, made `checks.policy` fail with
+`policy check failed: .permissions.ask | index("<rule>") != null`. The file
+was restored from a copy, and `checks.policy` passes again.
+
+**What users notice:** for those four file tools and seven commands,
+`acceptEdits` and "Yes, and don't ask again" no longer skip the prompt;
+read-only `sed` asks too. Recorded in `docs/contract.md`.
+
+**Still open:** OpenCode custom agents a user selects (R2), as documented in
+`docs/contract.md`. Not tested: `MultiEdit` and `NotebookEdit` (the model
+used `Write` and `Edit`), and commands behind wrappers (`timeout touch …`),
+which the docs say ask rules match.

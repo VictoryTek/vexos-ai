@@ -190,20 +190,26 @@ they edit or run commands. That is a guardrail. What to know:
   detect that. Check `/status` → "Setting sources" inside Claude Code.
 - Every session **starts** asking: the policy sets Claude's `defaultMode` to
   `default` and OpenCode's `default_agent` to `build`, which outrank user,
-  project and local settings. Two routes after the start are **not closed**.
-  Managed config has no lock for either, and both need a deliberate user action:
-  - **OpenCode custom agents.** An agent defined with its own `allow` rules (in
-    `.opencode/agents/`, a project `opencode.json` or `~/.config/opencode/`)
-    gets the global rules first and its own after them. Once the user selects
-    it (Tab in the TUI, `--agent`, or a client's mode choice), it bypasses the
-    managed denies too: `nixos-rebuild switch` runs unasked.
-  - **Claude `acceptEdits` chosen mid-session** (Shift+Tab, or a client's
-    `set_mode`). File edits and simple filesystem commands are then approved
-    without asking. Deny rules still apply.
-
-  The planned assistant panel must pin the mode (Claude `default`, OpenCode
-  `build`) and offer no other, so neither route applies there. The terminal
-  agents are unchanged.
+  project and local settings.
+- Claude **always asks before writing a file** (`Edit`, `Write`, `MultiEdit`,
+  `NotebookEdit`) **or running** `mkdir`, `touch`, `rm`, `rmdir`, `mv`, `cp` or
+  `sed`, whatever the mode. These are managed `ask` rules, and an ask rule holds
+  in every mode and outranks any allow rule. This closes two routes: switching
+  to `acceptEdits` mid-session (Shift+Tab, or a client's `set_mode`), and a
+  subagent whose definition (`.claude/agents/*.md`, project or user) sets
+  `permissionMode: acceptEdits`, which used to edit unasked. What users notice:
+  `acceptEdits` and "Yes, and don't ask again" no longer skip the prompt for
+  those tools and commands. That includes read-only `sed -n`; other read-only
+  commands such as `ls` and `cat` still run without asking.
+- One route is **not closed**, and needs a deliberate user action. Managed
+  config has no lock for it. **OpenCode custom agents**: an agent defined with
+  its own `allow` rules (in `.opencode/agents/`, a project `opencode.json` or
+  `~/.config/opencode/`) gets the global rules first and its own after them.
+  Once the user selects it (Tab in the TUI, `--agent`, or a client's mode
+  choice), it bypasses the managed denies too: `nixos-rebuild switch` runs
+  unasked. The assistant core (`crates/vexos-ai-core`) keeps OpenCode on
+  `build` and offers no other agent, so the route doesn't apply there. The
+  OpenCode terminal agent is unchanged.
 
 ## Testing it
 
