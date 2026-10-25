@@ -172,3 +172,46 @@ Changes required before or with the panel:
 3. **Policy follow-up, separate from the panel (recommended, needs its own spec and review).** Try closing the file routes in `nix/policy.nix` (open question 3), and add a `checks.policy` assertion for whatever works. The OpenCode custom-agent bypass likely affects the shipped TUI today (open question 4), so treat it as a safety fix in its own right.
 4. **Spec corrections.** Claude read-only commands run without a card. OpenCode ends a turn on rejection. The `claudeAcpPackage` default must not be 26.05's 0.36.1. Remove "opencode 1.4.0".
 5. **Terms and branding.** Settle open question 5 before building on a subscription login. Don't label the agent "Claude Code" in the panel UI (the mockup's header does).
+
+## Policy fix
+
+2026-10-24. Standalone fix in `nix/policy.nix`, with matching assertions in
+`checks.policy` (`flake.nix`; `CLAUDE.md` requires the check to move with the
+policy). Same harness and versions as above; route script
+`spike/acp/fix/routes.sh`; TUI driver `spike/acp/fix/tui.py` (tmux).
+
+**Change**
+
+- Claude: managed `permissions.defaultMode = "default"`. [Settings](https://code.claude.com/docs/en/settings): managed is the top level, "Nothing in your own settings files or `--settings` overrides a managed key". [Permission modes](https://code.claude.com/docs/en/permission-modes): managed `permissions.defaultMode` sets the starting mode; there is **no** setting that disables `acceptEdits` and no lock on the mode.
+- OpenCode: managed `default_agent = "build"`. [Config](https://opencode.ai/docs/config/): managed files "override everything", merged key by key. [Permissions](https://opencode.ai/docs/permissions/) and [Agents](https://opencode.ai/docs/agents/): "agent rules take precedence" over global ones; agents can be disabled only by name; no wildcard agent, no managed switch for project agents. Confirmed in the 1.19.0 source, `packages/opencode/src/agent/agent.ts:266-294`: a custom agent's ruleset is `merge(defaults, global, its own)`, last match wins, and nothing re-applies the global rules at tool time.
+
+**Results** (baseline = before the change, fixed = after; every request rejected)
+
+| Route | Baseline | Fixed |
+|---|---|---|
+| R1 OpenCode: project `default_agent: yolo` + `.opencode/agent/yolo.md` (allow), no client choice | starts `yolo`; `touch` ran; **`nixos-rebuild switch` ran** (stub) | **closed**: starts `build`; `touch` asked; `nixos-rebuild` denied; stub not called |
+| R2 OpenCode: client/user **selects** `yolo` | `touch` and `nixos-rebuild` ran | **still open**: both ran (stub logged) |
+| R3 Claude: `.claude/settings.local.json` `defaultMode: acceptEdits` | starts `acceptEdits`; `touch` ran | **closed**: starts `default`; `touch` asked |
+| R4 Claude: user settings `defaultMode: acceptEdits` / `auto` | starts `acceptEdits` / `auto` | **closed**: both start `default` (answers open question 1 for the starting mode) |
+| R5 Claude: client/user switches to `acceptEdits` mid-session | `touch` ran | **still open**: not a settings-file route; managed settings can't lock the mode |
+
+OpenCode **TUI**, driven in tmux in the R1 project dir: under the old policy
+it started in **Yolo** and `nixos-rebuild switch` ran (stub logged), so the
+shipped TUI was exposed. Under the fixed policy it starts in **Build** and the
+command did not run. After **Tab** to Yolo it ran again (R2 in the TUI).
+`opencode run` behaves the same: default closed, `--agent yolo` open.
+
+**Regression** (spike tests 1 and 2, fixed policy): unchanged. Both agents
+deny `nixos-rebuild switch` with no request and no stub call. `touch` and
+`mkdir` arrive as requests and nothing is created. Claude still runs `echo`
+unasked; OpenCode asks for it.
+
+**Remaining exposure, not closed**
+
+1. **OpenCode custom agents a user selects** (TUI Tab, `--agent`, ACP mode) run with their own rules, so an agent defined with `allow` in `.opencode/agents/`, a project `opencode.json` or `~/.config/opencode/` bypasses the deny list. Writing such a file from the agent needs an approved edit (`edit: ask`), and the user must then pick it. Options outside this fix: the panel never offers custom modes (already required above); the module could set `OPENCODE_DISABLE_PROJECT_CONFIG` (an env var, not managed config; it also drops project instructions, and its exact effect on `.opencode/agents` was not tested); or report upstream for a managed rule that binds every agent.
+2. **Claude `acceptEdits` chosen during a session** (Shift+Tab in the terminal, `set_mode` over ACP). A sandbox-only variant with managed `ask` rules (`Write`, `NotebookEdit`, `Edit`, `Edit(//**)`, `Bash(mkdir|touch|rm|rmdir|mv|cp|sed *)`) made `touch` and `Write` ask even in acceptEdits. A first variant with only bare `Edit` did **not** stop `Write`. **Not applied.** It changes behaviour users can see: no acceptEdits, and "don't ask again" no longer sticks for those tools. That is a product decision. The panel requirement to pin the mode stands either way.
+3. The managed-tier caveat from `docs/spec.md` section 0.3 is unchanged: a server-managed policy from a Team or Enterprise login outranks this file.
+
+`docs/contract.md` ("What the safety policy covers, and what it does not")
+should describe items 1 and 2. It was not edited, as this fix's scope excludes
+it. `checks.policy` was not negative-tested for the two new assertions.

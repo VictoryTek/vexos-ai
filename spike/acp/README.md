@@ -19,6 +19,10 @@ Not part of the product. Results: `.github/docs/subagent_docs/assistant_panel_sp
     in sys.config.environment.etc."<claude-code/managed-settings.d/50-vexos.json|opencode/opencode.json>".text'
   ```
 - `out/`: raw JSON-RPC logs (gitignored).
+- `fix/routes.sh TAG`: re-runs the settings-file escalation routes (run from
+  `spike/acp`; scratch dirs under `$SPIKE_SCRATCH`). `fix/tui.py`: drives the
+  OpenCode TUI in tmux. `SPIKE_CLAUDE_MANAGED` / `SPIKE_OPENCODE_MANAGED` point
+  `sandbox.sh` at a variant policy file.
 
 Example:
 

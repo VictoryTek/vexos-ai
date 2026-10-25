@@ -46,6 +46,8 @@
           check ${claude} '.permissions.disableAutoMode == "disable"'
           check ${claude} 'has("disableAutoMode") | not'
           check ${claude} '.permissions.disableBypassPermissionsMode == "disable"'
+          check ${claude} '.permissions.defaultMode == "default"'
+          check ${opencode} '.default_agent == "build"'
           for c in "nixos-rebuild switch" "nixos-rebuild boot" "nixos-rebuild test" \
                    "just rebuild" "just switch" "just update" "just update-all" "nix flake check"; do
             for p in "" "sudo " "pkexec "; do

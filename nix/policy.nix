@@ -35,9 +35,12 @@ in
   # admin policy instead of owning managed-settings.json. Managed values cannot
   # be overridden by user or project settings. Since v2.1.283 an interactive
   # session starts in auto mode, where a classifier approves actions instead of
-  # the user; disabling it (and bypass) keeps every session asking.
+  # the user; disabling it (and bypass) keeps every session asking. Nothing
+  # disables acceptEdits, but a managed defaultMode outranks one set in user or
+  # local settings, so every session at least starts asking.
   claude = {
     permissions = {
+      defaultMode = "default";
       disableAutoMode = "disable";
       disableBypassPermissionsMode = "disable";
       deny = map (c: "Bash(${c} *)") denied;
@@ -48,9 +51,12 @@ in
   # agent's own permission rules are evaluated after the global ones, so the
   # same rules are repeated for each built-in agent that runs tools; otherwise
   # a user's `agent.build.permission.bash."*" = "allow"` would outrank them.
+  # A custom agent's own rules still outrank them and cannot be reached from
+  # here, so sessions start in build, never in an agent a project names.
   opencode = {
     "$schema" = "https://opencode.ai/config.json";
     autoupdate = false; # updated by Nix with the rest of the system
+    default_agent = "build";
     permission = opencodePermission;
     agent = lib.genAttrs [ "build" "general" "plan" "explore" ]
       (_: { permission = opencodePermission; });

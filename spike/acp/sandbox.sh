@@ -18,9 +18,9 @@ done
 # SPIKE_NO_MANAGED=1: control run without the policy files.
 [[ ${SPIKE_NO_MANAGED-} == 1 ]] || args+=(
   --dir /etc/claude-code/managed-settings.d
-  --ro-bind "$here/managed/claude-code_managed-settings.d_50-vexos.json" /etc/claude-code/managed-settings.d/50-vexos.json
+  --ro-bind "${SPIKE_CLAUDE_MANAGED:-$here/managed/claude-code_managed-settings.d_50-vexos.json}" /etc/claude-code/managed-settings.d/50-vexos.json
   --dir /etc/opencode
-  --ro-bind "$here/managed/opencode_opencode.json" /etc/opencode/opencode.json
+  --ro-bind "${SPIKE_OPENCODE_MANAGED:-$here/managed/opencode_opencode.json}" /etc/opencode/opencode.json
 )
 args+=(
   --ro-bind "$here/stub/nixos-rebuild" "$(readlink -f /run/current-system/sw/bin/nixos-rebuild)"
