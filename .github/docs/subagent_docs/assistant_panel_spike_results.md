@@ -215,3 +215,111 @@ unasked; OpenCode asks for it.
 `docs/contract.md` ("What the safety policy covers, and what it does not")
 should describe items 1 and 2. It was not edited, as this fix's scope excludes
 it. `checks.policy` was not negative-tested for the two new assertions.
+
+## Core live smoke test
+
+2026-10-24. `crates/vexos-ai-core` against the real agents, through its public
+API only. Driver: `crates/vexos-ai-core/examples/smoke.rs`; it answers only
+through `Session::decide` and denies everything except titles named with
+`--approve`. Runs: `spike/acp/smoke/run.sh`, inside `sandbox.sh`; the managed
+files are byte-identical to the current module render (with `defaultMode` and
+`default_agent`). Agents: `claude-agent-acp` 0.88.0 (claude-code 2.1.300,
+default login) and `opencode acp` 1.19.0 (free `opencode/big-pickle`).
+Evidence in `spike/acp/out/smoke/` (gitignored): `<run>.events.jsonl` is what
+the UI saw; `<run>/{in,out}.jsonl` is the raw ACP traffic, captured by
+launching the agent behind `tee` and handing those pipes to
+`Session::connect`. The core has no API that reports the mode, and none was
+added. A credential scan of the logs found nothing. They do contain local
+Claude metadata (lists of skills and commands), which is why they stay out of git.
+
+| # | Check | Claude | OpenCode |
+|---|---|---|---|
+| 1 | Spawn, pin, reported mode | **PASS** | **PASS** |
+| 2 | `nixos-rebuild switch` denied, no stub call | **PASS** | **PASS** |
+| 3 | `touch`: approve-once/deny-once only, no file until approved, runs once approved | **PASS** | **PASS** |
+| 4 | Plan-exit options and what survives | **Recorded** (see below); under the core the plan-exit request never happens | n/a |
+| 5 | Poisoned settings: pin wins | **PASS** (also with the managed `defaultMode` removed) | **PASS** (also with the managed `default_agent` removed) |
+| 6 | Mid-session reset; `NotPinned` | **Reset PASS** (live); `NotPinned` **not observed** | not triggered |
+
+**1.** `Session::spawn` started both, and a prompt turn ended `end_turn`
+(`c1-spawn-*`). Raw traffic (`c23-*`): Claude reported `default` at
+`session/new`; the core sent `session/set_mode {modeId: default}` and got `{}`,
+and the adapter then sent `config_option_update` with `mode = default`. OpenCode
+reported `build`; the core sent `set_config_option mode=build` and the reply
+said `currentValue: build`.
+
+**2.** Both: the tool call `failed` with no permission request, and no stub
+call. Claude: `Permission denied: Permission to use Bash with command nixos-rebuild switch --dry-run has been denied.`
+OpenCode: `The user has specified a rule which prevents you from using this specific tool call…`
+
+**3.** Both: `touch deny-a.txt` and `touch approve-b.txt` each reached the UI
+with `choices [ApproveOnce, DenyOnce]`, and neither file existed when the
+request arrived. After deny/approve: `deny-a.txt` absent, `approve-b.txt`
+present. Raw options before the filter: Claude `allow_once (Yes)`,
+`reject_once (No)`; OpenCode also `allow_always (Always allow)`, which the core
+dropped.
+
+**4.** Asked to enter plan mode and present a plan (`c4-deny`), Claude called
+`EnterPlanMode` **without any permission request**. The adapter reported
+`current_mode_update: plan`, and the core reset to `default` (second
+`set_mode`, acknowledged). Claude then wrote its plan with **no request**, to
+`~/.claude/plans/frolicking-dreaming-church.md` in the **real home directory**
+(408 bytes, still there). That is probably Claude Code's own plan-file
+allowance; unconfirmed. "Approve Plan" (`ExitPlanMode`) then failed with
+"You are not in plan mode", so no plan-exit options reached the UI. What the
+user would see: the agent says it left plan mode on its own and could not
+present the plan. To record the options anyway, the raw spike client (no pin)
+put Claude in plan mode (`c4-raw`):
+
+| Kind | Option | Through the core's filter |
+|---|---|---|
+| `allow_once` | "Yes, manually approve edits" (`exit-plan-default`) | kept (Approve once): exits to `default`, the pinned mode |
+| `allow_always` | "Yes, clear context (4% used) and use auto mode" | dropped |
+| `allow_always` | "Yes, and use auto mode" | dropped |
+| `reject_once` | "No, keep planning" | kept (Deny once) |
+
+None of the surviving options switches to a non-pinned mode. The adapter
+still offers `auto` although managed `disableAutoMode` refuses it.
+
+**5.** Claude with `.claude/settings.local.json` `defaultMode: acceptEdits`,
+and OpenCode with `.opencode/agent/yolo.md` (allow-all) plus `opencode.json`
+`default_agent: yolo`, each run twice:
+- **current policy:** the agents reported `default`/`build` at `session/new`.
+- **core alone** (`SPIKE_CLAUDE_MANAGED`/`SPIKE_OPENCODE_MANAGED` without those
+  keys): the agents reported **`acceptEdits`** and **`yolo`**.
+
+In every run the core reset to `default`/`build`. `touch poison.txt` then came
+as `[ApproveOnce, DenyOnce]`, was denied and the file stayed absent.
+OpenCode's `nixos-rebuild switch` was denied with no stub call.
+Extra probe (`c5b`): a project persona (`.claude/agents/yolo.md` with
+`permissionMode: acceptEdits`, `settings.local.json` `agent: yolo`) was **not**
+applied: the session reported `agent=default`, and `touch` asked and was denied.
+
+**6.** The reset was seen live in check 4: `current_mode_update: plan` was
+followed by the core's `set_mode default` and the adapter's
+`config_option_update mode = default`. `NotPinned` was **not** observed
+live: the reset happened during a running turn and took one round trip, and
+no prompt landed in that window. It remains covered only by the fake-agent
+test `a_mid_session_mode_change_is_reset`. Nothing triggered a mode change on
+OpenCode.
+
+**Findings to act on (not fixed here):**
+
+1. **Plan mode can't be used under the pin.** Claude enters plan mode unasked,
+   and the core immediately resets it, so the plan-then-approve flow (the
+   skill's "plan first" rule) breaks with a confusing agent message. `plan` is
+   stricter than `default`. Allowing it as a second pinned mode is a design
+   decision; the plan-exit options above show the core's filter would keep it safe.
+2. **The core watches only `current_mode_update` for Claude.** Adapter 0.88.0
+   also reports the mode through the `mode` config option
+   (`config_option_update`), and sent both here. If a later adapter sends only
+   the config option, the mid-session reset would not fire. Probably a bug in
+   waiting; it holds today.
+3. **Claude's `agent` config option (main-thread persona) is neither pinned nor
+   watched.** The settings route tried here did not apply a persona. Whether a
+   persona with `permissionMode` can be selected another way is untested.
+4. **Plan file outside the working directory.** Claude Code writes its plan to
+   `~/.claude/plans/` with no request. That is the agent's own state rather
+   than a system change, but the UI should show it.
+5. **UI note:** many `tool_call_update` events carry no title. The panel must
+   merge updates by tool-call id.
