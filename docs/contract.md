@@ -188,8 +188,22 @@ they edit or run commands. That is a guardrail. What to know:
   key. If a user signs in with a Team or Enterprise organisation that pushes
   server-managed settings, VexOS's file policy is skipped, and nothing here can
   detect that. Check `/status` → "Setting sources" inside Claude Code.
-- OpenCode: an agent the user defines themselves gets the global rules first and
-  its own after them, so it can allow what the built-in agents ask about.
+- Every session **starts** asking: the policy sets Claude's `defaultMode` to
+  `default` and OpenCode's `default_agent` to `build`, which outrank user,
+  project and local settings. Two routes after the start are **not closed**.
+  Managed config has no lock for either, and both need a deliberate user action:
+  - **OpenCode custom agents.** An agent defined with its own `allow` rules (in
+    `.opencode/agents/`, a project `opencode.json` or `~/.config/opencode/`)
+    gets the global rules first and its own after them. Once the user selects
+    it (Tab in the TUI, `--agent`, or a client's mode choice), it bypasses the
+    managed denies too: `nixos-rebuild switch` runs unasked.
+  - **Claude `acceptEdits` chosen mid-session** (Shift+Tab, or a client's
+    `set_mode`). File edits and simple filesystem commands are then approved
+    without asking. Deny rules still apply.
+
+  The planned assistant panel must pin the mode (Claude `default`, OpenCode
+  `build`) and offer no other, so neither route applies there. The terminal
+  agents are unchanged.
 
 ## Testing it
 
