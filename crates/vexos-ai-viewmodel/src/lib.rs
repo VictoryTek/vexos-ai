@@ -16,8 +16,8 @@ mod proposal;
 mod rebuild;
 
 pub use conversation::{
-    Answer, ApprovalCard, ClickError, Conversation, Decider, Item, State, ToolCard, agent_label,
-    choice_label, mode_label,
+    Answer, ApprovalCard, ClickError, Conversation, Decider, Item, NOT_SENT, State, ToolCard,
+    agent_label, choice_label, mode_label,
 };
 pub use proposal::{DiffLine, Proposal, line_diff};
 pub use rebuild::{Rebuild, RebuildCommand, describe_wait_status};

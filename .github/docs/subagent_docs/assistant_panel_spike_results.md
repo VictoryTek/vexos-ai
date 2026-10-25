@@ -619,3 +619,105 @@ view-model 29), `cargo clippy --all-targets -- -D warnings` and
 `checks.x86_64-linux.{policy,contract,core,panel}`. `default`, `policy` and
 `contract` were also re-run with `--rebuild`, since their inputs are
 unchanged (contract 118/118). Then `scripts/preflight.sh`.
+
+## Install and host verification
+
+2026-10-25. Install the panel through the NixOS module, harden its startup,
+and add a host verification script. No change to `nix/policy.nix`,
+`crates/vexos-ai-core` or CI. Done under a scope rule: nothing outside the
+repo was written, except what `nix build` and cargo write to `/nix/store`
+and their own caches.
+
+**Module** (`nix/module.nix`):
+
+- `programs.vexos-ai.enablePanel`, default `config.programs.vexos-ai.enable`.
+  It installs the panel (with its desktop entry) and `claudeAcpPackage`.
+- `programs.vexos-ai.claudeAcpPackage`, default `pkgs.claude-agent-acp`.
+  The panel is wrapped so the pinned `claude-agent-acp` and `opencode` come
+  first on its `PATH`, whatever else the user has installed.
+- Assertions when the panel is enabled: `enable` is on, which installs the
+  managed policy. Both managed files are present, enabled, and exactly what
+  `nix/policy.nix` renders. `claude-agent-acp` is at least 0.88.0 and
+  `opencode` at least 1.19.0, the versions tested above (26.05 has 0.36.1 and
+  1.15.10).
+- **Hand-off, required:** vexos-nix `modules/ai.nix` passes only
+  `claudePackage` and `opencodePackage` (unstable). Once it pins this
+  revision, a host with the AI feature fails evaluation until it also sets
+  `claudeAcpPackage = pkgs.unstable.claude-agent-acp;`, or sets
+  `enablePanel = false`. This is by design (fail closed), but it needs that
+  one-line change there. vexos-nix was read, not changed.
+
+**`checks.module`** (new, in `flake.nix` and `scripts/preflight.sh`)
+evaluates the module with stand-in agent packages. 8 cases:
+
+- the panel comes with the feature;
+- no feature, no panel;
+- the panel can be left out;
+- it is refused without `enable`;
+- it is refused without Claude's policy file;
+- it is refused with a changed OpenCode policy;
+- it is refused with 26.05's adapter;
+- it is refused with 26.05's opencode.
+
+It also builds the wrapped panel and checks that its wrapper names the pinned
+agents and that the desktop entry is installed. Mutation check, each change
+reverted afterwards:
+
+| Mutation | Failing case |
+|---|---|
+| no `enable` assertion | no panel without the managed policy |
+| panel on by default | no AI feature, no panel |
+| policy files not checked | changed OpenCode policy; no Claude policy file |
+| no adapter version floor | 26.05's claude-agent-acp |
+| panel not wrapped | the panel runs the pinned agents first on PATH |
+
+**Panel startup** (view-model and panel): the input stays off until the
+session has started **and** the core has confirmed its first mode. The
+core sends that `Event::Mode` exactly when it opens prompts (`pin_held`). A
+prompt refused with `NotPinned` mid-session shows a plain notice ("Not sent:
+the agent's mode was being reset…"), not the error. The message text goes
+back into the input. The input is not locked after a refusal: the refusal
+and the next `Event::Mode` arrive by different paths, in either order, and
+waiting for a mode that was already shown would lock it for good. 2 new
+view-model tests (31 in all). Mutation check, 6 of 6 caught:
+
+- `started()` opens at once (the old code);
+- the mode does not open the input;
+- opening ignores the mode;
+- opening ignores the start;
+- `NotPinned` shown raw;
+- the refused text dropped.
+
+The earlier 18 view-model mutations were not re-run.
+
+**`scripts/verify-host.sh`** (new): for the target host, after a rebuild. It is
+read-only and starts no agent. It locates programs with `command -v` and
+reads versions from store paths. It prints PASS/FAIL for:
+
+- each managed policy file: present, the running system's own file
+  (`/etc/static`), and equal (`jq -S`) to what `nix/policy.nix` renders;
+- `vexos-ai-panel`, `claude-agent-acp` (at least 0.88.0) and `opencode`
+  (at least 1.19.0) on `PATH`;
+- the panel's wrapper naming the `claude-agent-acp` that is on `PATH`;
+- the desktop entry running `vexos-ai-panel`.
+
+It renders the expected policy with `nix-instantiate --eval` and the host's
+`<nixpkgs/lib>` (or `VEXOS_NIXPKGS`), which may update Nix's own cache. **It
+was not run here**, only shellchecked (exit 0). Two of its parts were checked
+by hand, read-only: the version parsing, against real store paths
+(`claude-agent-acp-0.88.0`, `opencode-1.19.0`), and the built desktop entry's
+`Exec=vexos-ai-panel`.
+
+**Not run:** `scripts/verify-host.sh`, a rebuild, an install, a panel launch
+(all outside the repo or against the real home).
+
+**Checks** (on the repository itself, not a copy; exit 0 for each):
+
+- In the devShell: `cargo build --all-targets`, `cargo test` (core 3 + 41,
+  view-model 31), `cargo clippy --all-targets -- -D warnings` and
+  `cargo fmt --check`.
+- `nix build`, and `checks.x86_64-linux.{policy,contract,core,panel,module}`.
+  `default`, `policy` and `contract` were also re-run with `--rebuild`, since
+  their inputs were unchanged and the store already had them (contract 118/118).
+- `scripts/preflight.sh`. Shellcheck of `scripts/verify-host.sh` and
+  `scripts/preflight.sh`.

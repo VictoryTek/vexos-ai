@@ -44,6 +44,8 @@ pub fn mode_label(mode: &str) -> String {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum State {
+    /// Until the session has started and the core has confirmed its first
+    /// mode: before that, prompts would be refused.
     Starting,
     Ready,
     /// A prompt turn is running.
@@ -135,10 +137,17 @@ pub struct Conversation {
     agent: Agent,
     mode: Option<String>,
     state: State,
+    started: bool,
     items: Vec<Item>,
     tools: HashMap<String, usize>,
     cards: HashMap<u64, usize>,
+    /// A message the core refused to send, for the input to offer again.
+    unsent: Option<String>,
 }
+
+/// Shown instead of the core's `NotPinned` error.
+pub const NOT_SENT: &str =
+    "Not sent: the agent's mode was being reset. Your message is back in the input; send it again.";
 
 impl Conversation {
     pub fn new(agent: Agent) -> Self {
@@ -146,9 +155,11 @@ impl Conversation {
             agent,
             mode: None,
             state: State::Starting,
+            started: false,
             items: Vec::new(),
             tools: HashMap::new(),
             cards: HashMap::new(),
+            unsent: None,
         }
     }
 
@@ -173,11 +184,22 @@ impl Conversation {
         self.state == State::Ready
     }
 
-    /// The session started.
+    /// The session started. Prompts open once the core confirms a mode too.
     pub fn started(&mut self) {
-        if self.state == State::Starting {
+        self.started = true;
+        self.open();
+    }
+
+    /// The core sends the first mode when it opens prompts.
+    fn open(&mut self) {
+        if self.state == State::Starting && self.started && self.mode.is_some() {
             self.state = State::Ready;
         }
+    }
+
+    /// The message the core refused, once.
+    pub fn take_unsent(&mut self) -> Option<String> {
+        self.unsent.take()
     }
 
     /// Takes one event from the core. Returns the indices of the items that
@@ -200,6 +222,7 @@ impl Conversation {
             }
             Event::Mode(mode) => {
                 self.mode = Some(mode);
+                self.open();
                 Vec::new()
             }
             Event::Aborted(why) => self.end(format!("The session ended: {why}")),
@@ -279,12 +302,20 @@ impl Conversation {
     }
 
     /// The prompt turn finished, with its stop reason or an error.
-    pub fn turn_ended(&mut self, result: Result<String, String>) -> Vec<usize> {
+    pub fn turn_ended(&mut self, result: Result<String, Error>) -> Vec<usize> {
         if self.state != State::Busy {
             return Vec::new();
         }
         self.state = State::Ready;
         match result {
+            // A mode reset ran: nothing was sent. Not an error to show raw.
+            Err(Error::NotPinned) => {
+                self.unsent = self.items.iter().rev().find_map(|item| match item {
+                    Item::User(text) => Some(text.clone()),
+                    _ => None,
+                });
+                vec![self.push(Item::Notice(NOT_SENT.to_owned()))]
+            }
             Ok(reason) if reason == "cancelled" => {
                 vec![self.push(Item::Notice("Cancelled.".into()))]
             }
@@ -408,6 +439,7 @@ mod tests {
     fn ready() -> Conversation {
         let mut c = Conversation::new(Agent::Claude);
         c.started();
+        c.apply(Event::Mode("default".into()));
         c
     }
 
@@ -467,7 +499,8 @@ mod tests {
 
     #[test]
     fn the_mode_is_only_what_mode_events_say() {
-        let mut c = ready();
+        let mut c = Conversation::new(Agent::Claude);
+        c.started();
         assert_eq!(c.mode(), None);
         c.apply(Event::Mode("default".into()));
         assert_eq!(c.mode(), Some("default"));
@@ -645,14 +678,50 @@ mod tests {
         let mut c = Conversation::new(Agent::OpenCode);
         assert_eq!(c.send("hi"), None);
         c.started();
+        c.apply(Event::Mode("build".into()));
         assert_eq!(c.send("   "), None);
         assert_eq!(c.send("hi"), Some(0));
         assert_eq!(c.send("again"), None);
         assert_eq!(c.turn_ended(Ok("end_turn".into())), Vec::<usize>::new());
         assert_eq!(c.send("again"), Some(1));
-        assert_eq!(c.turn_ended(Err("NotPinned".into())), [2]);
+        assert_eq!(c.turn_ended(Err(Error::Closed)), [2]);
+        assert_eq!(
+            c.items()[2],
+            Item::Notice("The request failed: the agent closed the connection".into())
+        );
         c.failed("gone");
         assert_eq!(c.send("more"), None);
+    }
+
+    /// The core opens prompts when it confirms the first mode; until then they
+    /// would be refused, so the input stays off.
+    #[test]
+    fn the_input_waits_for_the_session_and_its_first_confirmed_mode() {
+        let mut c = Conversation::new(Agent::Claude);
+        c.started();
+        assert!(!c.can_send());
+        assert_eq!(c.send("hi"), None);
+        assert_eq!(*c.state(), State::Starting);
+        c.apply(Event::Mode("default".into()));
+        assert!(c.can_send());
+
+        let mut c = Conversation::new(Agent::OpenCode);
+        c.apply(Event::Mode("build".into()));
+        assert!(!c.can_send());
+        c.started();
+        assert!(c.can_send());
+    }
+
+    #[test]
+    fn a_refused_prompt_is_not_shown_raw_and_its_text_comes_back() {
+        let mut c = ready();
+        c.send("check the swap size").unwrap();
+        assert_eq!(c.turn_ended(Err(Error::NotPinned)), [1]);
+        assert_eq!(c.items()[1], Item::Notice(NOT_SENT.into()));
+        assert!(!NOT_SENT.contains("NotPinned"));
+        assert_eq!(c.take_unsent().as_deref(), Some("check the swap size"));
+        assert_eq!(c.take_unsent(), None);
+        assert!(c.can_send());
     }
 
     #[test]

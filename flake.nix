@@ -13,17 +13,18 @@
       forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
 
       mkVexosAi = pkgs: pkgs.callPackage ./nix/package.nix { };
+      mkVexosAiPanel = pkgs: pkgs.callPackage ./nix/panel.nix { };
     in
     {
       packages = forAllSystems (pkgs: rec {
         vexos-ai = mkVexosAi pkgs;
-        vexos-ai-panel = pkgs.callPackage ./nix/panel.nix { };
+        vexos-ai-panel = mkVexosAiPanel pkgs;
         default = vexos-ai;
       });
 
       overlays.default = final: _prev: { vexos-ai = mkVexosAi final; };
 
-      nixosModules.default = import ./nix/module.nix { inherit mkVexosAi; };
+      nixosModules.default = import ./nix/module.nix { inherit mkVexosAi mkVexosAiPanel; };
 
       devShells = forAllSystems (pkgs: {
         default = pkgs.mkShell {
@@ -127,6 +128,74 @@
           nativeBuildInputs = old.nativeBuildInputs ++ [ pkgs.clippy ];
           postCheck = "cargo clippy --offline --all-targets -p vexos-ai-panel -- -D warnings";
         });
+
+        # The module's panel contract: the panel comes with the AI feature, never
+        # without the managed policy or with untested agents, and it runs the
+        # pinned agents. Evaluates the module (stand-in agents, so nothing unfree
+        # is fetched) and builds the wrapped panel.
+        module = let
+          inherit (nixpkgs) lib;
+          stub = name: version: pkgs.runCommand "${name}-${version}" { inherit version; } ''
+            mkdir -p $out/bin && touch $out/bin/${name}
+          '';
+          agents = {
+            claudePackage = stub "claude" "2.1.300";
+            opencodePackage = stub "opencode" "1.19.0";
+            claudeAcpPackage = stub "claude-agent-acp" "0.88.0";
+          };
+          eval = settings: (nixpkgs.lib.nixosSystem {
+            inherit (pkgs.stdenv.hostPlatform) system;
+            modules = [
+              self.nixosModules.default
+              { boot.isContainer = true; system.stateVersion = "26.05"; programs.vexos-ai = agents; }
+              settings
+            ];
+          }).config;
+          failing = config: lib.concatMapStrings (a: a.message + "\n")
+            (lib.filter (a: !a.assertion && lib.hasInfix "programs.vexos-ai" a.message) config.assertions);
+          refused = fragment: settings: lib.hasInfix fragment (failing (eval settings));
+          panelOf = config: lib.findFirst (p: p.name == "vexos-ai-panel") null config.environment.systemPackages;
+          on = eval { programs.vexos-ai.enable = true; };
+          off = eval { };
+          panel = panelOf on;
+          cases = {
+            "the panel comes with the AI feature" = on.programs.vexos-ai.enablePanel && panel != null && failing on == "";
+            "no AI feature, no panel" = !off.programs.vexos-ai.enablePanel && panelOf off == null;
+            "the panel can be left out" = panelOf (eval { programs.vexos-ai = { enable = true; enablePanel = false; }; }) == null;
+            "no panel without the managed policy" =
+              refused "needs programs.vexos-ai.enable" { programs.vexos-ai.enablePanel = true; };
+            "no panel without Claude's policy file" = refused "Claude's managed policy" {
+              programs.vexos-ai.enable = true;
+              environment.etc."claude-code/managed-settings.d/50-vexos.json".enable = lib.mkForce false;
+            };
+            "no panel with a changed OpenCode policy" = refused "OpenCode's managed policy" {
+              programs.vexos-ai.enable = true;
+              environment.etc."opencode/opencode.json".text = lib.mkForce "{}";
+            };
+            "no panel with 26.05's claude-agent-acp" = refused "claudeAcpPackage is 0.36.1" {
+              programs.vexos-ai = { enable = true; claudeAcpPackage = lib.mkForce (stub "claude-agent-acp" "0.36.1"); };
+            };
+            "no panel with 26.05's opencode" = refused "opencodePackage is 1.15.10" {
+              programs.vexos-ai = { enable = true; opencodePackage = lib.mkForce (stub "opencode" "1.15.10"); };
+            };
+          };
+        in pkgs.runCommand "vexos-ai-module" { } ''
+          failed=0
+          ${lib.concatStrings (lib.mapAttrsToList (name: ok: ''
+            echo ${lib.escapeShellArg ((if ok then "ok   " else "FAIL ") + name)}
+            ${lib.optionalString (!ok) "failed=1"}
+          '') cases)}
+          ${lib.optionalString (panel != null) ''
+            grep -q '${agents.claudeAcpPackage}/bin' ${panel}/bin/vexos-ai-panel \
+              && grep -q '${agents.opencodePackage}/bin' ${panel}/bin/vexos-ai-panel \
+              && echo 'ok   the panel runs the pinned agents first on PATH' \
+              || { echo 'FAIL the panel runs the pinned agents first on PATH'; failed=1; }
+            test -f ${panel}/share/applications/io.github.victorytek.VexosAssistant.desktop \
+              && echo 'ok   the desktop entry is installed' \
+              || { echo 'FAIL the desktop entry is installed'; failed=1; }
+          ''}
+          [ "$failed" = 0 ] && touch $out
+        '';
       });
     };
 }

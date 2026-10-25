@@ -11,7 +11,7 @@ use std::sync::{Arc, OnceLock};
 
 use adw::prelude::*;
 use gtk::glib;
-use vexos_ai_core::{Agent, Config, Decision, Session};
+use vexos_ai_core::{Agent, Config, Decision, Error, Session};
 use vexos_ai_viewmodel::{
     Answer, ApprovalCard, Conversation, DiffLine, Item, Proposal, Rebuild, State, agent_label,
     mode_label,
@@ -239,11 +239,19 @@ impl Ui {
         let turn = runtime().spawn(async move { session.prompt(&text).await });
         let ui = self.clone();
         glib::spawn_future_local(async move {
-            let result = match turn.await {
-                Ok(result) => result.map_err(|e| e.to_string()),
-                Err(e) => Err(e.to_string()),
-            };
+            let result = turn
+                .await
+                .unwrap_or_else(|e| Err(Error::Protocol(e.to_string())));
             ui.with_conversation(|c| c.turn_ended(result));
+            // A refused message goes back in the input.
+            if let Some(text) = ui
+                .conversation
+                .borrow_mut()
+                .as_mut()
+                .and_then(|c| c.take_unsent())
+            {
+                ui.entry.set_text(&text);
+            }
         });
     }
 

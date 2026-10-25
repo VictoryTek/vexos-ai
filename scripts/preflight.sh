@@ -15,7 +15,7 @@ step() { printf '\n== %s\n' "$*"; }
 step "package (shellcheck runs here)"
 nix build --no-link "$flake"
 
-for check in policy contract core panel; do
+for check in policy contract core panel module; do
   step "checks.$system.$check"
   nix build --no-link -L "$flake#checks.$system.$check"
 done
