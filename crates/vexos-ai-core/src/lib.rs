@@ -2,9 +2,10 @@
 //! Protocol (ACP) and keeps the safety rules of `nix/policy.nix` true for every
 //! session it owns.
 //!
-//! - The mode is pinned (Claude `default`, OpenCode `build`) right after a
-//!   session starts and whenever the agent reports another one. A failed reset
-//!   aborts the session. There is no API to choose another mode or agent.
+//! - Every session starts in Claude `default` or OpenCode `build`. A mode
+//!   report outside the allow-list (Claude `default`/`plan`, OpenCode `build`),
+//!   or one that can't be read, resets it; a failed reset aborts the session.
+//!   There is no API to choose a mode or agent.
 //! - Only "approve once" and "deny once" ever reach the UI.
 //! - A permission request is approved only by an explicit [`Session::decide`].
 //!   Timeouts, cancels, a dropped session and a closed event stream deny.

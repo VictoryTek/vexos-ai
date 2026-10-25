@@ -323,3 +323,84 @@ OpenCode.
    than a system change, but the UI should show it.
 5. **UI note:** many `tool_call_update` events carry no title. The panel must
    merge updates by tool-call id.
+
+## Core hardening
+
+2026-10-24. Changes to `crates/vexos-ai-core` in response to the smoke-test
+findings, with no change to `nix/policy.nix`, `docs/contract.md` or CI.
+
+**Changes**
+
+- **Both report kinds are mode reports, for both agents.** `current_mode_update`
+  (`currentModeId`) and `config_option_update` (the `mode` option's
+  `currentValue`). Unreadable reports fail closed: a missing or non-string
+  `currentModeId`, `configOptions` that is not a list, or a `mode` option
+  with no string value all count as a disallowed mode and trigger a reset. A
+  `config_option_update` without a `mode` option (for example, a model
+  change) is not a mode report.
+- **The single pinned mode is now an allow-list.** Claude {`default`,
+  `plan`}; OpenCode {`build`}. Sessions start in `default`/`build`, and any
+  other mode resets to the start mode, so `auto` after `plan` goes to `default`.
+  There is still no API to choose a mode or agent.
+- **A reset only reopens prompts if no newer disallowed report arrived
+  meanwhile** (a report counter). Prompts stay `NotPinned` until the latest
+  reset is acknowledged; a failed reset aborts.
+
+**Tests:** 34 in total (3 unit, 31 fake-agent), 12 of them new, including the
+plan-exit options recorded live. Mutation check, each change reverted
+afterwards:
+
+| Mutation | Failing tests |
+|---|---|
+| config-option reports ignored | 6 |
+| malformed reports ignored | 1 (`unreadable_mode_reports_fail_closed`) |
+| no newer-report check | 1 (`an_older_reset_does_not_reopen_prompts_while_a_newer_one_runs`) |
+| `plan` not allowed | 1 (`claude_may_be_in_plan_mode`) |
+
+**Plan exit (item 3): PASS.** With the four options the adapter offers live,
+the filter keeps only `exit-plan-default` (Approve once) and `reject` (Deny
+once); both auto-mode options are dropped (`plan_exit_keeps_exit_to_default_and_keep_planning_only`).
+Allowing `plan` is what makes that request reachable now. Not re-run live
+after the allow-list change.
+
+**Persona route (item 4), live**, under the managed policy and the hardened
+core, every request denied. Persona file: `.claude/agents/yolo.md` with
+`permissionMode` in the frontmatter.
+
+| # | Route | Result | Evidence (`spike/acp/out/smoke/`) |
+|---|---|---|---|
+| P1 | `settings.local.json` `agent: yolo`, persona `acceptEdits` | **PASS**: not applied | session `agent=default mode=default`; `touch` asked, denied; no file |
+| P2 | shared `settings.json` `agent: yolo`, persona `acceptEdits` | **PASS**: not applied | same as P1 |
+| P3 | `settings.local.json` `agent: yolo`, persona `bypassPermissions` | **PASS**: not applied | same as P1 |
+| P5 | client selects `agent=yolo` (raw spike client; the core never does) | **PASS**: no effect on approvals | reply `agent=yolo mode=default`; no mode report; `touch` asked, denied |
+| **P4** | **model delegates to the project subagent `yolo` (`permissionMode: acceptEdits`) with its `Task` tool** | **FAIL: a route** | `Task` ran unasked; the subagent's `touch p4-bash.txt` and `Write p4-write.txt` both **completed with no permission request**; both files exist; no mode report, so the core saw nothing |
+| P4b | same subagent, `nixos-rebuild switch` | deny list holds | `Permission denied: Permission to use B…`; stub not called |
+| P4c | subagent with `bypassPermissions` | clamped | `touch` asked, denied |
+| P4d | P4 under a **sandbox-only** managed `ask` variant (`Write`, `NotebookEdit`, `Edit`, `Edit(//**)`, `Bash(mkdir\|touch\|rm\|rmdir\|mv\|cp\|sed *)`) | closed | `touch` and `Write` came as `[ApproveOnce, DenyOnce]`, denied; no files |
+
+**The route (P4), not fixed here.** Any `.claude/agents/*.md` with
+`permissionMode: acceptEdits` gives the model a subagent that edits files and
+runs filesystem commands without asking. That covers the project
+(`/etc/nixos/.claude/agents/`) and, by the same mechanism (untested),
+`~/.claude/agents/`. The deny list still applies, `bypassPermissions` is
+clamped, and the main thread is unaffected. Creating such a file is itself
+an edit, which asks. But a file already present (or written by the user)
+is enough. The core cannot see it: there is no mode report, and the
+subagent's actions never reach `request_permission`.
+
+**Proposed fixes (not applied):**
+
+1. **Policy (recommended):** add the P4d managed `ask` rules to
+   `nix/policy.nix`, with `checks.policy` assertions. Shown live to close P4
+   for `touch` and `Write`. It also closes R5 (a mid-session `acceptEdits`)
+   and the old ask-rule question. The cost: acceptEdits, and saved
+   "don't ask again" approvals, no longer skip prompts for those tools.
+   `Edit` itself (as opposed to `Write`) through a subagent was not exercised.
+2. **Core (defence in depth):** watch tool calls of kind `think` titled
+   `Task`/`Agent` whose subagent is not a built-in one, and abort the session
+   (or refuse the turn). This is reactive: by the time the core sees the
+   call, the subagent may already have acted. So it complements fix 1 and
+   does not replace it.
+3. **Research:** whether Claude Code has a managed setting that disables
+   filesystem subagents, or limits their `permissionMode`. Not researched in
+   this task.

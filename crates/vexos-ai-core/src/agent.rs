@@ -14,15 +14,27 @@ pub struct AgentCommand {
     pub env: &'static [(&'static str, &'static str)],
 }
 
-/// Claude's only mode: every action that needs approval asks.
-pub(crate) const CLAUDE_MODE: &str = "default";
-/// OpenCode's only agent: the built-in one the managed policy covers. Custom
-/// agents run their own rules and get around the managed denies.
-pub(crate) const OPENCODE_MODE: &str = "build";
-/// The ACP config option OpenCode exposes its agent choice through.
-pub(crate) const OPENCODE_MODE_OPTION: &str = "mode";
+/// The ACP config option both agents report their mode through (OpenCode: its
+/// agent choice).
+pub(crate) const MODE_OPTION: &str = "mode";
 
 impl Agent {
+    /// The mode every session starts in, and is reset to.
+    pub(crate) fn start_mode(self) -> &'static str {
+        self.allowed_modes()[0]
+    }
+
+    /// The modes a session may be in. Claude: `default` asks for every action
+    /// that needs approval; `plan` cannot edit at all. OpenCode: only `build`,
+    /// the built-in agent the managed policy covers; custom agents run their own
+    /// rules and get around the managed denies.
+    pub(crate) fn allowed_modes(self) -> &'static [&'static str] {
+        match self {
+            Agent::Claude => &["default", "plan"],
+            Agent::OpenCode => &["build"],
+        }
+    }
+
     pub fn command(self) -> AgentCommand {
         match self {
             // The adapter's draft v2 protocol may change; v1 is stable.

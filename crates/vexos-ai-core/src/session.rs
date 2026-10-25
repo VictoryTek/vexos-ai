@@ -14,7 +14,7 @@ use tokio::process::{Child, Command};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::timeout;
 
-use crate::agent::{Agent, CLAUDE_MODE, OPENCODE_MODE, OPENCODE_MODE_OPTION};
+use crate::agent::{Agent, MODE_OPTION};
 use crate::permission::{Decision, Options, PermissionRequest, cancelled};
 use crate::rpc::{Connection, Incoming, Reader, RpcError, Writer};
 
@@ -133,6 +133,9 @@ struct Inner {
     conn: Arc<Connection>,
     session_id: OnceLock<String>,
     pinned: AtomicBool,
+    /// Bumped by every disallowed mode report; a reset only re-allows prompts
+    /// if no newer report arrived while it ran.
+    mode_reports: AtomicU64,
     aborted: AtomicBool,
     pending: StdMutex<HashMap<u64, Pending>>,
     next_request: AtomicU64,
@@ -205,6 +208,7 @@ impl Session {
             conn: Connection::new(writer),
             session_id: OnceLock::new(),
             pinned: AtomicBool::new(false),
+            mode_reports: AtomicU64::new(0),
             aborted: AtomicBool::new(false),
             pending: StdMutex::new(HashMap::new()),
             next_request: AtomicU64::new(1),
@@ -346,28 +350,29 @@ impl Inner {
         Ok(())
     }
 
-    /// Sets the one allowed mode and checks that it took.
+    /// Sets the start mode and checks that it took.
     async fn pin(&self) -> Result<(), Error> {
         let sid = self.session_id();
+        let start = self.agent.start_mode();
         let failed = |e: Error| Error::ModePin(e.to_string());
         match self.agent {
             Agent::Claude => {
                 self.request(
                     "session/set_mode",
-                    json!({ "sessionId": sid, "modeId": CLAUDE_MODE }),
+                    json!({ "sessionId": sid, "modeId": start }),
                 )
                 .await
                 .map_err(failed)?;
             }
             Agent::OpenCode => {
-                let params = json!({ "sessionId": sid, "configId": OPENCODE_MODE_OPTION, "value": OPENCODE_MODE });
+                let params = json!({ "sessionId": sid, "configId": MODE_OPTION, "value": start });
                 let result = self
                     .request("session/set_config_option", params)
                     .await
                     .map_err(failed)?;
-                let mode = opencode_mode(&result["configOptions"]);
-                if mode != Some(OPENCODE_MODE) {
-                    return Err(Error::ModePin(format!("agent reports mode {mode:?}")));
+                let report = mode_report(&result["configOptions"]);
+                if report != ModeReport::Mode(start) {
+                    return Err(Error::ModePin(format!("agent reports {report:?}")));
                 }
             }
         }
@@ -416,32 +421,45 @@ impl Inner {
                     let _ = self.events.send(Event::ToolCall(call));
                 }
             }
-            Some("current_mode_update")
-                if self.agent == Agent::Claude
-                    && update["currentModeId"].as_str() != Some(CLAUDE_MODE) =>
-            {
-                self.repin()
+            // Both are mode reports, from either agent. A report that can't be
+            // read counts as a disallowed mode.
+            Some("current_mode_update") => {
+                let report = match update["currentModeId"].as_str() {
+                    Some(mode) => ModeReport::Mode(mode),
+                    None => ModeReport::Malformed,
+                };
+                self.on_mode_report(report)
             }
-            Some("config_option_update")
-                if self.agent == Agent::OpenCode
-                    && opencode_mode(&update["configOptions"])
-                        .is_some_and(|mode| mode != OPENCODE_MODE) =>
-            {
-                self.repin()
+            Some("config_option_update") => {
+                self.on_mode_report(mode_report(&update["configOptions"]))
             }
             _ => {}
         }
     }
 
-    /// The agent left the pinned mode mid-session: reset it, or abort.
+    fn on_mode_report(self: &Arc<Self>, report: ModeReport) {
+        match report {
+            ModeReport::NotReported => {}
+            ModeReport::Mode(mode) if self.agent.allowed_modes().contains(&mode) => {}
+            ModeReport::Mode(_) | ModeReport::Malformed => self.repin(),
+        }
+    }
+
+    /// The agent reported a disallowed mode: reset it to the start mode, or
+    /// abort. Prompts are refused until the reset holds.
     fn repin(self: &Arc<Self>) {
         self.pinned.store(false, Ordering::SeqCst);
+        let report = self.mode_reports.fetch_add(1, Ordering::SeqCst) + 1;
         let inner = self.clone();
         tokio::spawn(async move {
             match inner.pin().await {
-                Ok(()) if !inner.aborted.load(Ordering::SeqCst) => {
+                Ok(())
+                    if !inner.aborted.load(Ordering::SeqCst)
+                        && inner.mode_reports.load(Ordering::SeqCst) == report =>
+                {
                     inner.pinned.store(true, Ordering::SeqCst)
                 }
+                // A newer report's reset decides; or the session is gone.
                 Ok(()) => {}
                 Err(e) => inner.abort(e.to_string()).await,
             }
@@ -536,11 +554,28 @@ impl Inner {
     }
 }
 
-/// The current value of OpenCode's `mode` config option.
-fn opencode_mode(config_options: &Value) -> Option<&str> {
-    config_options
-        .as_array()?
+/// What a list of config options says about the mode.
+#[derive(Debug, PartialEq, Eq)]
+enum ModeReport<'a> {
+    /// The list has no `mode` option, so it is about something else.
+    NotReported,
+    Mode(&'a str),
+    /// No list, or a `mode` option without a readable value.
+    Malformed,
+}
+
+fn mode_report(config_options: &Value) -> ModeReport<'_> {
+    let Some(options) = config_options.as_array() else {
+        return ModeReport::Malformed;
+    };
+    match options
         .iter()
-        .find(|o| o["id"].as_str() == Some(OPENCODE_MODE_OPTION))?["currentValue"]
-        .as_str()
+        .find(|o| o["id"].as_str() == Some(MODE_OPTION))
+    {
+        None => ModeReport::NotReported,
+        Some(option) => match option["currentValue"].as_str() {
+            Some(mode) => ModeReport::Mode(mode),
+            None => ModeReport::Malformed,
+        },
+    }
 }

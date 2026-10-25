@@ -1,5 +1,6 @@
 //! The safety rules, driven against a fake ACP agent on an in-memory pipe.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -137,6 +138,36 @@ async fn claude() -> (Session, Events, Fake) {
     fake.reply(&set, json!({})).await;
     let (session, events) = start.await.unwrap().unwrap();
     (session, events, fake)
+}
+
+/// An OpenCode session that is up and pinned.
+async fn opencode() -> (Session, Events, Fake) {
+    let (start, mut fake) = begin(Agent::OpenCode, config());
+    handshake(
+        &mut fake,
+        json!({ "sessionId": "s1", "configOptions": opencode_options("build") }),
+    )
+    .await;
+    let set = fake.expect("session/set_config_option").await;
+    fake.reply(&set, json!({ "configOptions": opencode_options("build") }))
+        .await;
+    let (session, events) = start.await.unwrap().unwrap();
+    (session, events, fake)
+}
+
+/// Claude's mode as the adapter also reports it: a `mode` config option.
+fn claude_mode_option(current: &Value) -> Value {
+    json!([{ "id": "mode", "category": "mode", "currentValue": current },
+           { "id": "model", "category": "model", "currentValue": "opus" }])
+}
+
+/// The prompt goes straight out: no reset happened first.
+async fn prompt_goes_through(session: &Arc<Session>, fake: &mut Fake) {
+    let s = session.clone();
+    let prompt = tokio::spawn(async move { s.prompt("hi").await });
+    let p = fake.expect("session/prompt").await;
+    fake.reply(&p, json!({ "stopReason": "end_turn" })).await;
+    assert_eq!(prompt.await.unwrap().unwrap(), "end_turn");
 }
 
 async fn next_permission(events: &mut Events) -> vexos_ai_core::PermissionRequest {
@@ -285,7 +316,194 @@ async fn opencode_switching_to_a_custom_agent_mid_session_is_reset() {
     assert_eq!(set["params"]["value"], "build");
 }
 
+// 1b. Mode reports and the allow-list -----------------------------------------
+
+#[tokio::test]
+async fn claude_reporting_a_mode_through_the_config_option_is_reset() {
+    let (_session, _events, mut fake) = claude().await;
+    fake.update(json!({ "sessionUpdate": "config_option_update",
+                        "configOptions": claude_mode_option(&json!("acceptEdits")) }))
+        .await;
+    let set = fake.expect("session/set_mode").await;
+    assert_eq!(set["params"]["modeId"], "default");
+}
+
+#[tokio::test]
+async fn opencode_reporting_a_mode_through_current_mode_update_is_reset() {
+    let (_session, _events, mut fake) = opencode().await;
+    fake.update(json!({ "sessionUpdate": "current_mode_update", "currentModeId": "yolo" }))
+        .await;
+    let set = fake.expect("session/set_config_option").await;
+    assert_eq!(set["params"]["value"], "build");
+}
+
+#[tokio::test]
+async fn unreadable_mode_reports_fail_closed() {
+    let (_session, _events, mut fake) = claude().await;
+    for report in [
+        json!({ "sessionUpdate": "current_mode_update" }),
+        json!({ "sessionUpdate": "current_mode_update", "currentModeId": 7 }),
+        json!({ "sessionUpdate": "config_option_update" }),
+        json!({ "sessionUpdate": "config_option_update", "configOptions": "mode" }),
+        json!({ "sessionUpdate": "config_option_update", "configOptions": claude_mode_option(&json!(null)) }),
+    ] {
+        fake.update(report.clone()).await;
+        let set = fake.expect("session/set_mode").await;
+        assert_eq!(set["params"]["modeId"], "default", "after {report}");
+        fake.reply(&set, json!({})).await;
+    }
+}
+
+#[tokio::test]
+async fn config_updates_that_are_not_about_the_mode_are_ignored() {
+    let (session, _events, mut fake) = claude().await;
+    let session = Arc::new(session);
+    fake.update(json!({ "sessionUpdate": "config_option_update",
+                        "configOptions": [{ "id": "model", "currentValue": "haiku" }] }))
+        .await;
+    prompt_goes_through(&session, &mut fake).await;
+}
+
+#[tokio::test]
+async fn claude_may_be_in_plan_mode() {
+    let (session, _events, mut fake) = claude().await;
+    let session = Arc::new(session);
+    fake.update(json!({ "sessionUpdate": "current_mode_update", "currentModeId": "plan" }))
+        .await;
+    fake.update(json!({ "sessionUpdate": "config_option_update",
+                        "configOptions": claude_mode_option(&json!("plan")) }))
+        .await;
+    prompt_goes_through(&session, &mut fake).await;
+}
+
+#[tokio::test]
+async fn leaving_plan_for_auto_resets_to_default_not_plan() {
+    let (_session, _events, mut fake) = claude().await;
+    fake.update(json!({ "sessionUpdate": "current_mode_update", "currentModeId": "plan" }))
+        .await;
+    fake.update(json!({ "sessionUpdate": "current_mode_update", "currentModeId": "auto" }))
+        .await;
+    let set = fake.expect("session/set_mode").await;
+    assert_eq!(set["params"]["modeId"], "default");
+}
+
+#[tokio::test]
+async fn opencode_plan_is_not_allowed() {
+    let (_session, _events, mut fake) = opencode().await;
+    fake.update(json!({ "sessionUpdate": "config_option_update", "configOptions": opencode_options("plan") }))
+        .await;
+    let set = fake.expect("session/set_config_option").await;
+    assert_eq!(set["params"]["value"], "build");
+}
+
+#[tokio::test]
+async fn a_session_reported_in_plan_still_starts_in_default() {
+    let (start, mut fake) = begin(Agent::Claude, config());
+    handshake(&mut fake, claude_session("plan")).await;
+    let set = fake.expect("session/set_mode").await;
+    assert_eq!(set["params"]["modeId"], "default");
+    fake.reply(&set, json!({})).await;
+    start.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn prompts_are_refused_until_the_reset_is_acknowledged() {
+    let (session, _events, mut fake) = claude().await;
+    let session = Arc::new(session);
+    fake.update(json!({ "sessionUpdate": "config_option_update",
+                        "configOptions": claude_mode_option(&json!("acceptEdits")) }))
+        .await;
+    let set = fake.expect("session/set_mode").await;
+    assert_refused(&session).await;
+    fake.reply(&set, json!({})).await;
+    loop {
+        // The reply is handled on another task; wait for it to land.
+        let s = session.clone();
+        let prompt = tokio::spawn(async move { s.prompt("hi").await });
+        tokio::task::yield_now().await;
+        if prompt.is_finished() {
+            assert!(matches!(prompt.await.unwrap(), Err(Error::NotPinned)));
+            continue;
+        }
+        let p = fake.expect("session/prompt").await;
+        fake.reply(&p, json!({ "stopReason": "end_turn" })).await;
+        assert_eq!(prompt.await.unwrap().unwrap(), "end_turn");
+        break;
+    }
+}
+
+#[tokio::test]
+async fn an_older_reset_does_not_reopen_prompts_while_a_newer_one_runs() {
+    let (session, _events, mut fake) = claude().await;
+    fake.update(json!({ "sessionUpdate": "current_mode_update", "currentModeId": "acceptEdits" }))
+        .await;
+    let first = fake.expect("session/set_mode").await;
+    fake.update(json!({ "sessionUpdate": "current_mode_update", "currentModeId": "auto" }))
+        .await;
+    let second = fake.expect("session/set_mode").await;
+    fake.reply(&first, json!({})).await;
+    for _ in 0..50 {
+        tokio::task::yield_now().await;
+    }
+    assert_refused(&Arc::new(session)).await;
+    fake.reply(&second, json!({})).await;
+}
+
+/// The prompt is refused without being sent. A prompt that was sent would wait
+/// for an answer that never comes, so it fails on the timeout instead.
+async fn assert_refused(session: &Arc<Session>) {
+    let result = tokio::time::timeout(Duration::from_secs(5), session.prompt("hi")).await;
+    assert!(matches!(result, Ok(Err(Error::NotPinned))), "{result:?}");
+}
+
+#[tokio::test]
+async fn a_failed_reset_after_a_config_option_report_aborts() {
+    let (session, mut events, mut fake) = claude().await;
+    fake.update(json!({ "sessionUpdate": "config_option_update",
+                        "configOptions": claude_mode_option(&json!("bypassPermissions")) }))
+        .await;
+    let set = fake.expect("session/set_mode").await;
+    fake.fail(&set).await;
+    loop {
+        if let Event::Aborted(_) = events.recv().await.expect("events ended") {
+            break;
+        }
+    }
+    assert!(matches!(session.prompt("hi").await, Err(Error::Aborted)));
+}
+
 // 2. Options filter -------------------------------------------------------------
+
+/// The options claude-agent-acp 0.88.0 offered on plan exit, recorded live
+/// (`assistant_panel_spike_results.md`, "Core live smoke test", check 4).
+#[tokio::test]
+async fn plan_exit_keeps_exit_to_default_and_keep_planning_only() {
+    let (session, mut events, mut fake) = claude().await;
+    let options = json!([
+        { "kind": "allow_once", "name": "Yes, manually approve edits", "optionId": "exit-plan-default" },
+        { "kind": "allow_always", "name": "Yes, clear context (4% used) and use auto mode", "optionId": "exit-plan-clear-auto" },
+        { "kind": "allow_always", "name": "Yes, and use auto mode", "optionId": "exit-plan-auto" },
+        { "kind": "reject_once", "name": "No, keep planning", "optionId": "reject" },
+    ]);
+    for (rpc_id, decision, expected) in [
+        (20, Decision::ApproveOnce, "exit-plan-default"),
+        (21, Decision::DenyOnce, "reject"),
+    ] {
+        fake.send(json!({
+            "jsonrpc": "2.0", "id": rpc_id, "method": "session/request_permission",
+            "params": { "sessionId": "s1", "options": options,
+                        "toolCall": { "toolCallId": "t9", "title": "Approve Plan", "kind": "switch_mode" } },
+        }))
+        .await;
+        let request = next_permission(&mut events).await;
+        assert_eq!(request.choices, [Decision::ApproveOnce, Decision::DenyOnce]);
+        session.decide(request.id, decision).unwrap();
+        assert_eq!(
+            fake.answer(rpc_id).await,
+            json!({ "outcome": "selected", "optionId": expected })
+        );
+    }
+}
 
 #[tokio::test]
 async fn always_options_never_reach_the_ui_and_approve_means_once() {
