@@ -108,7 +108,11 @@ costs two backends, two permission mechanisms and two event models.
   `cancelled` when the turn is cancelled or the window closes.
 - The panel never sets a permission mode (no auto, no bypass, no accept-edits).
 - Applying stays with the user: the panel shows "Run `just rebuild`" as a
-  **user-clicked** button that opens a terminal; the agent cannot trigger it.
+  **user-clicked** button. After a confirmation dialog it runs the fixed
+  argv `just rebuild` in `/etc/nixos` in an embedded VTE terminal, with no
+  shell, so `sudo` can ask for the password there. Input is turned off when
+  it exits. The agent cannot trigger it, and its output never reaches the
+  conversation (decided 2026-10-25, `assistant_panel_app_spec.md`).
 - New checks (section 8): a unit test with a fake ACP agent proves the above;
   `checks.policy` continues to assert the managed files.
 

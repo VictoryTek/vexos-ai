@@ -432,6 +432,31 @@ async fn prompts_are_refused_until_the_reset_is_acknowledged() {
     }
 }
 
+/// The startup race: a disallowed report read right after the first reset's
+/// acknowledgement, before the session is handed out. The session must start
+/// refusing prompts until that report's own reset is acknowledged.
+#[tokio::test]
+async fn a_report_right_after_the_first_pin_keeps_prompts_refused_until_its_reset() {
+    let (start, mut fake) = begin(Agent::Claude, config());
+    handshake(&mut fake, claude_session("default")).await;
+    let first = fake.expect("session/set_mode").await;
+    // Both lines are read before the start task resumes.
+    fake.reply(&first, json!({})).await;
+    fake.update(json!({ "sessionUpdate": "current_mode_update", "currentModeId": "acceptEdits" }))
+        .await;
+    let second = fake.expect("session/set_mode").await;
+    assert_eq!(second["params"]["modeId"], "default");
+    let (session, _events) = start.await.unwrap().unwrap();
+    let session = Arc::new(session);
+    assert_refused(&session).await;
+
+    fake.reply(&second, json!({})).await;
+    for _ in 0..50 {
+        tokio::task::yield_now().await;
+    }
+    prompt_goes_through(&session, &mut fake).await;
+}
+
 #[tokio::test]
 async fn an_older_reset_does_not_reopen_prompts_while_a_newer_one_runs() {
     let (session, _events, mut fake) = claude().await;

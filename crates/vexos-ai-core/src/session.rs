@@ -359,10 +359,11 @@ impl Inner {
         let _ = self.session_id.set(id.to_owned());
         // Always reset, whatever the session reports: settings files can start
         // it in another mode or agent.
+        // A disallowed report during the pin starts its own reset; then that
+        // reset opens the session, and prompts are refused until it holds.
         let reports = self.mode_reports.load(Ordering::SeqCst);
         let ack = self.pin().await?;
-        self.pinned.store(true, Ordering::SeqCst);
-        self.show_pinned_mode(ack, reports);
+        self.pin_held(ack, reports);
         Ok(())
     }
 
@@ -480,15 +481,18 @@ impl Inner {
     }
 
     /// A pin was acknowledged at `ack`, and `reports` disallowed reports had
-    /// been seen when it began. Unless a newer one arrived since, show the start
-    /// mode, then any allowed report read after the acknowledgement.
-    fn show_pinned_mode(&self, ack: u64, reports: u64) {
+    /// been seen when it began. Unless a newer one arrived since, reopen
+    /// prompts, show the start mode, then any allowed report read after the
+    /// acknowledgement. Under the lock a disallowed report takes, so one can't
+    /// land between the check and the reopening.
+    fn pin_held(&self, ack: u64, reports: u64) {
         let mut view = self.mode_view.lock().unwrap();
         if self.aborted.load(Ordering::SeqCst)
             || self.mode_reports.load(Ordering::SeqCst) != reports
         {
             return;
         }
+        self.pinned.store(true, Ordering::SeqCst);
         view.confirmed = true;
         self.show_mode(self.agent.start_mode());
         if let Some((mode, at)) = view.deferred.take()
@@ -503,22 +507,16 @@ impl Inner {
     }
 
     /// The agent reported a disallowed mode: reset it to the start mode, or
-    /// abort. Prompts are refused until the reset holds.
+    /// abort. Prompts are refused until the reset holds. Called with the
+    /// `mode_view` lock held, which `pin_held` relies on.
     fn repin(self: &Arc<Self>) {
         self.pinned.store(false, Ordering::SeqCst);
         let report = self.mode_reports.fetch_add(1, Ordering::SeqCst) + 1;
         let inner = self.clone();
         tokio::spawn(async move {
             match inner.pin().await {
-                Ok(ack)
-                    if !inner.aborted.load(Ordering::SeqCst)
-                        && inner.mode_reports.load(Ordering::SeqCst) == report =>
-                {
-                    inner.pinned.store(true, Ordering::SeqCst);
-                    inner.show_pinned_mode(ack, report);
-                }
-                // A newer report's reset decides; or the session is gone.
-                Ok(_) => {}
+                // Unless a newer report's reset decides, or the session is gone.
+                Ok(ack) => inner.pin_held(ack, report),
                 Err(e) => inner.abort(e.to_string()).await,
             }
         });

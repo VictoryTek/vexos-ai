@@ -559,3 +559,63 @@ true, so a prompt could go out before that reset is acknowledged. The window
 is a few scheduler steps. The reset path already guards this with the report
 counter. The fix would apply the same check in `handshake`. The mode display
 is not affected: `Event::Mode` applies that check.
+
+## Handshake race fix
+
+2026-10-25. Deliberate safety change to `crates/vexos-ai-core`, approved by
+the user. It fixes the race recorded under "Core mode event". No change to
+`nix/policy.nix`, `docs/contract.md`, CI, or the panel and view-model crates.
+
+**The race.** `handshake` set `pinned` unconditionally once the first reset
+was acknowledged. Suppose the agent reported a disallowed mode after that
+acknowledgement but before the start task resumed. The report's reset was
+already running when `pinned` became true, so `Session::spawn` returned a
+session that sent prompts while the agent was in that mode. The mid-session
+reset had a narrower form of the same race: it checked the report counter
+and then set `pinned` as two steps, outside the lock that disallowed
+reports take.
+
+**Reproduced first.** New fake-agent test
+`a_report_right_after_the_first_pin_keeps_prompts_refused_until_its_reset`:
+the fake acknowledges the first `set_mode` and sends `current_mode_update
+acceptEdits` right after. The core reads both before the start task resumes
+(current-thread runtime). The test then prompts while the second reset is
+still unanswered. On the old code it failed 5 times out of 5 with
+`Err(Elapsed(()))`: the prompt was **sent** and waited, instead of being
+refused with `NotPinned`.
+
+**Fix.** A single `pin_held(ack, reports)` reopens prompts, under the
+`mode_view` lock. It sets `pinned` (and the confirmed mode) only if no
+disallowed report arrived since the reset began, and the session is not
+aborted. Both the first pin and every mid-session reset go through it.
+`repin` is called only with that lock held, so setting `pinned = false` and
+bumping the counter can't interleave with a reopen. The rule is the same at
+startup and mid-session: a session is open only when the latest mode report
+was answered by an acknowledged reset. A newer report keeps prompts at
+`NotPinned` until its own reset is acknowledged. A session can therefore
+start with prompts refused for one round trip.
+
+**Tests.** The suite has 3 unit and 41 fake-agent tests (1 new), all
+passing, and passed 10 runs in a row. Mutation check, each reverted after
+(`cmp` against a copy):
+
+| Mutation | Failing tests |
+|---|---|
+| start reopens unconditionally (the old code) | 1 (the new test) |
+| no newer-report check in `pin_held` | 4 |
+| reopen before the check | 2 |
+| start reads the report counter after the pin | 2 |
+
+The mid-session form (another runtime thread interleaving between the check
+and the store) has no test of its own. On a current-thread runtime, which
+is what the fake-agent tests use, the check and the store can't be split.
+It is covered by construction: both now happen under the lock that every
+disallowed report takes.
+
+**Checks** (run on the repository itself, all changed files tracked; exit 0
+for each): `cargo build --all-targets`, `cargo test` (core 3 + 41,
+view-model 29), `cargo clippy --all-targets -- -D warnings` and
+`cargo fmt --check` in the devShell. Also `nix build`, and
+`checks.x86_64-linux.{policy,contract,core,panel}`. `default`, `policy` and
+`contract` were also re-run with `--rebuild`, since their inputs are
+unchanged (contract 118/118). Then `scripts/preflight.sh`.
