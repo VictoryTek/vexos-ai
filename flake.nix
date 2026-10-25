@@ -17,6 +17,7 @@
     {
       packages = forAllSystems (pkgs: rec {
         vexos-ai = mkVexosAi pkgs;
+        vexos-ai-panel = pkgs.callPackage ./nix/panel.nix { };
         default = vexos-ai;
       });
 
@@ -26,7 +27,9 @@
 
       devShells = forAllSystems (pkgs: {
         default = pkgs.mkShell {
-          packages = with pkgs; [ shellcheck shfmt jq bats util-linux cargo rustc clippy rustfmt ];
+          packages = with pkgs; [ shellcheck shfmt jq bats util-linux cargo rustc clippy rustfmt pkg-config ];
+          # For crates/vexos-ai-panel.
+          buildInputs = with pkgs; [ gtk4 libadwaita vte-gtk4 ];
         };
       });
 
@@ -98,8 +101,12 @@
         '';
 
         # The ACP core (crates/vexos-ai-core): its safety tests against a fake
-        # agent, plus clippy. A library, so there is nothing to install.
-        core = pkgs.rustPlatform.buildRustPackage {
+        # agent, and the panel's view-model rules (crates/vexos-ai-viewmodel),
+        # plus clippy. Neither needs GTK or a display. Libraries, so there is
+        # nothing to install.
+        core = let
+          crates = [ "-p" "vexos-ai-core" "-p" "vexos-ai-viewmodel" ];
+        in pkgs.rustPlatform.buildRustPackage {
           pname = "vexos-ai-core";
           version = "0.1.0";
           src = pkgs.lib.fileset.toSource {
@@ -107,10 +114,19 @@
             fileset = pkgs.lib.fileset.unions [ ./Cargo.toml ./Cargo.lock ./crates ];
           };
           cargoLock.lockFile = ./Cargo.lock;
+          cargoBuildFlags = crates;
+          cargoTestFlags = crates;
           nativeBuildInputs = [ pkgs.clippy ];
-          postCheck = "cargo clippy --offline --all-targets -- -D warnings";
+          postCheck = "cargo clippy --offline --all-targets ${toString crates} -- -D warnings";
           installPhase = "touch $out";
         };
+
+        # The GTK window (crates/vexos-ai-panel) builds, and passes clippy. It
+        # has no tests: its rules are in the view-model, tested above.
+        panel = self.packages.${pkgs.stdenv.hostPlatform.system}.vexos-ai-panel.overrideAttrs (old: {
+          nativeBuildInputs = old.nativeBuildInputs ++ [ pkgs.clippy ];
+          postCheck = "cargo clippy --offline --all-targets -p vexos-ai-panel -- -D warnings";
+        });
       });
     };
 }

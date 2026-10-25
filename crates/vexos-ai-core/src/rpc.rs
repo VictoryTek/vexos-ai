@@ -40,10 +40,16 @@ pub(crate) enum Incoming {
     },
 }
 
+/// A result, and the position of the response among the messages read.
+type Response = Result<(Value, u64), RpcError>;
+
 pub(crate) struct Connection {
     writer: Mutex<Option<Writer>>,
-    pending: StdMutex<HashMap<u64, oneshot::Sender<Result<Value, RpcError>>>>,
+    pending: StdMutex<HashMap<u64, oneshot::Sender<Response>>>,
     next_id: AtomicU64,
+    /// Messages read so far, so callers can order a response against
+    /// notifications.
+    received: AtomicU64,
 }
 
 impl Connection {
@@ -52,6 +58,7 @@ impl Connection {
             writer: Mutex::new(Some(writer)),
             pending: StdMutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
+            received: AtomicU64::new(0),
         })
     }
 
@@ -67,7 +74,7 @@ impl Connection {
         writer.flush().await.map_err(|_| RpcError::Closed)
     }
 
-    pub(crate) async fn request(&self, method: &str, params: Value) -> Result<Value, RpcError> {
+    pub(crate) async fn request(&self, method: &str, params: Value) -> Response {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
         self.pending.lock().unwrap().insert(id, tx);
@@ -115,6 +122,12 @@ impl Connection {
         }
     }
 
+    /// The position of the message being handled, when called from
+    /// `on_incoming`.
+    pub(crate) fn received(&self) -> u64 {
+        self.received.load(Ordering::SeqCst)
+    }
+
     /// Reads until end of input. Responses resolve our requests; everything the
     /// agent starts goes to `on_incoming`. Lines that are not JSON are skipped.
     pub(crate) async fn read_loop(&self, reader: Reader, mut on_incoming: impl FnMut(Incoming)) {
@@ -123,6 +136,7 @@ impl Connection {
             let Ok(message) = serde_json::from_str::<Value>(&line) else {
                 continue;
             };
+            self.received.fetch_add(1, Ordering::SeqCst);
             let params = message.get("params").cloned().unwrap_or(Value::Null);
             match (
                 message.get("method").and_then(Value::as_str),
@@ -156,7 +170,10 @@ impl Connection {
                 code: error["code"].as_i64().unwrap_or(0),
                 message: error["message"].as_str().unwrap_or_default().to_owned(),
             }),
-            None => Ok(message.get("result").cloned().unwrap_or(Value::Null)),
+            None => Ok((
+                message.get("result").cloned().unwrap_or(Value::Null),
+                self.received(),
+            )),
         };
         let _ = tx.send(result);
     }

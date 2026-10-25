@@ -458,3 +458,104 @@ read-only `sed` asks too. Recorded in `docs/contract.md`.
 `docs/contract.md`. Not tested: `MultiEdit` and `NotebookEdit` (the model
 used `Write` and `Edit`), and commands behind wrappers (`timeout touch …`),
 which the docs say ask rules match.
+
+## Plan-exit live check
+
+2026-10-25. The re-check that "Core hardening" left open ("Not re-run live
+after the allow-list change"). Same harness: `examples/smoke.rs` through
+`smoke/run.sh`, inside `sandbox.sh`, `claude-agent-acp` 0.88.0 (claude-code
+2.1.300, default login). The managed files in `spike/acp/managed/` were
+re-rendered from the module first and are byte-identical to the current
+policy (with the subagent-route `ask` rules). Every request is denied unless
+its title matches an `--approve` substring. Same prompt as `c4`: enter plan
+mode, write a one-step plan to create `plan.txt`, present it with
+`ExitPlanMode`. Evidence in `spike/acp/out/smoke/` (gitignored).
+
+| Run | Approved | What reached the UI (`choices` after the filter) | Result |
+|---|---|---|---|
+| `p0-plan-exit` | `Approve Plan` only | 1. `Write ~/.claude/plans/gleaming-crafting-dawn.md` `[ApproveOnce, DenyOnce]`, denied. 2. `Approve Plan` `[ApproveOnce, DenyOnce]`, approved | Plan file not written. Mode `plan` → `default`. No `plan.txt` |
+| `p0b-plan-exit` | the plan-file `Write` and `Approve Plan` | 1. plan-file `Write`, approved. 2. `Approve Plan`, approved. 3. `Write plan.txt` `[ApproveOnce, DenyOnce]`, denied | Plan file written. Mode `plan` → `default`. `plan.txt` asked after the exit and was not created |
+
+Raw traffic (`p0b-plan-exit/{in,out}.jsonl`):
+
+- `EnterPlanMode` ran with no request (as in `c4`); the adapter sent
+  `current_mode_update plan` and `config_option_update mode=plan`. `plan` is
+  allowed now, so **the core sent no reset**: its only `session/set_mode` was
+  the initial pin.
+- The `Approve Plan` request offered `exit-plan-default` (`allow_once`, "Yes,
+  manually approve edits"), `exit-plan-clear-auto` and `exit-plan-auto` (both
+  `allow_always`), and `reject` (`reject_once`, "No, keep planning"). The core
+  answered `{"outcome":"selected","optionId":"exit-plan-default"}`. In
+  `p0-plan-exit` the adapter offered three options (no "clear context" one).
+- Right after the answer the adapter sent `current_mode_update default` and
+  `config_option_update mode=default`. **The resulting mode is `default`.**
+  Nothing reported `auto` or `acceptEdits`.
+- The request's `rawInput` carries the plan text (`plan`, `planFilePath`).
+  In `p0-plan-exit`, where the plan-file write was denied, it was `{}`.
+
+**Plan-exit works under the core.** No core problem found.
+
+What changed since `c4`, and what the user sees:
+
+1. **The plan file now asks.** The managed `Write` ask rule (subagent route
+   fix) also covers Claude Code's own plan file in `~/.claude/plans/`, which
+   `c4` wrote unasked. So a plan-first turn shows two cards: "Write
+   ~/.claude/plans/<name>.md" with the plan as the new content, then
+   "Approve Plan" ("Approve once" / "Deny once").
+2. **Denying the plan file breaks the flow.** The model sent `ExitPlanMode`
+   in the same batch as the write, before it saw the write fail. So the user
+   got an "Approve Plan" card with no plan. Approving it left plan mode with
+   nothing to carry out. The agent then said so ("You approved leaving plan
+   mode, not a plan") and stopped. The UI should show the plan from the
+   request's `rawInput.plan`, and an empty one as such.
+3. **After the exit, edits still ask.** `Write plan.txt` came as a request
+   in `default` and did not run when denied.
+
+Also probed (OpenCode, for the UI's diff view, `p0c-opencode-edit`): an
+`edit` request's `rawInput` is `{filepath, diff}` with a unified diff, and
+`content` has an ACP `diff` (`oldText`, `newText`). Denied; the file was
+unchanged.
+
+## Core mode event
+
+2026-10-25. Additive, for the panel's read-only mode display (the core
+had no API that reports the mode). Pinning, the allow-list, the options
+filter and deny-by-default are unchanged.
+
+- `Event::Mode(String)` is sent only for a mode the core has confirmed: after
+  the initial pin, after a reset that was acknowledged and is still the newest,
+  and for an allowed report while no reset runs. A disallowed or unreadable
+  report is never shown. An allowed report read while a reset runs is held,
+  and shown only if it came **after** the reset's acknowledgement in the
+  agent's output. Earlier ones were overtaken by the reset.
+- To order the two, the RPC reader counts the messages it reads, and a request
+  returns where its response came. Internal only.
+
+**Tests:** 9 new fake-agent tests (40 in all, plus 3 unit). Mutation check,
+each change reverted afterwards (`cmp` against a copy):
+
+| Mutation | Failing tests |
+|---|---|
+| no mode after the initial pin | 8 |
+| allowed report shown while a reset runs | 3 |
+| disallowed report shown | 7 |
+| held report shown whatever its position | 1 (`a_report_from_before_the_reset_took_is_not_shown`) |
+| no newest-reset check | 1 (`a_disallowed_report_during_the_first_pin_leaves_the_mode_to_its_reset`) |
+| no mode after an acknowledged reset | 5 |
+| held report never shown | 1 (`a_report_from_after_the_reset_took_is_shown_after_it`) |
+
+The suite passed 10 runs in a row.
+
+**Live** (`p0d-mode-events`, the plan flow above): the events were `default`,
+then `plan` twice, then `default` twice. Each report came twice because the
+adapter sends both report kinds. The adapter's `mode=default` report, sent
+before it acknowledged the initial `set_mode`, was not shown on its own.
+
+**Found, not fixed (pre-existing; a safety behaviour change, out of scope):**
+in `handshake`, `pinned` is set unconditionally after the first pin. If a
+disallowed report is read after that pin's acknowledgement but before the
+handshake task resumes, its reset is already running when `pinned` becomes
+true, so a prompt could go out before that reset is acknowledged. The window
+is a few scheduler steps. The reset path already guards this with the report
+counter. The fix would apply the same check in `handshake`. The mode display
+is not affected: `Event::Mode` applies that check.

@@ -104,6 +104,11 @@ pub struct ToolCall {
 pub enum Event {
     AgentText(String),
     ToolCall(ToolCall),
+    /// The mode the core has confirmed, for display only: after the initial
+    /// pin, after a reset that was acknowledged and is still the newest, and
+    /// for an allowed report while no reset runs (or read after the reset's
+    /// acknowledgement). Never for a disallowed or unreadable report.
+    Mode(String),
     /// Answer with [`Session::decide`]; unanswered, it is denied.
     Permission(PermissionRequest),
     /// The core ended the session, with the reason.
@@ -136,6 +141,7 @@ struct Inner {
     /// Bumped by every disallowed mode report; a reset only re-allows prompts
     /// if no newer report arrived while it ran.
     mode_reports: AtomicU64,
+    mode_view: StdMutex<ModeView>,
     aborted: AtomicBool,
     pending: StdMutex<HashMap<u64, Pending>>,
     next_request: AtomicU64,
@@ -209,6 +215,7 @@ impl Session {
             session_id: OnceLock::new(),
             pinned: AtomicBool::new(false),
             mode_reports: AtomicU64::new(0),
+            mode_view: StdMutex::new(ModeView::default()),
             aborted: AtomicBool::new(false),
             pending: StdMutex::new(HashMap::new()),
             next_request: AtomicU64::new(1),
@@ -246,7 +253,7 @@ impl Session {
             return Err(Error::NotPinned);
         }
         let params = json!({ "sessionId": inner.session_id(), "prompt": [{ "type": "text", "text": text }] });
-        let result = inner.conn.request("session/prompt", params).await?;
+        let (result, _) = inner.conn.request("session/prompt", params).await?;
         Ok(result["stopReason"].as_str().unwrap_or_default().to_owned())
     }
 
@@ -301,6 +308,13 @@ impl Inner {
     }
 
     async fn request(&self, method: &str, params: Value) -> Result<Value, Error> {
+        self.request_at(method, params)
+            .await
+            .map(|(result, _)| result)
+    }
+
+    /// The result, and where the response came among the agent's messages.
+    async fn request_at(&self, method: &str, params: Value) -> Result<(Value, u64), Error> {
         match timeout(
             self.config.request_timeout,
             self.conn.request(method, params),
@@ -345,38 +359,43 @@ impl Inner {
         let _ = self.session_id.set(id.to_owned());
         // Always reset, whatever the session reports: settings files can start
         // it in another mode or agent.
-        self.pin().await?;
+        let reports = self.mode_reports.load(Ordering::SeqCst);
+        let ack = self.pin().await?;
         self.pinned.store(true, Ordering::SeqCst);
+        self.show_pinned_mode(ack, reports);
         Ok(())
     }
 
-    /// Sets the start mode and checks that it took.
-    async fn pin(&self) -> Result<(), Error> {
+    /// Sets the start mode and checks that it took. Returns where the
+    /// acknowledgement came among the agent's messages.
+    async fn pin(&self) -> Result<u64, Error> {
         let sid = self.session_id();
         let start = self.agent.start_mode();
         let failed = |e: Error| Error::ModePin(e.to_string());
         match self.agent {
             Agent::Claude => {
-                self.request(
-                    "session/set_mode",
-                    json!({ "sessionId": sid, "modeId": start }),
-                )
-                .await
-                .map_err(failed)?;
+                let (_, ack) = self
+                    .request_at(
+                        "session/set_mode",
+                        json!({ "sessionId": sid, "modeId": start }),
+                    )
+                    .await
+                    .map_err(failed)?;
+                Ok(ack)
             }
             Agent::OpenCode => {
                 let params = json!({ "sessionId": sid, "configId": MODE_OPTION, "value": start });
-                let result = self
-                    .request("session/set_config_option", params)
+                let (result, ack) = self
+                    .request_at("session/set_config_option", params)
                     .await
                     .map_err(failed)?;
                 let report = mode_report(&result["configOptions"]);
                 if report != ModeReport::Mode(start) {
                     return Err(Error::ModePin(format!("agent reports {report:?}")));
                 }
+                Ok(ack)
             }
         }
-        Ok(())
     }
 
     fn on_incoming(self: &Arc<Self>, message: Incoming) {
@@ -438,11 +457,49 @@ impl Inner {
     }
 
     fn on_mode_report(self: &Arc<Self>, report: ModeReport) {
+        let at = self.conn.received();
+        let mut view = self.mode_view.lock().unwrap();
         match report {
             ModeReport::NotReported => {}
-            ModeReport::Mode(mode) if self.agent.allowed_modes().contains(&mode) => {}
-            ModeReport::Mode(_) | ModeReport::Malformed => self.repin(),
+            // Shown now, or once the running reset is acknowledged if it came
+            // after that.
+            ModeReport::Mode(mode) if self.agent.allowed_modes().contains(&mode) => {
+                if view.confirmed {
+                    self.show_mode(mode);
+                } else {
+                    view.deferred = Some((mode.to_owned(), at));
+                }
+            }
+            // Under the lock, so a reset finishing now can't show its mode.
+            ModeReport::Mode(_) | ModeReport::Malformed => {
+                view.confirmed = false;
+                view.deferred = None;
+                self.repin();
+            }
         }
+    }
+
+    /// A pin was acknowledged at `ack`, and `reports` disallowed reports had
+    /// been seen when it began. Unless a newer one arrived since, show the start
+    /// mode, then any allowed report read after the acknowledgement.
+    fn show_pinned_mode(&self, ack: u64, reports: u64) {
+        let mut view = self.mode_view.lock().unwrap();
+        if self.aborted.load(Ordering::SeqCst)
+            || self.mode_reports.load(Ordering::SeqCst) != reports
+        {
+            return;
+        }
+        view.confirmed = true;
+        self.show_mode(self.agent.start_mode());
+        if let Some((mode, at)) = view.deferred.take()
+            && at > ack
+        {
+            self.show_mode(&mode);
+        }
+    }
+
+    fn show_mode(&self, mode: &str) {
+        let _ = self.events.send(Event::Mode(mode.to_owned()));
     }
 
     /// The agent reported a disallowed mode: reset it to the start mode, or
@@ -453,14 +510,15 @@ impl Inner {
         let inner = self.clone();
         tokio::spawn(async move {
             match inner.pin().await {
-                Ok(())
+                Ok(ack)
                     if !inner.aborted.load(Ordering::SeqCst)
                         && inner.mode_reports.load(Ordering::SeqCst) == report =>
                 {
-                    inner.pinned.store(true, Ordering::SeqCst)
+                    inner.pinned.store(true, Ordering::SeqCst);
+                    inner.show_pinned_mode(ack, report);
                 }
                 // A newer report's reset decides; or the session is gone.
-                Ok(()) => {}
+                Ok(_) => {}
                 Err(e) => inner.abort(e.to_string()).await,
             }
         });
@@ -529,6 +587,7 @@ impl Inner {
             return;
         }
         self.pinned.store(false, Ordering::SeqCst);
+        self.mode_view.lock().unwrap().confirmed = false;
         for pending in self.take_pending() {
             let _ = self
                 .conn
@@ -549,9 +608,19 @@ impl Inner {
             return;
         }
         self.pinned.store(false, Ordering::SeqCst);
+        self.mode_view.lock().unwrap().confirmed = false;
         self.take_pending();
         let _ = self.events.send(Event::Closed);
     }
+}
+
+/// What the UI may be told about the mode.
+#[derive(Default)]
+struct ModeView {
+    /// The last pin holds and no disallowed report came since.
+    confirmed: bool,
+    /// An allowed report read while a pin was outstanding, and where it came.
+    deferred: Option<(String, u64)>,
 }
 
 /// What a list of config options says about the mode.

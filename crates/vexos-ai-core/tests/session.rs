@@ -472,6 +472,158 @@ async fn a_failed_reset_after_a_config_option_report_aborts() {
     assert!(matches!(session.prompt("hi").await, Err(Error::Aborted)));
 }
 
+// 1c. The mode shown to the UI ------------------------------------------------
+
+/// The modes the core has shown since the last call. A permission request is
+/// the barrier: the core reads the agent's messages in order, so everything it
+/// showed for earlier messages is queued before that request reaches the UI.
+async fn modes_shown(fake: &mut Fake, events: &mut Events, barrier: u64) -> Vec<String> {
+    fake.ask(barrier).await;
+    let mut modes = Vec::new();
+    loop {
+        match events.recv().await.expect("events ended") {
+            Event::Mode(mode) => modes.push(mode),
+            Event::Permission(_) => return modes,
+            _ => continue,
+        }
+    }
+}
+
+fn mode_update(mode: &str) -> Value {
+    json!({ "sessionUpdate": "current_mode_update", "currentModeId": mode })
+}
+
+#[tokio::test]
+async fn the_start_mode_is_shown_once_pinned() {
+    let (_session, mut events, mut fake) = claude().await;
+    assert_eq!(modes_shown(&mut fake, &mut events, 100).await, ["default"]);
+    let (_session, mut events, mut fake) = opencode().await;
+    assert_eq!(modes_shown(&mut fake, &mut events, 100).await, ["build"]);
+}
+
+#[tokio::test]
+async fn allowed_reports_are_shown() {
+    let (_session, mut events, mut fake) = claude().await;
+    fake.update(mode_update("plan")).await;
+    fake.update(json!({ "sessionUpdate": "config_option_update",
+                        "configOptions": claude_mode_option(&json!("default")) }))
+        .await;
+    assert_eq!(
+        modes_shown(&mut fake, &mut events, 100).await,
+        ["default", "plan", "default"]
+    );
+}
+
+#[tokio::test]
+async fn disallowed_and_unreadable_reports_are_never_shown() {
+    let (_session, mut events, mut fake) = claude().await;
+    assert_eq!(modes_shown(&mut fake, &mut events, 100).await, ["default"]);
+    for report in [
+        mode_update("acceptEdits"),
+        json!({ "sessionUpdate": "current_mode_update" }),
+        json!({ "sessionUpdate": "config_option_update", "configOptions": claude_mode_option(&json!("auto")) }),
+    ] {
+        fake.update(report).await;
+        let _unanswered = fake.expect("session/set_mode").await;
+    }
+    // An allowed report while those resets run waits for them.
+    fake.update(mode_update("plan")).await;
+    assert!(modes_shown(&mut fake, &mut events, 101).await.is_empty());
+}
+
+#[tokio::test]
+async fn an_acknowledged_reset_shows_the_start_mode() {
+    let (_session, mut events, mut fake) = opencode().await;
+    assert_eq!(modes_shown(&mut fake, &mut events, 100).await, ["build"]);
+    fake.update(json!({ "sessionUpdate": "config_option_update", "configOptions": opencode_options("yolo") }))
+        .await;
+    let set = fake.expect("session/set_config_option").await;
+    assert!(modes_shown(&mut fake, &mut events, 101).await.is_empty());
+    fake.reply(&set, json!({ "configOptions": opencode_options("build") }))
+        .await;
+    assert_eq!(modes_shown(&mut fake, &mut events, 102).await, ["build"]);
+}
+
+#[tokio::test]
+async fn a_report_from_before_the_reset_took_is_not_shown() {
+    let (_session, mut events, mut fake) = claude().await;
+    fake.update(mode_update("acceptEdits")).await;
+    let set = fake.expect("session/set_mode").await;
+    fake.update(mode_update("plan")).await;
+    fake.reply(&set, json!({})).await;
+    assert_eq!(
+        modes_shown(&mut fake, &mut events, 100).await,
+        ["default", "default"]
+    );
+}
+
+#[tokio::test]
+async fn a_report_from_after_the_reset_took_is_shown_after_it() {
+    let (_session, mut events, mut fake) = claude().await;
+    fake.update(mode_update("acceptEdits")).await;
+    let set = fake.expect("session/set_mode").await;
+    // Both lines are read before the reset's task wakes up.
+    fake.reply(&set, json!({})).await;
+    fake.update(mode_update("plan")).await;
+    assert_eq!(
+        modes_shown(&mut fake, &mut events, 100).await,
+        ["default", "default", "plan"]
+    );
+}
+
+#[tokio::test]
+async fn an_older_reset_shows_nothing_while_a_newer_one_runs() {
+    let (_session, mut events, mut fake) = claude().await;
+    assert_eq!(modes_shown(&mut fake, &mut events, 100).await, ["default"]);
+    fake.update(mode_update("acceptEdits")).await;
+    let first = fake.expect("session/set_mode").await;
+    fake.update(mode_update("auto")).await;
+    let second = fake.expect("session/set_mode").await;
+    fake.reply(&first, json!({})).await;
+    for _ in 0..50 {
+        tokio::task::yield_now().await;
+    }
+    assert!(modes_shown(&mut fake, &mut events, 101).await.is_empty());
+    fake.reply(&second, json!({})).await;
+    for _ in 0..50 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(modes_shown(&mut fake, &mut events, 102).await, ["default"]);
+}
+
+#[tokio::test]
+async fn a_disallowed_report_during_the_first_pin_leaves_the_mode_to_its_reset() {
+    let (start, mut fake) = begin(Agent::Claude, config());
+    handshake(&mut fake, claude_session("default")).await;
+    let first = fake.expect("session/set_mode").await;
+    fake.update(mode_update("acceptEdits")).await;
+    let second = fake.expect("session/set_mode").await;
+    fake.reply(&first, json!({})).await;
+    let (_session, mut events) = start.await.unwrap().unwrap();
+    assert!(modes_shown(&mut fake, &mut events, 100).await.is_empty());
+    fake.reply(&second, json!({})).await;
+    for _ in 0..50 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(modes_shown(&mut fake, &mut events, 101).await, ["default"]);
+}
+
+#[tokio::test]
+async fn a_failed_reset_shows_no_mode() {
+    let (_session, mut events, mut fake) = claude().await;
+    assert_eq!(modes_shown(&mut fake, &mut events, 100).await, ["default"]);
+    fake.update(mode_update("bypassPermissions")).await;
+    let set = fake.expect("session/set_mode").await;
+    fake.fail(&set).await;
+    loop {
+        match events.recv().await.expect("events ended") {
+            Event::Mode(mode) => panic!("showed {mode}"),
+            Event::Aborted(_) => break,
+            _ => continue,
+        }
+    }
+}
+
 // 2. Options filter -------------------------------------------------------------
 
 /// The options claude-agent-acp 0.88.0 offered on plan exit, recorded live

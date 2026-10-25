@@ -5,7 +5,8 @@
 //! - Every session starts in Claude `default` or OpenCode `build`. A mode
 //!   report outside the allow-list (Claude `default`/`plan`, OpenCode `build`),
 //!   or one that can't be read, resets it; a failed reset aborts the session.
-//!   There is no API to choose a mode or agent.
+//!   There is no API to choose a mode or agent; [`Event::Mode`] reports the
+//!   mode the core has confirmed, read-only.
 //! - Only "approve once" and "deny once" ever reach the UI.
 //! - A permission request is approved only by an explicit [`Session::decide`].
 //!   Timeouts, cancels, a dropped session and a closed event stream deny.

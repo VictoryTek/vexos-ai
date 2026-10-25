@@ -1,3 +1,3 @@
 [workspace]
-members = ["crates/vexos-ai-core"]
+members = ["crates/vexos-ai-core", "crates/vexos-ai-panel", "crates/vexos-ai-viewmodel"]
 resolver = "3"

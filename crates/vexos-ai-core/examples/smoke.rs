@@ -140,6 +140,7 @@ async fn main() {
                             emit(json!({ "decide_error": e.to_string() }));
                         }
                     }
+                    Event::Mode(mode) => emit(json!({ "mode": mode })),
                     Event::Aborted(why) => emit(json!({ "aborted": why })),
                     Event::Closed => emit(json!({ "closed": true })),
                 }
