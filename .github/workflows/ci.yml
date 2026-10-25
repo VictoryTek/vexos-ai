@@ -18,4 +18,5 @@ jobs:
       - name: Flake checks (safety policy)
         run: nix flake check
       - name: Evaluate NixOS module
-        run: nix eval .#nixosModules.default --apply 'm: builtins.typeOf m'
+        run: |
+          nix eval .#nixosModules.default --apply 'm: builtins.typeOf m'
