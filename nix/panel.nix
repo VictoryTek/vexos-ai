@@ -30,6 +30,17 @@ rustPlatform.buildRustPackage {
     })
   ];
 
+  # D-Bus activation: the Shell extension calls the `toggle` action by app id,
+  # which starts the panel if it is not running.
+  postInstall = ''
+    mkdir -p $out/share/dbus-1/services
+    cat > $out/share/dbus-1/services/io.github.victorytek.VexosAssistant.service <<EOF
+    [D-BUS Service]
+    Name=io.github.victorytek.VexosAssistant
+    Exec=$out/bin/vexos-ai-panel --gapplication-service
+    EOF
+  '';
+
   meta = {
     description = "VexOS assistant panel";
     license = lib.licenses.mit;

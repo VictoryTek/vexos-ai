@@ -721,3 +721,203 @@ by hand, read-only: the version parsing, against real store paths
   their inputs were unchanged and the store already had them (contract 118/118).
 - `scripts/preflight.sh`. Shellcheck of `scripts/verify-host.sh` and
   `scripts/preflight.sh`.
+
+## Extension
+
+2026-10-25. The thin GNOME Shell extension ("extension last" in
+`assistant_panel_spec.md`), GNOME Shell 50 only, and the small app-side change
+it needs. No change to `nix/policy.nix`, `crates/vexos-ai-core`,
+`docs/contract.md` or CI. Done under a scope rule: nothing was written outside
+the repo, except `/nix/store` and the build tools' own caches. The live
+session was never touched.
+
+### APIs checked (GNOME Shell 50.5 and Mutter 50.5, as installed)
+
+| API | Source | Finding |
+|---|---|---|
+| ESM layout, `metadata.json` | [gjs.guide anatomy](https://gjs.guide/extensions/overview/anatomy.html); [GNOME 50 port guide](https://gjs.guide/extensions/upgrading/gnome-shell-50.html) | `export default class … extends Extension`; required `uuid`, `name`, `description`, `shell-version`, `url`; optional `settings-schema`. GNOME 50 made no changes to metadata, `extension.js` or `prefs.js` |
+| `getSettings()` | Shell source `extensions/sharedInternals.js:92` | reads `<extension>/schemas/` when it exists, else the default schema source |
+| Quick Settings | [gjs.guide quick settings](https://gjs.guide/extensions/topics/quick-settings.html); Shell source `ui/quickSettings.js:43` (`QuickToggle`: `title`, `subtitle`, `icon-name`), `ui/panel.js:408` (`addExternalIndicator(indicator, colSpan)`) | `SystemIndicator` with `quickSettingsItems`; destroy the items in `destroy()` |
+| Keybinding | Shell source `ui/windowManager.js:1106-1116` | `addKeybinding(name, settings, flags, modes, handler)`, `removeKeybinding(name)`; Shell's own bindings use `Shell.ActionMode.NORMAL \| OVERVIEW`. gjs.guide has no keybinding page that I could find |
+| `Meta.Window` | `Meta-18.gir` (Mutter 50.5) | `move_frame`, `get_frame_rect`, `get_work_area_for_monitor`, `make_above`/`unmake_above`, `stick`/`unstick`, `get_gtk_application_id`, `get_transient_for`, `get_window_type`, `is_maximized`, `is_fullscreen`, `is_hidden`; signals `shown`, `unmanaging`; `Meta.Display::window-created` |
+| Easing | Shell `Clutter.Actor.ease`; GNOME 50 also adds `easeAsync()` | used `ease()` on `translation_y` |
+| Testing | [gjs.guide debugging](https://gjs.guide/extensions/development/debugging.html); [GNOME 49 port guide](https://gjs.guide/extensions/upgrading/gnome-shell-49.html) | `dbus-run-session gnome-shell --devkit --wayland` for 49 and later (`--nested` is gone with X11). `gnome-shell --help` also shows `--headless --virtual-monitor`, which was used here |
+
+Differences from older releases: GNOME 50 removed X11 (no `--nested`, and no
+X11 `wm_class` fallback in practice). GNOME 49 removed `Meta.Rectangle`
+(`Mtk.Rectangle`) and changed `maximize()`/`unmaximize()`. Not confirmed from
+docs, and found by testing instead: on Wayland a new window's app id is **not
+set yet** when `window-created` fires (see the live test).
+
+### App side (`crates/vexos-ai-panel`, `nix/panel.nix`)
+
+- It was single-instance (GtkApplication owns the D-Bus name), but every
+  `activate` built a new window **and a new session**. Now there is one window
+  per instance: `activate` presents it, and only after a real close does the
+  next open build a new one.
+- New action `toggle`, with **no parameter**: open, show or hide. The extension
+  calls it with `org.freedesktop.Application.ActivateAction("toggle", [], {})`.
+- **Hide keeps everything.** Hiding is `set_visible(false)`: no
+  `close-request`, so the session stays and a pending approval stays pending,
+  and is shown again when the window comes back. Only a real close ends the
+  session and denies what is pending, as before. The core's permission timeout
+  (deny after 600 s) still applies while the window is hidden. A request left
+  unanswered behind a hidden window is denied then, as it would be in a shown one.
+- The package ships `share/dbus-1/services/io.github.victorytek.VexosAssistant.service`
+  (`--gapplication-service`). The module rewrites it in the wrapped panel, so
+  D-Bus activation starts the panel with the pinned agents on `PATH`. It also adds
+  the panel to `services.dbus.packages`.
+- Test: `toggle` maps closed/hidden/shown to open/show/hide (2 of 2 mutations
+  caught). Hiding not touching the session is by construction (the hide path
+  calls only `set_visible(false)`). It has no runtime test, since no headless
+  GTK test exists here.
+
+### Extension (`extension/vexos-assistant@victorytek.github.io/`)
+
+- `metadata.json` (`shell-version: ["50"]`, `settings-schema`).
+- `extension.js`: a Quick Settings toggle "Assistant", plus the shortcut
+  `toggle-assistant`, default **`<Super>F12`**. Mutter, GNOME Shell and the WM
+  keybinding schemas leave it unbound by default (only `<Primary><Alt>F12`, a VT
+  switch). vexos-nix already uses `<Shift><Super>a` for the terminal launcher.
+  gnome-settings-daemon's media-keys defaults were not checked (its schemas
+  were not in the store), and neither were the user's own bindings.
+- Both only call `toggle`. The extension reads no conversation, answers
+  nothing, starts no agent and shows no mode. Its only knowledge is which
+  window is the app's main one: app id, normal type, no transient parent
+  (the app's rebuild terminal is left alone).
+- Placement: when the window is first shown, `get_frame_rect()` is read
+  once, then one `move_frame` to the top centre of its monitor's work area,
+  `make_above` and `stick`. Then the actor's `translation_y` is eased up from
+  above the screen edge. No position is read during or after the slide.
+  Maximized or fullscreen windows are not moved. Every window access is in
+  `try`.
+- `disable()`: removes the keybinding and the `window-created` handler,
+  disconnects per-window handlers, resets translation, undoes above and sticky,
+  cancels a pending D-Bus call, and destroys the indicator.
+
+### Packaging and module
+
+- `nix/extension.nix` installs `share/gnome-shell/extensions/<uuid>/`
+  and runs `glib-compile-schemas --strict`. The flake exposes it as
+  `packages.vexos-ai-panel-extension`.
+- `programs.vexos-ai.enablePanelExtension`, default
+  `enablePanel && services.desktopManager.gnome.enable`. Assertions: it needs
+  `enablePanel`, and its `metadata.json` must have the expected uuid and
+  `shell-version ["50"]`.
+- **The module never enables the extension** (no dconf, no
+  `enabled-extensions`). Each user enables it once:
+
+  ```sh
+  gnome-extensions enable vexos-assistant@victorytek.github.io
+  ```
+
+  (`assistant_panel_spec.md` section 7 planned adding the uuid to vexos-nix's
+  `extraExtensions`. That would enable it for every user, so it is left to
+  you.)
+
+### Checks
+
+- `checks.module` (18 ok):
+  - the panel is registered for D-Bus activation, and D-Bus activation starts
+    the wrapped panel;
+  - the extension comes with the panel on GNOME;
+  - no GNOME, no extension; no panel, no extension;
+  - no extension without the panel;
+  - the module never enables the extension (every dconf profile and the
+    GSettings overrides are searched for the uuid);
+  - the extension is installed with its compiled schema;
+  - plus the earlier panel cases.
+- `checks.extension` (new, also in `scripts/preflight.sh`), on the built package:
+  - `metadata.json` values (`jq`);
+  - exactly the expected files;
+  - `node --check extension.js` (a deliberately broken ESM file fails it,
+    exit 1);
+  - `gsettings --schemadir … list-keys` shows `toggle-assistant`.
+- The repo has no eslint config, so eslint was not run.
+
+Mutation check (a copy of the tree under `target/`, never the repo files), each
+change reverted:
+
+| Mutation | Caught by |
+|---|---|
+| extension default ignores GNOME | no GNOME, no extension |
+| no `enablePanel` assertion | no extension without the panel |
+| module sets `enabled-extensions` in dconf | the module never enables the extension |
+| shell-version assertion expects 49 | the extension comes with the panel on GNOME |
+| D-Bus service not rewritten | D-Bus activation starts the wrapped panel |
+| panel not in `services.dbus.packages` | the panel is registered for D-Bus activation |
+| schema not compiled | the extension is installed with its compiled schema |
+| `metadata.json` shell-version 49 | `checks.extension` |
+| broken `extension.js` | `checks.extension` |
+| shortcut key renamed in the gschema | `checks.extension` |
+
+### Live test: nested headless GNOME Shell 50.5
+
+How it was isolated:
+
+- `dbus-run-session gnome-shell --headless --wayland --no-x11
+  --virtual-monitor 1280x800`, so no window appeared in the user's session.
+- `env -i`, with `HOME`, every `XDG_*` directory, `XDG_RUNTIME_DIR` and
+  `TMPDIR` under `target/devkit/`; no `WAYLAND_DISPLAY`/`DISPLAY`.
+- A private session bus, and an empty private stand-in for the system bus.
+  GNOME Shell 50 refuses to start without a system bus: `TimeLimitsManager`,
+  `ui/main.js:261`.
+- A throwaway helper extension in `target/` set `unsafe_mode` inside that
+  shell, for `Eval` and `Screenshot` over the private bus.
+- The panel was D-Bus activated inside it and left on its agent-choice page,
+  so no agent started.
+
+The harness is in `target/devkit/` and not committed. Afterwards no process
+of it was left. The user's GNOME Shell (PID 1963) ran throughout (uptime
+6:53:15, unchanged).
+
+What was seen:
+
+1. Enable: state ACTIVE; tile "Assistant" in the menu; `toggle-assistant`
+   bound to `<Super>F12` with modes 3 (NORMAL | OVERVIEW).
+2. First run: the tile click **D-Bus-activated the panel**
+   (`--gapplication-service`), but placement did not run. On Wayland the
+   window's app id is not set yet at `window-created`, so it was not
+   recognised. **Fixed:** an unrecognised new window is decided at its first
+   `shown`.
+3. After the fix: the window was placed at x 260 (centred: (1280 − 760) / 2),
+   y 32 (the work area under the top bar), above and sticky. Tile checked.
+   Screenshot `target/devkit/shots/2-placed-desktop.png`.
+4. Hide (tile): the window was unmanaged, tile unchecked; **the panel process
+   kept running**. Show (tile): placed again, and the slide was measured as
+   `translation_y` −800 → −526 → 0 at 1, 60 and 400 ms, with the frame's y
+   at 32 throughout (one move; the animation is on the actor only).
+5. Disable with the window placed: above and sticky off, translation 0,
+   binding removed, tile gone. Re-enable: the open window is tracked and **not
+   moved**.
+6. No JS errors and no extension warnings in the shell log.
+
+### Not tested
+
+- **The real session**: none of this ran in it. A real login, the panel with
+  an agent, and an approval kept pending across hide and show were not
+  exercised. Pending-across-hide is by construction only.
+- **Pressing the shortcut**: the binding's registration was checked, not a key
+  press (no input in a headless shell). Conflicts with the user's own bindings
+  or gnome-settings-daemon's defaults are unknown.
+- **Multi-monitor** (one virtual monitor only), HiDPI, a tiled window, and the
+  Mutter segfault scenario (`move_resize_frame` is not used; `move_frame` is
+  called once).
+- The `--devkit` viewer (the headless mode was used instead), Hyprland and
+  COSMIC (the extension is GNOME only; the app stays a plain window without it).
+- `scripts/verify-host.sh` does not check the extension or the D-Bus service
+  file yet.
+
+### Checks run
+
+All ran on the repository's working tree; the nix checks ran on a copy at
+`target/tree`, since `extension/` and `nix/extension.nix` are untracked.
+Exit 0 for each:
+
+- In the devShell, on the repo: `cargo build --all-targets`, `cargo test`
+  (core 3 + 41, view-model 31, panel 1), `cargo clippy --all-targets -- -D
+  warnings`, `cargo fmt --check`.
+- `nix build`, and `checks.x86_64-linux.{policy,contract,core,panel,module,extension}`.
+  `default`, `policy` and `contract` were also re-run with `--rebuild`
+  (contract 118/118).
+- `scripts/preflight.sh path:target/tree`. Shellcheck of `scripts/preflight.sh`.

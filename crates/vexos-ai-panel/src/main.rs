@@ -10,7 +10,7 @@ use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 
 use adw::prelude::*;
-use gtk::glib;
+use gtk::{gio, glib};
 use vexos_ai_core::{Agent, Config, Decision, Error, Session};
 use vexos_ai_viewmodel::{
     Answer, ApprovalCard, Conversation, DiffLine, Item, Proposal, Rebuild, State, agent_label,
@@ -27,10 +27,68 @@ fn runtime() -> &'static tokio::runtime::Runtime {
     RUNTIME.get_or_init(|| tokio::runtime::Runtime::new().expect("start the tokio runtime"))
 }
 
+/// The one window of this instance, while it is open (shown or hidden).
+type Slot = Rc<RefCell<Option<Rc<Ui>>>>;
+
+/// What the `toggle` action does, given whether the window is open and shown.
+#[derive(Debug, PartialEq, Eq)]
+enum Toggle {
+    Open,
+    Show,
+    Hide,
+}
+
+fn toggle(window: Option<bool>) -> Toggle {
+    match window {
+        None => Toggle::Open,
+        Some(false) => Toggle::Show,
+        Some(true) => Toggle::Hide,
+    }
+}
+
 fn main() -> glib::ExitCode {
     let app = adw::Application::builder().application_id(APP_ID).build();
-    app.connect_activate(|app| Ui::build(app).window.present());
+    let slot = Slot::default();
+    app.connect_activate({
+        let slot = slot.clone();
+        move |app| window(app, &slot).window.present()
+    });
+    // For the Shell extension, over D-Bus (`org.freedesktop.Application`). It
+    // takes no parameter, so a caller can show or hide the window and nothing
+    // else. Hiding keeps the session and any pending approval as they are;
+    // only closing the window ends the session (and denies what is pending).
+    let toggle_action = gio::ActionEntry::builder("toggle")
+        .activate({
+            let slot = slot.clone();
+            move |app: &adw::Application, _, _| {
+                let shown = slot.borrow().as_ref().map(|ui| ui.window.is_visible());
+                match toggle(shown) {
+                    Toggle::Open | Toggle::Show => window(app, &slot).window.present(),
+                    Toggle::Hide => window(app, &slot).window.set_visible(false),
+                }
+            }
+        })
+        .build();
+    app.add_action_entries([toggle_action]);
     app.run()
+}
+
+/// The open window, or a new one with a new session after a close.
+fn window(app: &adw::Application, slot: &Slot) -> Rc<Ui> {
+    if let Some(ui) = slot.borrow().as_ref() {
+        return ui.clone();
+    }
+    let ui = Ui::build(app);
+    // Runs after the session's own close handler.
+    ui.window.connect_close_request({
+        let slot = slot.clone();
+        move |_| {
+            slot.borrow_mut().take();
+            glib::Propagation::Proceed
+        }
+    });
+    *slot.borrow_mut() = Some(ui.clone());
+    ui
 }
 
 struct Ui {
@@ -470,5 +528,17 @@ fn proposal(proposal: &Proposal) -> gtk::Widget {
             column.append(&view);
             column.upcast()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn toggle_opens_shows_or_hides_and_never_opens_a_second_window() {
+        assert_eq!(toggle(None), Toggle::Open);
+        assert_eq!(toggle(Some(false)), Toggle::Show);
+        assert_eq!(toggle(Some(true)), Toggle::Hide);
     }
 }

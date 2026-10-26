@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="org.gnome.shell.extensions.vexos-assistant"
+          path="/org/gnome/shell/extensions/vexos-assistant/">
+    <!-- Unbound by GNOME Shell, Mutter and the window manager by default;
+         Super+Shift+A is taken by vexos-nix's terminal launcher. -->
+    <key name="toggle-assistant" type="as">
+      <default><![CDATA[['<Super>F12']]]></default>
+      <summary>Show or hide the VexOS Assistant</summary>
+    </key>
+  </schema>
+</schemalist>

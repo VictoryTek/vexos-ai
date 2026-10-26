@@ -17,7 +17,10 @@
 #   - user services: crash watcher, usage timer, theme watcher, welcome
 #   - the assistant panel (vexos-ai-panel, a GTK window over ACP), only with
 #     the managed policy above and agents at least as new as the tested ones
-{ mkVexosAi, mkVexosAiPanel }:
+#   - on GNOME, the panel's Shell extension (tile and shortcut). Installed
+#     only: the module never enables it; each user runs
+#     `gnome-extensions enable vexos-assistant@victorytek.github.io` once
+{ mkVexosAi, mkVexosAiPanel, mkVexosAiExtension }:
 { config, lib, pkgs, ... }:
 let
   cfg = config.programs.vexos-ai;
@@ -36,11 +39,18 @@ let
     name = "vexos-ai-panel";
     paths = [ (mkVexosAiPanel pkgs) ];
     nativeBuildInputs = [ pkgs.makeWrapper ];
+    # D-Bus activation (the Shell extension) must start the wrapped panel too.
     postBuild = ''
       wrapProgram $out/bin/vexos-ai-panel \
         --prefix PATH : ${lib.makeBinPath [ cfg.claudeAcpPackage cfg.opencodePackage ]}
+      service=$out/share/dbus-1/services/io.github.victorytek.VexosAssistant.service
+      rm $service
+      printf '%s\n' '[D-BUS Service]' 'Name=io.github.victorytek.VexosAssistant' \
+        "Exec=$out/bin/vexos-ai-panel --gapplication-service" > $service
     '';
   };
+
+  extension = mkVexosAiExtension pkgs;
 
   # A managed policy file the panel relies on: installed, enabled, unchanged.
   managed = path: text:
@@ -99,6 +109,20 @@ in
         The ACP adapter the panel runs Claude Code through. The panel needs
         ${minimum.claudeAcp} or later; nixos-26.05 has 0.36.1, so vexos-nix
         passes the nixpkgs-unstable build.
+      '';
+    };
+
+    enablePanelExtension = lib.mkOption {
+      type = lib.types.bool;
+      default = cfg.enablePanel && config.services.desktopManager.gnome.enable;
+      defaultText = lib.literalExpression
+        "config.programs.vexos-ai.enablePanel && config.services.desktopManager.gnome.enable";
+      description = ''
+        Install the panel's GNOME Shell extension (${extension.extensionUuid}):
+        a Quick Settings tile and a shortcut that show or hide the panel.
+        This only installs it; the module never enables extensions. Each
+        user enables it once with
+        `gnome-extensions enable ${extension.extensionUuid}`.
       '';
     };
   };
@@ -183,6 +207,24 @@ in
     ];
 
     environment.systemPackages = [ cfg.claudeAcpPackage panel ];
+    services.dbus.packages = [ panel ];
+  })
+
+  # ── Panel extension (GNOME Shell) ──────────────────────────────────────────
+  (lib.mkIf cfg.enablePanelExtension {
+    assertions = [
+      {
+        assertion = cfg.enablePanel;
+        message = "programs.vexos-ai.enablePanelExtension needs programs.vexos-ai.enablePanel: the extension only shows or hides the panel.";
+      }
+      {
+        assertion = extension.metadata.uuid == extension.extensionUuid
+          && extension.metadata."shell-version" == [ "50" ];
+        message = "programs.vexos-ai: the panel extension's metadata.json must have uuid ${extension.extensionUuid} and shell-version [ \"50\" ].";
+      }
+    ];
+
+    environment.systemPackages = [ extension ];
   })
   ];
 }

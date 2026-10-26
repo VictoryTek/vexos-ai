@@ -1,0 +1,8 @@
+{
+  "uuid": "vexos-assistant@victorytek.github.io",
+  "name": "VexOS Assistant",
+  "description": "A Quick Settings tile and a shortcut (Super+F12) that show or hide the VexOS Assistant window and slide it down from the top of the screen. The assistant itself runs in its own app.",
+  "shell-version": ["50"],
+  "url": "https://github.com/VictoryTek/vexos-ai",
+  "settings-schema": "org.gnome.shell.extensions.vexos-assistant"
+}

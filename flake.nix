@@ -14,17 +14,19 @@
 
       mkVexosAi = pkgs: pkgs.callPackage ./nix/package.nix { };
       mkVexosAiPanel = pkgs: pkgs.callPackage ./nix/panel.nix { };
+      mkVexosAiExtension = pkgs: pkgs.callPackage ./nix/extension.nix { };
     in
     {
       packages = forAllSystems (pkgs: rec {
         vexos-ai = mkVexosAi pkgs;
         vexos-ai-panel = mkVexosAiPanel pkgs;
+        vexos-ai-panel-extension = mkVexosAiExtension pkgs;
         default = vexos-ai;
       });
 
       overlays.default = final: _prev: { vexos-ai = mkVexosAi final; };
 
-      nixosModules.default = import ./nix/module.nix { inherit mkVexosAi mkVexosAiPanel; };
+      nixosModules.default = import ./nix/module.nix { inherit mkVexosAi mkVexosAiPanel mkVexosAiExtension; };
 
       devShells = forAllSystems (pkgs: {
         default = pkgs.mkShell {
@@ -129,6 +131,23 @@
           postCheck = "cargo clippy --offline --all-targets -p vexos-ai-panel -- -D warnings";
         });
 
+        # The extension as built: metadata, layout, JS syntax, compiled schema.
+        extension = let
+          ext = self.packages.${pkgs.stdenv.hostPlatform.system}.vexos-ai-panel-extension;
+          dir = "${ext}/share/gnome-shell/extensions/${ext.extensionUuid}";
+        in pkgs.runCommand "vexos-ai-extension" { nativeBuildInputs = with pkgs; [ jq nodejs glib ]; } ''
+          set -e
+          jq -e '.uuid == "${ext.extensionUuid}" and ."shell-version" == ["50"]
+                 and ."settings-schema" == "org.gnome.shell.extensions.vexos-assistant"' ${dir}/metadata.json
+          # Exactly these files.
+          diff <(cd ${dir} && find . -type f | sort) <(printf '%s\n' ./extension.js ./metadata.json \
+            ./schemas/gschemas.compiled ./schemas/org.gnome.shell.extensions.vexos-assistant.gschema.xml)
+          node --check ${dir}/extension.js
+          gsettings --schemadir ${dir}/schemas list-keys org.gnome.shell.extensions.vexos-assistant \
+            | grep -qx toggle-assistant
+          touch $out
+        '';
+
         # The module's panel contract: the panel comes with the AI feature, never
         # without the managed policy or with untested agents, and it runs the
         # pinned agents. Evaluates the module (stand-in agents, so nothing unfree
@@ -158,7 +177,29 @@
           on = eval { programs.vexos-ai.enable = true; };
           off = eval { };
           panel = panelOf on;
+          extensionOf = config: lib.findFirst (p: (p.pname or "") == "gnome-shell-extension-vexos-assistant")
+            null config.environment.systemPackages;
+          gnome = eval { programs.vexos-ai.enable = true; services.desktopManager.gnome.enable = true; };
+          extension = extensionOf gnome;
+          uuid = "vexos-assistant@victorytek.github.io";
+          # Everything the module could enable the extension through.
+          enabling = config: lib.concatMapStrings
+              (profile: lib.concatMapStrings (db: builtins.toJSON (db.settings or { })) (profile.databases or [ ]))
+              (lib.attrValues config.programs.dconf.profiles)
+            + config.services.desktopManager.gnome.extraGSettingsOverrides;
           cases = {
+            "the panel is registered for D-Bus activation" = lib.elem panel on.services.dbus.packages;
+            "the extension comes with the panel on GNOME" =
+              gnome.programs.vexos-ai.enablePanelExtension && extension != null && failing gnome == "";
+            "no GNOME, no extension" = !on.programs.vexos-ai.enablePanelExtension && extensionOf on == null;
+            "no panel, no extension" = extensionOf (eval {
+              programs.vexos-ai = { enable = true; enablePanel = false; };
+              services.desktopManager.gnome.enable = true;
+            }) == null;
+            "no extension without the panel" = refused "enablePanelExtension needs" {
+              programs.vexos-ai = { enable = true; enablePanel = false; enablePanelExtension = true; };
+            };
+            "the module never enables the extension" = !lib.hasInfix uuid (enabling gnome);
             "the panel comes with the AI feature" = on.programs.vexos-ai.enablePanel && panel != null && failing on == "";
             "no AI feature, no panel" = !off.programs.vexos-ai.enablePanel && panelOf off == null;
             "the panel can be left out" = panelOf (eval { programs.vexos-ai = { enable = true; enablePanel = false; }; }) == null;
@@ -193,6 +234,15 @@
             test -f ${panel}/share/applications/io.github.victorytek.VexosAssistant.desktop \
               && echo 'ok   the desktop entry is installed' \
               || { echo 'FAIL the desktop entry is installed'; failed=1; }
+            grep -qx 'Exec=${panel}/bin/vexos-ai-panel --gapplication-service' \
+                ${panel}/share/dbus-1/services/io.github.victorytek.VexosAssistant.service \
+              && echo 'ok   D-Bus activation starts the wrapped panel' \
+              || { echo 'FAIL D-Bus activation starts the wrapped panel'; failed=1; }
+          ''}
+          ${lib.optionalString (extension != null) ''
+            test -f ${extension}/share/gnome-shell/extensions/${uuid}/schemas/gschemas.compiled \
+              && echo 'ok   the extension is installed with its compiled schema' \
+              || { echo 'FAIL the extension is installed with its compiled schema'; failed=1; }
           ''}
           [ "$failed" = 0 ] && touch $out
         '';
