@@ -733,6 +733,62 @@ async fn an_unanswered_request_is_denied_on_timeout() {
     );
 }
 
+/// The next event other than mode and tool updates, or `None` if nothing comes
+/// within twice the permission timeout.
+async fn next_answer_event(events: &mut Events) -> Option<Event> {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        loop {
+            match events.recv().await {
+                Some(Event::Mode(_) | Event::ToolCall(_)) => continue,
+                other => return other,
+            }
+        }
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_timed_out_request_is_reported_after_it_was_denied() {
+    let (_session, mut events, mut fake) = claude().await;
+    fake.ask(9).await;
+    let request = next_permission(&mut events).await;
+    assert_eq!(
+        fake.answer(9).await,
+        json!({ "outcome": "selected", "optionId": "no" })
+    );
+    assert!(matches!(
+        next_answer_event(&mut events).await,
+        Some(Event::TimedOut(id)) if id == request.id
+    ));
+}
+
+#[tokio::test(start_paused = true)]
+async fn answered_or_cancelled_requests_are_never_reported_timed_out() {
+    let (session, mut events, mut fake) = claude().await;
+    // Checked after each answer: `next_permission` skips other events.
+    for (rpc_id, decision, option) in [
+        (9, Decision::ApproveOnce, "yes"),
+        (10, Decision::DenyOnce, "no"),
+    ] {
+        fake.ask(rpc_id).await;
+        let request = next_permission(&mut events).await;
+        session.decide(request.id, decision).unwrap();
+        assert_eq!(
+            fake.answer(rpc_id).await,
+            json!({ "outcome": "selected", "optionId": option })
+        );
+        let stray = next_answer_event(&mut events).await;
+        assert!(stray.is_none(), "{decision:?}: {stray:?}");
+    }
+    fake.ask(11).await;
+    next_permission(&mut events).await;
+    session.cancel().await;
+    assert_eq!(fake.answer(11).await, json!({ "outcome": "cancelled" }));
+    assert!(next_answer_event(&mut events).await.is_none());
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_timeout_with_no_deny_option_cancels_rather_than_approves() {
     let (_session, mut events, mut fake) = claude().await;

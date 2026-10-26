@@ -141,6 +141,7 @@ async fn main() {
                         }
                     }
                     Event::Mode(mode) => emit(json!({ "mode": mode })),
+                    Event::TimedOut(id) => emit(json!({ "timed_out": id })),
                     Event::Aborted(why) => emit(json!({ "aborted": why })),
                     Event::Closed => emit(json!({ "closed": true })),
                 }

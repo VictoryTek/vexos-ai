@@ -14,7 +14,7 @@ use gtk::{gio, glib};
 use vexos_ai_core::{Agent, Config, Decision, Error, Session};
 use vexos_ai_viewmodel::{
     Answer, ApprovalCard, Conversation, DiffLine, Item, Proposal, Rebuild, State, agent_label,
-    mode_label,
+    markdown, mode_label,
 };
 
 const APP_ID: &str = "io.github.victorytek.VexosAssistant";
@@ -328,11 +328,7 @@ impl Ui {
         self.with_conversation(|c| {
             let _ = c.click(request, decision, &*session);
             // Redraw the card whatever happened: answered, or withdrawn.
-            c.items()
-                .iter()
-                .position(|item| matches!(item, Item::Approval(card) if card.request == request))
-                .into_iter()
-                .collect()
+            c.card_rows(request)
         });
     }
 
@@ -373,7 +369,7 @@ impl Ui {
 
     fn render(self: &Rc<Self>, index: usize) {
         let widget = match self.conversation.borrow().as_ref() {
-            Some(c) => self.widget(&c.items()[index]),
+            Some(c) => self.widget(c, &c.items()[index]),
             None => return,
         };
         let mut rows = self.rows.borrow_mut();
@@ -389,7 +385,7 @@ impl Ui {
         glib::idle_add_local_once(move || adjustment.set_value(adjustment.upper()));
     }
 
-    fn widget(self: &Rc<Self>, item: &Item) -> gtk::Widget {
+    fn widget(self: &Rc<Self>, c: &Conversation, item: &Item) -> gtk::Widget {
         match item {
             Item::User(text) => {
                 let label = text_label(text);
@@ -397,14 +393,14 @@ impl Ui {
                 label.add_css_class("heading");
                 label.upcast()
             }
-            Item::Agent(text) => text_label(text).upcast(),
+            Item::Agent(text) => reply(text).upcast(),
             Item::Tool(card) => {
                 let name = card
                     .title
                     .as_deref()
                     .or(card.kind.as_deref())
                     .unwrap_or(&card.id);
-                let status = card.status.as_deref().unwrap_or("pending");
+                let status = c.tool_status(card);
                 let label = text_label(&format!("{name} — {status}"));
                 label.add_css_class("dim-label");
                 label.add_css_class("caption");
@@ -447,6 +443,7 @@ impl Ui {
                 Answer::Denied => "Denied.",
                 Answer::Withdrawn => "No longer pending. Not approved.",
                 Answer::Closed => "Denied: the session closed.",
+                Answer::TimedOut => "Timed out, denied.",
             };
             let label = text_label(answer);
             label.add_css_class("dim-label");
@@ -478,6 +475,36 @@ fn text_label(text: &str) -> gtk::Label {
         .xalign(0.0)
         .selectable(true)
         .build()
+}
+
+/// An agent reply, formatted. Each run is inserted as literal text with a tag
+/// per style; nothing here is parsed as markup.
+fn reply(text: &str) -> gtk::TextView {
+    let view = gtk::TextView::builder()
+        .editable(false)
+        .cursor_visible(false)
+        .wrap_mode(gtk::WrapMode::WordChar)
+        .build();
+    let buffer = view.buffer();
+    buffer.create_tag(Some("bold"), &[("weight", &700)]);
+    buffer.create_tag(Some("italic"), &[("style", &gtk::pango::Style::Italic)]);
+    buffer.create_tag(Some("code"), &[("family", &"monospace")]);
+    buffer.create_tag(Some("heading"), &[("scale", &1.2)]);
+    for run in markdown(text) {
+        let style = run.style;
+        let tags: Vec<&str> = [
+            (style.bold, "bold"),
+            (style.italic, "italic"),
+            (style.code, "code"),
+            (style.heading, "heading"),
+        ]
+        .into_iter()
+        .filter_map(|(on, tag)| on.then_some(tag))
+        .collect();
+        let mut end = buffer.end_iter();
+        buffer.insert_with_tags_by_name(&mut end, &run.text, &tags);
+    }
+    view
 }
 
 fn monospace(text: &str) -> gtk::Label {

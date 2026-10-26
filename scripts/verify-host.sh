@@ -46,6 +46,10 @@ expected_policy() {
 check_policy() {
   local agent=$1 rel=$2 path=/etc/$2 item="managed policy $2"
   local resolved expected
+  if [ ! -f "$path" ] && [ -f "/etc/static/$rel" ]; then
+    fail "$item" "missing, but /etc/static/$rel exists: this shell may be sandboxed with its own /etc (run it from a normal login shell)"
+    return
+  fi
   if [ ! -f "$path" ]; then
     fail "$item" "not installed"
     return

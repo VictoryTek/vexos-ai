@@ -111,6 +111,9 @@ pub enum Event {
     Mode(String),
     /// Answer with [`Session::decide`]; unanswered, it is denied.
     Permission(PermissionRequest),
+    /// Permission request `id` went unanswered for `permission_timeout` and
+    /// was denied. Sent after the deny went out, for display only.
+    TimedOut(u64),
     /// The core ended the session, with the reason.
     Aborted(String),
     /// The agent closed the connection.
@@ -551,12 +554,12 @@ impl Inner {
             choices,
         };
         // Nobody to ask means deny; so does no answer in time.
-        let decision = match self.events.send(Event::Permission(request)) {
-            Ok(()) => timeout(self.config.permission_timeout, answer)
-                .await
-                .ok()
-                .and_then(Result::ok),
-            Err(_) => None,
+        let (decision, timed_out) = match self.events.send(Event::Permission(request)) {
+            Ok(()) => match timeout(self.config.permission_timeout, answer).await {
+                Ok(answer) => (answer.ok(), false),
+                Err(_) => (None, true),
+            },
+            Err(_) => (None, false),
         };
 
         // Whoever takes the entry answers it; abort and cancel may have already.
@@ -567,6 +570,9 @@ impl Inner {
             .and_then(|d| pending.options.outcome(d))
             .unwrap_or_else(|| pending.options.deny());
         let _ = self.conn.respond(pending.rpc_id, outcome).await;
+        if timed_out {
+            let _ = self.events.send(Event::TimedOut(id));
+        }
     }
 
     fn take_pending(&self) -> Vec<Pending> {

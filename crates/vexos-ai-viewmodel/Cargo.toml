@@ -7,5 +7,7 @@ license = "MIT"
 description = "VexOS assistant panel: what the window shows, without GTK"
 
 [dependencies]
+# No default features: no HTML renderer.
+pulldown-cmark = { version = "0.13", default-features = false }
 serde_json = "1"
 vexos-ai-core = { path = "../vexos-ai-core" }

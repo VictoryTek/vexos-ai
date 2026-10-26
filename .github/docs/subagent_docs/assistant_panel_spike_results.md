@@ -921,3 +921,120 @@ Exit 0 for each:
   `default`, `policy` and `contract` were also re-run with `--rebuild`
   (contract 118/118).
 - `scripts/preflight.sh path:target/tree`. Shellcheck of `scripts/preflight.sh`.
+
+## Panel polish
+
+2026-10-26. Markdown replies, "denied" wording, timed-out approvals, and a
+clearer `verify-host.sh` message. Spec: `panel_polish_spec.md`; review:
+`panel_polish_review.md` (a self-review, not independent). No change to
+`nix/policy.nix`, `docs/contract.md`, CI, or the core's pinning, allow-list,
+options filter or deny-by-default. Nothing was written outside the repo except
+`/nix/store`, the build tools' caches, and cargo's registry cache (cargo added
+`pulldown-cmark` to `Cargo.lock`).
+
+### 1. Markdown in agent replies
+
+- `crates/vexos-ai-viewmodel/src/markdown.rs` parses with `pulldown-cmark`
+  0.13 (`default-features = false`, no HTML renderer; Context7 checked for
+  `Event`/`Tag`/`TagEnd`). It returns literal text runs with a style (bold,
+  italic, code, heading). The window inserts each run into a `GtkTextBuffer`
+  with text tags. **No Pango markup is ever built**, so there is nothing to
+  escape.
+- Raw HTML (block and inline) is text. Images are `[image: alt] (target)`,
+  never loaded. Links are the text plus the real target in brackets, never
+  clickable (no click handling was added). List indent is capped at 8 levels.
+- Only agent replies use it. Approval cards (title, command, plan, diff) and
+  user messages stay literal; a test checks card text with markdown, markup and
+  a `javascript:` link is unchanged.
+- Tests for hostile input: HTML tags, `<span foreground=...>`, entities,
+  markup inside bold, `javascript:` and `file:` links, a link whose text
+  names another site, images, a 200,000-character line, an unterminated fence,
+  300 nested list levels.
+
+### 2. "denied" wording
+
+`Conversation::tool_status` shows `denied` for a `failed` tool call whose
+approval card (matched by tool-call id) was denied, timed out, cancelled or
+closed. A call whose card was approved, or that had no card, still says
+`failed`. **A managed-policy deny is not distinguishable:** it sends no
+permission request, and the agent's wording is in tool content the core does
+not pass up. It still says `failed`; nothing was guessed. Answering a card also
+redraws its tool card.
+
+### 3. Timed-out approvals
+
+The core had no signal for this, so one **purely additive** event was added:
+`Event::TimedOut(u64)`, sent by `on_permission` after the deny response went
+out, only when the timeout elapsed and that task took the pending entry. The
+response sent to the agent is unchanged. The view-model sets
+`Answer::TimedOut` (final, even over a late click) and the card shows "Timed
+out, denied." with no buttons. It is applied whether or not the window is
+hidden, since events are read regardless. Two fake-agent tests: one for the
+event, one that an approved, denied or cancelled request is never reported
+timed out.
+
+### 4. `scripts/verify-host.sh`
+
+When `/etc/<rel>` is missing but `/etc/static/<rel>` exists, it fails with
+"this shell may be sandboxed with its own /etc" instead of "not installed".
+Still read-only. Shellchecked (exit 0). **The script itself was not run.**
+
+### Mutation checks
+
+On a copy of the crates (`target/mut`, never the repo files), each change
+reverted. Baselines passed first. All 16 caught:
+
+| Mutation | Failing tests |
+|---|---|
+| raw HTML dropped | 3 |
+| link and image targets never shown | 2 |
+| every link hides its target | 1 |
+| image shows no target | 1 |
+| code block not monospace | 2 |
+| inline code not monospace | 1 |
+| no indent cap | 1 |
+| tool status ignores the answer | 1 |
+| an approved call says denied | 1 |
+| "denied" whatever the status | 1 |
+| card change does not redraw its tool | 1 |
+| timeout event ignored | 3 |
+| timeout only marks pending cards | 1 |
+| timeout shown as a plain deny | 2 |
+| core never reports a timeout | 1 |
+| core reports every answer as timed out | 1 |
+
+The first mutation run was invalid (test names hidden, one mutant did not
+compile) and was redone. The re-run also exposed a bug in one of my new core
+tests (its fake-agent timeout fired while it waited); fixed. Unmutated code
+passes everything.
+
+### Checks run
+
+WSL Ubuntu (Nix 2.34.1), exit codes of each command:
+
+- In the devShell, on the repo itself: `cargo build --all-targets` 0,
+  `cargo test` 0 (core 3 + 43, view-model 53, panel 1), `cargo clippy
+  --all-targets -- -D warnings` 0, `cargo fmt --all --check` 0.
+- **On a copy of the tree** (`target/tree-polish2`; the new files are
+  untracked and I did not stage them, since git writes are not allowed): `nix
+  build` 0; `checks.x86_64-linux.{policy,contract,core,panel,module,extension}`
+  each 0; `scripts/preflight.sh path:…/target/tree-polish2` 0. The copy was
+  compared with the repo file for file and matched.
+- `shellcheck scripts/verify-host.sh scripts/preflight.sh` 0.
+- Not run: `nix flake check` (forbidden), `scripts/verify-host.sh`, the panel,
+  any agent.
+
+### Not tested
+
+- **Real rendering on screen.** The GTK code compiled and passed clippy, and
+  the logic is unit-tested, but the window was never launched: how the text
+  tags look, spacing, selection and copying were not seen.
+- **Theme and dark mode.** Tags set weight, style, family and scale only, no
+  colours, so they should follow the theme, but this was not looked at. The
+  existing diff colours are unchanged.
+- **Long conversations.** A reply is re-parsed and its widget rebuilt on every
+  chunk; no timing or memory measurement was made.
+- **A real timeout while the window is hidden.** Covered by the fake-agent
+  event test and the view-model test, not by a 10-minute live run.
+- **A real policy deny** still says "failed" (see 2).
+- `verify-host.sh` on a real sandboxed shell.

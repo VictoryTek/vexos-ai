@@ -80,11 +80,15 @@ pub enum Answer {
     Withdrawn,
     /// Denied because the window or the session closed.
     Closed,
+    /// The core's timeout denied it: nobody answered in time.
+    TimedOut,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ApprovalCard {
     pub request: u64,
+    /// The tool call this request is about, when the agent said.
+    pub tool_call: Option<String>,
     pub title: String,
     pub proposal: Proposal,
     choices: Vec<Decision>,
@@ -95,6 +99,7 @@ impl ApprovalCard {
     fn new(request: PermissionRequest) -> Self {
         ApprovalCard {
             request: request.id,
+            tool_call: request.tool_call_id,
             proposal: Proposal::from_request(request.kind.as_deref(), &request.raw_input),
             title: request.title,
             choices: request.choices,
@@ -141,6 +146,8 @@ pub struct Conversation {
     items: Vec<Item>,
     tools: HashMap<String, usize>,
     cards: HashMap<u64, usize>,
+    /// The latest approval card for each tool call.
+    approvals: HashMap<String, usize>,
     /// A message the core refused to send, for the input to offer again.
     unsent: Option<String>,
 }
@@ -159,6 +166,7 @@ impl Conversation {
             items: Vec::new(),
             tools: HashMap::new(),
             cards: HashMap::new(),
+            approvals: HashMap::new(),
             unsent: None,
         }
     }
@@ -216,10 +224,15 @@ impl Conversation {
             Event::ToolCall(call) => vec![self.tool(call)],
             Event::Permission(request) => {
                 let id = request.id;
+                let tool_call = request.tool_call_id.clone();
                 let index = self.push(Item::Approval(ApprovalCard::new(request)));
                 self.cards.insert(id, index);
+                if let Some(tool_call) = tool_call {
+                    self.approvals.insert(tool_call, index);
+                }
                 vec![index]
             }
+            Event::TimedOut(request) => self.timed_out(request),
             Event::Mode(mode) => {
                 self.mode = Some(mode);
                 self.open();
@@ -257,7 +270,58 @@ impl Conversation {
         index
     }
 
-    /// Marks every pending card and returns their indices.
+    /// The status a tool card shows. A call that failed because its approval
+    /// was not given says "denied"; any other failure still says "failed". A
+    /// managed-policy deny sends no request, so it can't be told apart from a
+    /// failure and says "failed".
+    pub fn tool_status<'a>(&self, tool: &'a ToolCard) -> &'a str {
+        let status = tool.status.as_deref().unwrap_or("pending");
+        let not_approved = self.approvals.get(&tool.id).is_some_and(|&i| {
+            matches!(&self.items[i], Item::Approval(card)
+                if !matches!(card.answer, Answer::Pending | Answer::Approved))
+        });
+        if status == "failed" && not_approved {
+            "denied"
+        } else {
+            status
+        }
+    }
+
+    /// The items to redraw when request `request`'s card changes: the card,
+    /// and the tool card whose status depends on it.
+    pub fn card_rows(&self, request: u64) -> Vec<usize> {
+        self.cards
+            .get(&request)
+            .map(|&index| self.rows(index))
+            .unwrap_or_default()
+    }
+
+    fn rows(&self, card: usize) -> Vec<usize> {
+        let mut rows = vec![card];
+        if let Item::Approval(ApprovalCard {
+            tool_call: Some(id),
+            ..
+        }) = &self.items[card]
+            && let Some(&tool) = self.tools.get(id)
+        {
+            rows.push(tool);
+        }
+        rows
+    }
+
+    /// The core denied `request` on its timeout. That answer is final,
+    /// whatever a click said in the meantime.
+    fn timed_out(&mut self, request: u64) -> Vec<usize> {
+        let Some(&index) = self.cards.get(&request) else {
+            return Vec::new();
+        };
+        if let Item::Approval(card) = &mut self.items[index] {
+            card.answer = Answer::TimedOut;
+        }
+        self.rows(index)
+    }
+
+    /// Marks every pending card and returns the items to redraw.
     fn settle_pending(&mut self, answer: Answer) -> Vec<usize> {
         let mut changed: Vec<usize> = self
             .cards
@@ -273,7 +337,10 @@ impl Conversation {
                 card.answer = answer;
             }
         }
-        changed
+        let mut rows: Vec<usize> = changed.into_iter().flat_map(|i| self.rows(i)).collect();
+        rows.sort_unstable();
+        rows.dedup();
+        rows
     }
 
     /// The core denies or drops whatever is pending when a session ends.
@@ -669,6 +736,162 @@ mod tests {
             assert!(r.calls().is_empty());
             assert!(!c.can_send());
         }
+    }
+
+    // Denied, not failed -----------------------------------------------------------
+
+    fn tool_card(c: &Conversation, index: usize) -> &ToolCard {
+        match &c.items()[index] {
+            Item::Tool(card) => card,
+            other => panic!("not a tool card: {other:?}"),
+        }
+    }
+
+    /// A tool call `t1` asking for permission, answered by `answer`, then
+    /// reported `failed`: what its tool card says.
+    fn status_after(answer: impl FnOnce(&mut Conversation, &Recorder)) -> String {
+        let (mut c, r) = (ready(), Recorder::default());
+        c.apply(tool(
+            "t1",
+            Some("touch x"),
+            Some("execute"),
+            Some("pending"),
+        ));
+        c.apply(request(1, &BOTH));
+        answer(&mut c, &r);
+        c.apply(tool("t1", None, None, Some("failed")));
+        c.tool_status(tool_card(&c, 0)).to_owned()
+    }
+
+    #[test]
+    fn a_call_that_failed_after_its_approval_was_not_given_says_denied() {
+        let deny = |c: &mut Conversation, r: &Recorder| {
+            c.click(1, Decision::DenyOnce, r).unwrap();
+        };
+        assert_eq!(status_after(deny), "denied");
+        assert_eq!(
+            status_after(|c, _| {
+                c.apply(Event::TimedOut(1));
+            }),
+            "denied"
+        );
+        assert_eq!(
+            status_after(|c, _| {
+                c.cancelled();
+            }),
+            "denied"
+        );
+        assert_eq!(
+            status_after(|c, r| {
+                c.close(r);
+            }),
+            "denied"
+        );
+    }
+
+    #[test]
+    fn a_genuine_failure_still_says_failed() {
+        let approve = |c: &mut Conversation, r: &Recorder| {
+            c.click(1, Decision::ApproveOnce, r).unwrap();
+        };
+        assert_eq!(status_after(approve), "failed");
+        assert_eq!(status_after(|_, _| {}), "failed");
+
+        // No request at all, as with a managed-policy deny.
+        let mut c = ready();
+        c.apply(tool(
+            "t2",
+            Some("nixos-rebuild switch"),
+            None,
+            Some("failed"),
+        ));
+        assert_eq!(c.tool_status(tool_card(&c, 0)), "failed");
+        // A denied request about another call changes nothing here.
+        let r = Recorder::default();
+        c.apply(request(1, &BOTH));
+        c.click(1, Decision::DenyOnce, &r).unwrap();
+        assert_eq!(c.tool_status(tool_card(&c, 0)), "failed");
+    }
+
+    #[test]
+    fn other_statuses_are_shown_as_they_are() {
+        let (mut c, r) = (ready(), Recorder::default());
+        c.apply(tool("t1", None, None, None));
+        c.apply(request(1, &BOTH));
+        c.click(1, Decision::DenyOnce, &r).unwrap();
+        assert_eq!(c.tool_status(tool_card(&c, 0)), "pending");
+        c.apply(tool("t1", None, None, Some("completed")));
+        assert_eq!(c.tool_status(tool_card(&c, 0)), "completed");
+    }
+
+    #[test]
+    fn answering_a_card_also_redraws_its_tool_card() {
+        let (mut c, r) = (ready(), Recorder::default());
+        c.apply(tool("t1", None, None, Some("failed")));
+        c.apply(tool("t9", None, None, None));
+        c.apply(request(1, &BOTH));
+        c.apply(request(2, &BOTH));
+        assert_eq!(c.card_rows(1), [2, 0]);
+        assert_eq!(c.card_rows(7), Vec::<usize>::new());
+        assert_eq!(c.cancelled(), [0, 2, 3]);
+        assert_eq!(c.apply(Event::TimedOut(1)), [2, 0]);
+        c.click(2, Decision::DenyOnce, &r).unwrap_err();
+    }
+
+    // Timed out ---------------------------------------------------------------------
+
+    #[test]
+    fn a_request_the_core_timed_out_says_so_and_offers_nothing() {
+        let mut c = ready();
+        c.apply(request(1, &BOTH));
+        c.apply(request(2, &BOTH));
+        c.apply(Event::TimedOut(1));
+        assert_eq!(card(&c, 0).answer, Answer::TimedOut);
+        assert!(card(&c, 0).buttons().is_empty());
+        assert_eq!(card(&c, 1).answer, Answer::Pending);
+        let r = Recorder::default();
+        assert_eq!(
+            c.click(1, Decision::ApproveOnce, &r),
+            Err(ClickError::AlreadyAnswered)
+        );
+        assert!(r.calls().is_empty());
+    }
+
+    /// A click that reached the core after its timeout fired was not counted:
+    /// the core denied the request.
+    #[test]
+    fn a_timeout_overrides_a_click_that_came_too_late() {
+        let (mut c, r) = (ready(), Recorder::default());
+        c.apply(request(1, &BOTH));
+        c.click(1, Decision::ApproveOnce, &r).unwrap();
+        c.apply(Event::TimedOut(1));
+        assert_eq!(card(&c, 0).answer, Answer::TimedOut);
+    }
+
+    #[test]
+    fn a_timeout_for_an_unknown_request_changes_nothing() {
+        let mut c = ready();
+        c.apply(request(1, &BOTH));
+        assert_eq!(c.apply(Event::TimedOut(5)), Vec::<usize>::new());
+        assert_eq!(card(&c, 0).answer, Answer::Pending);
+    }
+
+    // Literal approval text ----------------------------------------------------------
+
+    #[test]
+    fn approval_text_is_kept_literal() {
+        let mut c = ready();
+        let command = "echo **x** <span foreground=\"red\">`y`</span> [a](javascript:z)";
+        c.apply(Event::Permission(PermissionRequest {
+            id: 1,
+            tool_call_id: None,
+            title: "# **title**".into(),
+            kind: Some("execute".into()),
+            raw_input: json!({ "command": command }),
+            choices: BOTH.to_vec(),
+        }));
+        assert_eq!(card(&c, 0).title, "# **title**");
+        assert_eq!(card(&c, 0).proposal, Proposal::Command(command.into()));
     }
 
     // Prompts -------------------------------------------------------------------
