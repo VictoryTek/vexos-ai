@@ -25,6 +25,8 @@ rustPlatform.buildRustPackage {
       comment = "Ask an AI assistant to change or troubleshoot this system";
       exec = "vexos-ai-panel";
       icon = "utilities-terminal";
+      # Reached from the quick settings toggle or a keybind, not the app grid.
+      noDisplay = true;
       categories = [ "System" "Utility" ];
       startupWMClass = "io.github.victorytek.VexosAssistant";
     })

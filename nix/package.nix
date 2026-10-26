@@ -31,6 +31,8 @@ let
     comment = "Ask an AI assistant to change or troubleshoot this system";
     exec = "vexos-ai";
     icon = "utilities-terminal";
+    # Reached from the quick settings toggle or a keybind, not the app grid.
+    noDisplay = true;
     categories = [ "System" "Utility" ];
     keywords = [ "AI" "Claude" "OpenCode" "assistant" "help" "diagnose" ];
     actions = {
