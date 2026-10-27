@@ -1,0 +1,54 @@
+# The portable crates (vexos-ai-core, vexos-ai-viewmodel) on Windows, to catch
+# Linux-only assumptions as they appear. Never the panel crate: GTK4,
+# libadwaita and VTE are Linux-only here. See
+# .github/docs/subagent_docs/platform_boundary_spec.md for the known failures.
+#
+# NON-BLOCKING ON PURPOSE. Windows is not a supported platform yet, and the
+# tests are expected to fail today (the fake-agent tests use a Unix-style
+# working directory). `continue-on-error: true` keeps the workflow run green
+# when this job fails, and it is a separate workflow so it never touches the
+# Linux CI in ci.yml. To make it required later: remove `continue-on-error`,
+# then add the "Windows (portable crates)" check to the branch protection rule
+# for main.
+
+name: Windows (portable crates)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  portable:
+    name: Windows (portable crates)
+    runs-on: windows-latest
+    continue-on-error: true
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v7
+      # The rustc nixpkgs nixos-26.05 ships (flake.lock), and the crates'
+      # rust-version.
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          components: clippy, rustfmt
+      - name: Build
+        run: |
+          cargo build --locked -p vexos-ai-core -p vexos-ai-viewmodel --all-targets
+      # Each later step runs even if an earlier one failed, so one run reports
+      # every failure.
+      - name: Test
+        if: ${{ !cancelled() }}
+        run: |
+          cargo test --locked -p vexos-ai-core -p vexos-ai-viewmodel
+      - name: Clippy
+        if: ${{ !cancelled() }}
+        run: |
+          cargo clippy --locked --all-targets -p vexos-ai-core -p vexos-ai-viewmodel -- -D warnings
+      - name: Rustfmt
+        if: ${{ !cancelled() }}
+        run: |
+          cargo fmt --check -p vexos-ai-core -p vexos-ai-viewmodel
