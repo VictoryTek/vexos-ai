@@ -8,7 +8,7 @@ mod rebuild;
 #[cfg(test)]
 mod scan_tests;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 
@@ -16,8 +16,8 @@ use adw::prelude::*;
 use gtk::{gdk, gio, glib};
 use vexos_ai_core::{Agent, Config, Decision, Error, Session};
 use vexos_ai_viewmodel::{
-    Answer, ApprovalCard, Conversation, DiffLine, HeldDraft, Item, Proposal, Rebuild, State,
-    agent_label, markdown, mode_label,
+    Answer, ApprovalCard, Composer, Conversation, DiffLine, Item, Offer, Outgoing, Placement,
+    Proposal, Rebuild, State, Via, agent_label, markdown, mode_label,
 };
 
 const APP_ID: &str = "io.github.victorytek.VexosAssistant";
@@ -112,12 +112,16 @@ struct Ui {
     session: RefCell<Option<Arc<Session>>>,
     rebuild: RefCell<Rebuild>,
     rebuild_view: RefCell<Option<rebuild::RebuildView>>,
-    /// A draft from a notification, until the conversation can take it.
-    held: RefCell<HeldDraft>,
+    /// What is in the input, and whether it is an unsent draft. The only
+    /// source of a message to send.
+    composer: RefCell<Composer>,
+    /// Set while the input is filled from `composer`, so the buffer's own
+    /// change signals are not taken for the user's edits.
+    syncing: Cell<bool>,
     /// On the agent-choice page: a draft is waiting.
     waiting: gtk::Label,
-    /// Above the input: the draft in it has not been sent.
-    draft_note: gtk::Label,
+    /// Above the input while it holds a draft: review, Send, or Discard.
+    banner: adw::Banner,
 }
 
 impl Ui {
@@ -192,16 +196,12 @@ impl Ui {
             .child(&input)
             .build();
         input_scroller.add_css_class("card");
-        let draft_note = gtk::Label::builder()
-            .label("Draft from a notification, not sent. Review it (the log is in the marked block), edit it if you like, then press Send.")
-            .wrap(true)
-            .xalign(0.0)
-            .margin_start(12)
-            .margin_end(12)
-            .visible(false)
+        // Until the draft is edited, Enter does not send it; the Send button does.
+        let banner = adw::Banner::builder()
+            .title("Draft from a notification: review it, then click Send")
+            .button_label("_Discard")
+            .revealed(false)
             .build();
-        draft_note.add_css_class("dim-label");
-        draft_note.add_css_class("caption");
         let send = gtk::Button::builder()
             .label("Send")
             .sensitive(false)
@@ -218,7 +218,7 @@ impl Ui {
         composer.append(&send);
         let chat = gtk::Box::new(gtk::Orientation::Vertical, 0);
         chat.append(&scroller);
-        chat.append(&draft_note);
+        chat.append(&banner);
         chat.append(&composer);
 
         let stack = gtk::Stack::new();
@@ -251,36 +251,59 @@ impl Ui {
             session: RefCell::new(None),
             rebuild: RefCell::new(Rebuild::default()),
             rebuild_view: RefCell::new(None),
-            held: RefCell::new(HeldDraft::default()),
+            composer: RefCell::new(Composer::default()),
+            syncing: Cell::new(false),
             waiting,
-            draft_note,
+            banner,
         });
 
         for (button, agent) in [(&claude, Agent::Claude), (&opencode, Agent::OpenCode)] {
             let ui = ui.clone();
             button.connect_clicked(move |_| ui.start(agent));
         }
-        let on_send = {
-            let ui = ui.clone();
-            move || ui.send_prompt()
-        };
         ui.send.connect_clicked({
-            let on_send = on_send.clone();
-            move |_| on_send()
+            let ui = ui.clone();
+            move |_| ui.submit(Via::SendButton)
         });
+        // Enter goes to the composer, which refuses it for a draft not yet
+        // reviewed. Either way it never inserts a line (that would count as
+        // an edit); Shift+Enter does.
         let keys = gtk::EventControllerKey::new();
         keys.set_propagation_phase(gtk::PropagationPhase::Capture);
-        keys.connect_key_pressed(move |_, key, _, modifiers| {
-            if matches!(key, gdk::Key::Return | gdk::Key::KP_Enter)
-                && !modifiers.contains(gdk::ModifierType::SHIFT_MASK)
-            {
-                on_send();
-                glib::Propagation::Stop
-            } else {
-                glib::Propagation::Proceed
+        keys.connect_key_pressed({
+            let ui = ui.clone();
+            move |_, key, _, modifiers| {
+                if matches!(key, gdk::Key::Return | gdk::Key::KP_Enter)
+                    && !modifiers.contains(gdk::ModifierType::SHIFT_MASK)
+                {
+                    ui.submit(Via::EnterKey);
+                    glib::Propagation::Stop
+                } else {
+                    glib::Propagation::Proceed
+                }
             }
         });
         ui.input.add_controller(keys);
+        ui.input.buffer().connect_changed({
+            let ui = ui.clone();
+            move |buffer| {
+                if ui.syncing.get() {
+                    return;
+                }
+                let text = buffer.text(&buffer.start_iter(), &buffer.end_iter(), false);
+                ui.composer.borrow_mut().edited(&text);
+                ui.refresh();
+            }
+        });
+        ui.banner.connect_button_clicked({
+            let ui = ui.clone();
+            move |_| {
+                if ui.composer.borrow_mut().discard() {
+                    ui.show_input();
+                }
+                ui.refresh();
+            }
+        });
         ui.cancel.connect_clicked({
             let ui = ui.clone();
             move |_| ui.cancel_turn()
@@ -345,33 +368,83 @@ impl Ui {
         self.refresh();
     }
 
-    fn input_text(&self) -> String {
-        let buffer = self.input.buffer();
-        buffer
-            .text(&buffer.start_iter(), &buffer.end_iter(), false)
-            .to_string()
+    /// Fills the input from the composer.
+    fn show_input(&self) {
+        let text = self.composer.borrow().text().to_owned();
+        self.syncing.set(true);
+        self.input.buffer().set_text(&text);
+        self.syncing.set(false);
     }
 
     /// A notification's draft: into the input when the conversation can
     /// take it, held until then. Never sent from here.
-    fn hold_draft(&self, draft: String) {
-        self.held.borrow_mut().hold(draft);
+    fn hold_draft(self: &Rc<Self>, draft: String) {
+        self.composer.borrow_mut().hold(draft);
         self.refresh();
     }
 
-    fn send_prompt(self: &Rc<Self>) {
-        let text = self.input_text();
-        let (Some(session), Some(index)) = (
-            self.session(),
-            self.conversation
+    /// The input has text and a draft arrived: replace, add below, or keep.
+    fn ask_placement(self: &Rc<Self>) {
+        let dialog = adw::AlertDialog::new(
+            Some("Use the draft from the notification?"),
+            Some(
+                "The input already has text. Replace it with the draft, add the draft below it, \
+                 or keep your text and drop the draft. Nothing is sent either way.",
+            ),
+        );
+        dialog.add_responses(&[
+            ("cancel", "_Keep My Text"),
+            ("append", "_Add Below"),
+            ("replace", "_Replace"),
+        ]);
+        dialog.set_default_response(Some("cancel"));
+        dialog.set_close_response("cancel");
+        let ui = self.clone();
+        glib::spawn_future_local(async move {
+            let placement = match dialog.choose_future(Some(&ui.window)).await.as_str() {
+                "replace" => Placement::Replace,
+                "append" => Placement::Append,
+                _ => Placement::Cancel,
+            };
+            if ui.composer.borrow_mut().resolve(placement) {
+                ui.show_input();
+            }
+            ui.refresh();
+        });
+    }
+
+    /// The Send button or Enter: the composer decides whether this sends.
+    fn submit(self: &Rc<Self>, via: Via) {
+        let can_send = self
+            .conversation
+            .borrow()
+            .as_ref()
+            .is_some_and(|c| c.can_send());
+        let out = self.composer.borrow_mut().submit(via, can_send);
+        if let Some(out) = out {
+            self.send_prompt(out);
+        }
+    }
+
+    /// The one place a prompt goes to the agent, with what the composer let
+    /// out.
+    fn send_prompt(self: &Rc<Self>, out: Outgoing) {
+        let index = match self.session() {
+            Some(_) => self
+                .conversation
                 .borrow_mut()
                 .as_mut()
-                .and_then(|c| c.send(&text)),
-        ) else {
+                .and_then(|c| c.send(&out)),
+            None => None,
+        };
+        let (Some(session), Some(index)) = (self.session(), index) else {
+            self.composer.borrow_mut().restore(out.into_text());
+            self.show_input();
+            self.refresh();
             return;
         };
-        self.input.buffer().set_text("");
-        self.draft_note.set_visible(false);
+        let text = out.into_text();
+        self.show_input();
         self.render(index);
         self.refresh();
         let turn = runtime().spawn(async move { session.prompt(&text).await });
@@ -380,16 +453,16 @@ impl Ui {
             let result = turn
                 .await
                 .unwrap_or_else(|e| Err(Error::Protocol(e.to_string())));
-            ui.with_conversation(|c| c.turn_ended(result));
-            // A refused message goes back in the input.
-            if let Some(text) = ui
-                .conversation
-                .borrow_mut()
-                .as_mut()
-                .and_then(|c| c.take_unsent())
-            {
-                ui.input.buffer().set_text(&text);
-            }
+            ui.with_conversation(|c| {
+                let changed = c.turn_ended(result);
+                // A refused message goes back in the input, before a waiting
+                // draft is offered.
+                if let Some(text) = c.take_unsent() {
+                    ui.composer.borrow_mut().restore(text);
+                    ui.show_input();
+                }
+                changed
+            });
         });
     }
 
@@ -423,23 +496,25 @@ impl Ui {
         drop(session);
     }
 
-    fn refresh(&self) {
+    fn refresh(self: &Rc<Self>) {
         self.rebuild_button.set_sensitive(matches!(
             *self.rebuild.borrow(),
             Rebuild::Idle | Rebuild::Finished(_)
         ));
         let conversation = self.conversation.borrow();
         self.waiting
-            .set_visible(conversation.is_none() && self.held.borrow().is_held());
+            .set_visible(conversation.is_none() && self.composer.borrow().waiting());
         let Some(c) = conversation.as_ref() else {
             return;
         };
-        // Replaces what is in the input. Focus is not moved to the input, so
-        // a stray Enter elsewhere does not send it.
-        if let Some(draft) = self.held.borrow_mut().release(c.can_send()) {
-            self.input.buffer().set_text(&draft);
-            self.draft_note.set_visible(true);
+        // Focus is not moved to the input.
+        let offer = self.composer.borrow_mut().offer(c.can_send());
+        match offer {
+            Offer::Placed => self.show_input(),
+            Offer::Ask => self.ask_placement(),
+            Offer::Nothing => {}
         }
+        self.banner.set_revealed(self.composer.borrow().banner());
         let state = match c.state() {
             State::Starting => "starting…".to_owned(),
             State::Ended(_) => "ended".to_owned(),

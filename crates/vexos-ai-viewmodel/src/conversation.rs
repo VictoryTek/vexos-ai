@@ -5,6 +5,7 @@ use std::fmt;
 
 use vexos_ai_core::{Agent, Decision, Error, Event, PermissionRequest, Session, ToolCall};
 
+use crate::composer::Outgoing;
 use crate::proposal::Proposal;
 
 /// Where a click's answer goes. [`Session`] in the app; a recorder in tests.
@@ -360,12 +361,13 @@ impl Conversation {
     }
 
     /// The user sent a message. The caller sends the prompt only on `Some`.
-    pub fn send(&mut self, text: &str) -> Option<usize> {
-        if !self.can_send() || text.trim().is_empty() {
+    /// Only [`crate::Composer::submit`] makes an [`Outgoing`].
+    pub fn send(&mut self, out: &Outgoing) -> Option<usize> {
+        if !self.can_send() || out.text().trim().is_empty() {
             return None;
         }
         self.state = State::Busy;
-        Some(self.push(Item::User(text.to_owned())))
+        Some(self.push(Item::User(out.text().to_owned())))
     }
 
     /// The prompt turn finished, with its stop reason or an error.
@@ -899,21 +901,21 @@ mod tests {
     #[test]
     fn one_prompt_at_a_time_and_only_while_ready() {
         let mut c = Conversation::new(Agent::OpenCode);
-        assert_eq!(c.send("hi"), None);
+        assert_eq!(c.send(&Outgoing("hi".into())), None);
         c.started();
         c.apply(Event::Mode("build".into()));
-        assert_eq!(c.send("   "), None);
-        assert_eq!(c.send("hi"), Some(0));
-        assert_eq!(c.send("again"), None);
+        assert_eq!(c.send(&Outgoing("   ".into())), None);
+        assert_eq!(c.send(&Outgoing("hi".into())), Some(0));
+        assert_eq!(c.send(&Outgoing("again".into())), None);
         assert_eq!(c.turn_ended(Ok("end_turn".into())), Vec::<usize>::new());
-        assert_eq!(c.send("again"), Some(1));
+        assert_eq!(c.send(&Outgoing("again".into())), Some(1));
         assert_eq!(c.turn_ended(Err(Error::Closed)), [2]);
         assert_eq!(
             c.items()[2],
             Item::Notice("The request failed: the agent closed the connection".into())
         );
         c.failed("gone");
-        assert_eq!(c.send("more"), None);
+        assert_eq!(c.send(&Outgoing("more".into())), None);
     }
 
     /// The core opens prompts when it confirms the first mode; until then they
@@ -923,7 +925,7 @@ mod tests {
         let mut c = Conversation::new(Agent::Claude);
         c.started();
         assert!(!c.can_send());
-        assert_eq!(c.send("hi"), None);
+        assert_eq!(c.send(&Outgoing("hi".into())), None);
         assert_eq!(*c.state(), State::Starting);
         c.apply(Event::Mode("default".into()));
         assert!(c.can_send());
@@ -938,7 +940,7 @@ mod tests {
     #[test]
     fn a_refused_prompt_is_not_shown_raw_and_its_text_comes_back() {
         let mut c = ready();
-        c.send("check the swap size").unwrap();
+        c.send(&Outgoing("check the swap size".into())).unwrap();
         assert_eq!(c.turn_ended(Err(Error::NotPinned)), [1]);
         assert_eq!(c.items()[1], Item::Notice(NOT_SENT.into()));
         assert!(!NOT_SENT.contains("NotPinned"));

@@ -427,27 +427,6 @@ pub fn draft(subject: &Subject, log: &Log) -> String {
     out
 }
 
-/// A draft waiting for a session that can take it. It only ever becomes
-/// input text.
-#[derive(Debug, Default)]
-pub struct HeldDraft(Option<String>);
-
-impl HeldDraft {
-    /// A newer draft replaces one still waiting.
-    pub fn hold(&mut self, draft: String) {
-        self.0 = Some(draft);
-    }
-
-    pub fn is_held(&self) -> bool {
-        self.0.is_some()
-    }
-
-    /// The draft for the input, once the conversation can send.
-    pub fn release(&mut self, can_send: bool) -> Option<String> {
-        if can_send { self.0.take() } else { None }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -791,21 +770,5 @@ END UNTRUSTED LOG OUTPUT";
             coredump_log(true, b"PID: 7 (app)\nSignal: 11 (SEGV)\n", b""),
             Log::Collected(_)
         ));
-    }
-
-    // Held, never sent.
-
-    #[test]
-    fn a_held_draft_waits_and_only_becomes_input() {
-        let mut held = HeldDraft::default();
-        assert_eq!(held.release(true), None);
-        held.hold("first".into());
-        held.hold("second".into());
-        assert!(held.is_held());
-        assert_eq!(held.release(false), None);
-        assert!(held.is_held());
-        assert_eq!(held.release(true), Some("second".into()));
-        assert!(!held.is_held());
-        assert_eq!(held.release(true), None);
     }
 }

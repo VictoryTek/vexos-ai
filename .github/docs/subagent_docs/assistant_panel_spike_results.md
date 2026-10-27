@@ -1283,3 +1283,170 @@ VexOS Desktop 26.05, kernel 7.3.0, Nix 2.34.9. Exit codes:
   module's wrapper puts the pinned agents first; the system tools come from the
   session's `PATH`.
 - User units (`systemctl --user --failed`) are not watched.
+
+## Draft flow hardening
+
+2026-10-26. This tightens the notification draft flow, following
+`notifications_review.md` findings 1 and 2. Review: `draft_flow_review.md`
+(**a self-review, not independent, not approved**). No change to
+`nix/policy.nix`, `docs/contract.md`, CI, the extension,
+`crates/vexos-ai-core`, `nix/module.nix` or `nix/panel.nix`. Nothing was
+written outside the repo except `/nix/store` and the build tools' caches.
+`Cargo.lock` is unchanged. This supersedes the "Composer" part of
+"Notifications" above.
+
+### 1. A draft needs an explicit click
+
+`crates/vexos-ai-viewmodel/src/composer.rs` (headless) now owns the input:
+its text, and a draft's review state (`Pending`, `Edited`, or none).
+
+- **Enter on a pending draft does nothing.** The key is consumed, so it
+  doesn't insert a line either, which would count as an edit. Only the
+  **Send** button sends it.
+- **Once the user edits it**, Enter sends again as before, but it is still a
+  draft. The banner stays until it is sent or discarded. Edits include typing,
+  pasting and Shift+Enter. Echoes of the panel's own `set_text` are not edits:
+  a `syncing` guard covers the buffer's intermediate "changed" signals, and the
+  composer ignores a change to identical text.
+- **Banner** (`adw::Banner`) above the input: "Draft from a notification:
+  review it, then click Send", with a **Discard** button. It is revealed exactly
+  while a draft is in the input, and cleared when the draft is sent, discarded,
+  or the input is emptied by hand.
+- **Discard** removes the draft. If the draft had been added below the
+  user's text, that text comes back as it was, draft state included.
+
+### 2. A draft never silently replaces text
+
+When a draft reaches the input (only once the conversation can send) and the
+input has non-blank text, nothing is placed. An `adw::AlertDialog` asks:
+**Keep My Text** (default and Escape), **Add Below**, or **Replace**. "Nothing
+is sent either way." A draft already in the input counts as text. A newer
+draft that arrives while the question is open replaces the one asked about.
+Nothing can be sent while it is open. A message the core refused goes back
+into the input before any waiting draft is offered; text already there is
+kept below it.
+
+### 3. `DBusActivatable`: not needed, not changed
+
+Checked in the GNOME 50 sources:
+
+- `js/ui/notificationDaemon.js`: a `GtkNotificationDaemonAppSource` needs
+  `Gio.Application.id_is_valid(appId)` and
+  `Shell.AppSystem.lookup_app("<appId>.desktop")`. An `app.` action is
+  activated with `Shell.App.activate_action(...)`.
+- `src/shell-app.c`: `shell_app_activate_action` calls
+  `org.freedesktop.Application.ActivateAction` on the bus name = app id, at
+  the derived object path, with `G_DBUS_CALL_FLAGS_NONE`, so D-Bus may
+  auto-start the app. **`DBusActivatable` is not read** in this file, nor in
+  the notification daemon. There is no fallback to the desktop file's `Exec`.
+- `src/shell-app-system.c` and `src/shell-app-cache.c`: `lookup_app` comes
+  from a cache of `g_app_info_get_all()`, unfiltered. GIO's documentation for
+  `g_app_info_get_all` says it "includes applications that have NoDisplay=true
+  set". So the panel's `NoDisplay=true` entry is still found.
+- GIO `g_application_send_notification`: the app "will be D-Bus-activated when
+  the notification or one of its actions is activated".
+
+So a click reaches a running panel, and starts one that is not running,
+through the existing D-Bus service file. The desktop file only has to exist
+under the app id. `DBusActivatable=true` would change how *launchers* start
+the app; clicks don't need it, so it was **not added**.
+
+What clicks do depend on is now asserted: `checks.module` has a new case, "notification
+clicks reach the panel: its bus name is its desktop id". The wrapped panel's
+service `Name=` must be `io.github.victorytek.VexosAssistant`,
+`share/applications/<that>.desktop` must exist, and it must not be
+`Hidden=true`. Module: 19 ok (was 18).
+
+### 4. A stronger "never sent automatically" check
+
+- **The gate is now in the view-model and type-enforced.**
+  `Composer::submit(Via, can_send)` is the only maker of an `Outgoing`, whose
+  field is crate-private, so the panel cannot build one.
+  `Conversation::send` takes `&Outgoing` instead of `&str`, so no user message
+  exists that didn't come out of `submit`. `submit` refuses Enter on a pending
+  draft, and anything while the replace/append question is open. Holding,
+  offering, resolving, editing, discarding and restoring never produce one;
+  the test `nothing_but_submit_makes_a_message` covers this.
+- In the panel, `send_prompt` now takes an `Outgoing` and prompts with its
+  text. `submit` (Send button and Enter only) is its only caller.
+- **What is still a source scan, and why:** the core's `Session::prompt(&str)`
+  is public and takes any text (the core is not changed here), and the GTK
+  signal wiring cannot run headless. `scan_tests.rs` checks that:
+  - the code has one `.prompt(` call, in `send_prompt(self, out: Outgoing)`,
+    with `out.into_text()`;
+  - `send_prompt` is called only from `submit`, with what the composer let
+    out;
+  - `submit` is called only with `Via::SendButton` and `Via::EnterKey`;
+  - `hold_draft`, `ask_placement` and `show_input` never submit or prompt;
+  - the notification and rebuild code never mention `submit`, `Via::`,
+    `Outgoing`, `send_prompt`, `.prompt(` or a session.
+
+### Tests and mutation checks
+
+View-model 97 (was 84: the `HeldDraft` test was removed and 14 composer
+tests added), panel 3, core 3 + 43. The composer tests cover:
+
+- a pending draft: Enter does nothing, Send sends, Discard clears;
+- an edited draft: it keeps the banner until sent, and Enter sends it;
+- echoes are not edits;
+- clearing the input ends the draft;
+- typed text works as before;
+- a draft never replaces typed text without asking; Replace, Append and
+  Cancel; a draft counts as text; a newer draft while asking;
+- Discard after Append gives back the user's text, or the earlier draft as a
+  draft;
+- only `submit` makes a message;
+- a refused message is restored.
+
+Mutation checks on copies under `target/` (never the repo files), each
+change reverted, with baselines passing first:
+
+- **Composer, conversation and panel wiring: 25/25 caught.** They include:
+  Enter sends a pending draft; the Send button is blocked too; `can_send`
+  ignored; submit while asking; sending keeps the banner; Discard keeps the
+  text; Discard clears typed text; Discard after Append drops typed text; an
+  appended-over draft comes back as plain text; editing ends the draft or
+  doesn't unlock Enter; an echo counts as an edit; clearing keeps the draft; a
+  draft replaces typed text silently; offer ignores `can_send`; Append drops
+  typed text; Cancel replaces; a resolved draft is not pending; a newer draft
+  while asking is dropped; restore drops the input; the conversation accepts
+  an empty message. Panel wiring, caught by the scan: a notification calls
+  `submit`, `hold_draft` submits, placing a draft submits, and the prompt
+  sends composer text instead of the `Outgoing`.
+- **Module: 3/3 caught.** These are the service `Name=` changed, the desktop
+  entry renamed, and the desktop entry `Hidden=true`. The new case caught
+  all three; the last one was caught only by it.
+- Harness note: after the Discard fix, three composer mutations matched no
+  line (stale patterns). They were re-pointed and re-run. The 25/25 is from
+  that run.
+
+### Checks run
+
+VexOS Desktop 26.05, kernel 7.3.0, Nix 2.34.9. Exit codes:
+
+- In the devShell, on the repo itself: `cargo build --all-targets` 0,
+  `cargo test` 0 (core 3 + 43, view-model 97, panel 3), `cargo clippy
+  --all-targets -- -D warnings` 0, `cargo fmt --all --check` 0.
+- **On a copy of the tree** (`target/tree-draft2`). `composer.rs` is new and
+  untracked, and I did not stage it. The copy was compared with the repo file
+  for file and matched, apart from the gitignored `spike/acp/out`. Results:
+  `nix build` 0; `checks.x86_64-linux.{policy,contract,core,panel,module,extension}`
+  each 0; `scripts/preflight.sh path:…/target/tree-draft2` 0. The contract
+  check's inputs are unchanged and it came from the store here; on the
+  previous copy (`target/tree-draft`, before the Discard fix, which touched
+  only `composer.rs`) it was re-run with `--rebuild`: 118/118.
+- Not run: `nix flake check` (forbidden), the panel, any agent, any
+  notification.
+
+### Not tested
+
+- **The banner and dialog on screen**: their look, the Discard button, the
+  replace/append/keep dialog, and the focus after each.
+- **Real key handling**: that Enter is swallowed and Shift+Enter adds a line
+  in a real `GtkTextView`; IME pre-edit with Enter (the capture-phase
+  controller is unchanged).
+- **A real notification click**: with the panel running, after it has
+  closed (D-Bus activation through the service file), and after a logout. The
+  GNOME Shell path was read in source, not exercised.
+- **`set_text` signal order**: the `syncing` guard is by construction; the
+  exact "changed" sequence of a real `GtkTextBuffer` was not observed.

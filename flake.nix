@@ -238,6 +238,16 @@
                 ${panel}/share/dbus-1/services/io.github.victorytek.VexosAssistant.service \
               && echo 'ok   D-Bus activation starts the wrapped panel' \
               || { echo 'FAIL D-Bus activation starts the wrapped panel'; failed=1; }
+            # GNOME Shell 50 sends a notification click as ActivateAction to the
+            # bus name of the app id, once it finds "<app id>.desktop" (NoDisplay
+            # is fine; DBusActivatable is not read). So the service's Name= must
+            # be the desktop entry's id.
+            name=$(sed -n 's/^Name=//p' ${panel}/share/dbus-1/services/io.github.victorytek.VexosAssistant.service)
+            [ "$name" = io.github.victorytek.VexosAssistant ] \
+              && test -f ${panel}/share/applications/"$name".desktop \
+              && ! grep -qx 'Hidden=true' ${panel}/share/applications/"$name".desktop \
+              && echo 'ok   notification clicks reach the panel: its bus name is its desktop id' \
+              || { echo 'FAIL notification clicks reach the panel: its bus name is its desktop id'; failed=1; }
           ''}
           ${lib.optionalString (extension != null) ''
             test -f ${extension}/share/gnome-shell/extensions/${uuid}/schemas/gschemas.compiled \
