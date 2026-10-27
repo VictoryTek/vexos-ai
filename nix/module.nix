@@ -8,13 +8,13 @@
 #
 # What it installs:
 #   - claude-code + opencode (packages are options; vexos-nix passes unstable)
-#   - vexos-ai: launcher, first-run picker, Claude accounts and usage
-#     warnings, theme sync, "diagnose with AI"
+#   - vexos-ai: launcher, first-run picker, Claude accounts, theme sync,
+#     "diagnose with AI"
 #   - the VexOS skills at /etc/vexos/ai/skills, linked into ~/.claude/skills
 #     (Claude Code and OpenCode read it) and ~/.agents/skills (the generic spot)
 #   - system-wide (managed) agent policy: never apply (switch/boot/rebuild
 #     denied), always ask (no auto-approving modes); see nix/policy.nix
-#   - user services: crash watcher, usage timer, theme watcher, welcome
+#   - user services: crash watcher, theme watcher, welcome
 #   - the assistant panel (vexos-ai-panel, a GTK window over ACP), only with
 #     the managed policy above and agents at least as new as the tested ones
 #   - on GNOME, the panel's Shell extension (tile and shortcut). Installed
@@ -161,24 +161,6 @@ in
     # Simple, not oneshot: it waits on the notification for as long as the
     # user leaves it, which would trip a oneshot's start timeout.
     systemd.user.services.vexos-ai-welcome = userService "Invite the user to set up the AI assistant" "welcome";
-
-    systemd.user.services.vexos-ai-usage = {
-      description = "Check Claude subscription usage and warn near a limit";
-      path = [ "/run/current-system/sw" ];
-      serviceConfig.Type = "oneshot";
-      serviceConfig.ExecStart = "${package}/bin/vexos-ai usage-check";
-    };
-    # Ticks every 3 minutes, the fastest probe interval (an account near its
-    # limit). The script decides per account whether a probe is due: every 10
-    # minutes for the active one, 60 for the others, and never during a backoff.
-    systemd.user.timers.vexos-ai-usage = {
-      description = "Refresh Claude subscription usage when it is due";
-      wantedBy = [ "timers.target" ];
-      timerConfig = {
-        OnStartupSec = "2min";
-        OnUnitActiveSec = "3min";
-      };
-    };
   })
 
   # ── Panel ──────────────────────────────────────────────────────────────────

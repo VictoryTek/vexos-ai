@@ -113,6 +113,17 @@ any feature work (Phase 0).
 
 ## 2. The contract (Phase 1)
 
+> **Superseded: the usage probe was removed.** The bash CLI no longer reads the
+> login token or calls Anthropic's usage endpoint. Everything below about it is
+> history, not the contract: the "Usage" row of the gap table, `usage [account]`
+> and `usage-check`, `status --refresh` re-probing (now accepted and ignored),
+> the `usage` object (now always `null`), the usage cache and probe state files,
+> and all of §2.5. The same goes for the later plans that read that data (the
+> Rust CLI's usage polling, the top-bar usage indicator in §3). Usage in the
+> panel comes from the agent's own `/usage`; see
+> `.github/docs/subagent_docs/usage_display_spec.md`. The live contract is
+> `docs/contract.md`.
+
 ### 2.1 Rules
 
 - **Non-interactive by arguments.** Every mutating command takes its input as

@@ -3,7 +3,7 @@
 The VexOS AI assistant: Claude Code or OpenCode, taught how VexOS works
 (`skills/`), fenced off from applying changes and kept asking before it acts
 (managed policy, `nix/policy.nix`), with a
-launcher, Claude account/usage handling, theme sync and "diagnose with AI".
+launcher, Claude account handling, theme sync and "diagnose with AI".
 
 Consumed by [vexos-nix](https://github.com/VictoryTek/vexos-nix) as a flake
 input. Users enable it there with `just feature enable ai`; this repo is

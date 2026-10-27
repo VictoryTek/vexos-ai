@@ -1988,3 +1988,69 @@ equivalent mutant.
 **Not run:** no Nix here, so no `nix build`, `checks.*` or
 `scripts/preflight.sh`. The GTK panel was not compiled. No independent
 review was run for this fix.
+
+## Credential probe removal
+
+The CLI no longer reads the login token or calls Anthropic's undocumented
+`api.anthropic.com/api/oauth/usage` endpoint. The panel's rule is that nothing
+in this repo does either; the panel's own `/usage` line replaces it (see
+`usage_display_spec.md` section 3.3, now marked removed).
+
+**Removed**
+
+- `bin/vexos-ai.sh`: the endpoint, the token read and the `curl` call, the
+  `usage` and `usage-check` commands, the cache and probe-state writers, the
+  single-flight lock, backoff, the warning notification and the auto-switch that
+  `usage-check` ran, and the helpers only they used (`notify`, `iso_utc`,
+  `move_if_exists`). `status --refresh`, `account list`, `status` in text and the
+  zenity panel no longer read or show usage.
+- `nix/module.nix`: the `vexos-ai-usage` service and timer. They were never
+  options, so no option went away and `lib.mkRemovedOptionModule` was not needed.
+- `nix/package.nix`: `curl` and (now unused) `util-linux` from the runtime
+  inputs; the desktop action "Accounts & usage" is now "Accounts".
+- Tests and docs that covered only the probe: `tests/contract/usage.bats` is
+  rewritten to assert it is gone (unknown commands exit 2, no `curl` call, no
+  token in any output or file, no endpoint in the script); the cache and refresh
+  cases in `status.bats` and `account.bats` are replaced; `stubs/curl` is a
+  tripwire; `docs/contract.md` has "Credentials and the network" in place of
+  "Usage probing".
+
+**Contract changes** (`docs/contract.md` and the bats suite, together):
+`usage` and `usage-check` are gone (exit 2); `status --json` stays schema 1 with
+`accounts[].usage` always `null`; `status --refresh` is accepted and ignored;
+the usage cache and probe files are no longer part of the contract;
+`account mode` output now says the setting is saved and has no effect.
+
+**Deliberately left** (separate decisions)
+
+- `account_auth_json` still reads each account's `.credentials.json` for
+  `signedIn` and `plan`. It emits no token, but it is a read of the credentials
+  file, so the "nothing reads the login token" rule is not fully met until
+  `signedIn` and `plan` come from somewhere else.
+- The multi-account commands: `account add` runs `claude auth login` into a
+  per-account config dir, `rename` moves it, `remove` deletes it, `use` writes a
+  pointer file. None copies a credentials file.
+- `account mode`, the `switching` object and the panel's "Toggle autoswitch" are
+  kept but inert: they only steered the removed warning and auto-switch.
+- Old `usage-*.json` and `probe-*` files on users' machines are not deleted
+  (`account remove` deletes the removed account's). A caller that reads
+  `usage-<label>.json` directly, such as the released VexPortal in vexos-nix,
+  will see numbers frozen at the last reading. That repo is not changed here.
+- Older specs that plan on this data (`docs/spec.md`, `assistant_panel_spec.md`).
+
+**Checks.** No Nix, bats, shellcheck or flock on this machine, so none of
+`nix build`, `checks.*`, `scripts/preflight.sh` or the bats suite ran. What ran:
+`bash -n` on the script, `helpers.bash` and the curl stub (exit 0); every `.bats`
+file with `@test` rewritten to a function, parse only (exit 0); the edited `jq`
+filters on synthetic JSON (output as expected; this caught two spaces I had
+dropped from the `Assistant:  ` line). `bin/vexos-ai.sh` was not run, per the
+scope rule. An attempt to run downloaded bats and shellcheck was refused by the
+permission classifier and was not retried; two unextracted archives from it
+remain in the gitignored `target/tools/dl/` (deleting them was also refused).
+
+**Review.** An independent `reviewer` subagent reviewed the diff and returned
+FAIL: one bats assertion would have failed every run (`*"session"*` matches
+"for new sessions"), one `&&` list could never fail, and `account mode` still
+promised notifications and switching. All three were fixed, and the unused
+`util-linux` input was removed as it suggested. The fixes were **not**
+re-reviewed.

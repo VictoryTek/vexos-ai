@@ -83,13 +83,14 @@
 
         # The CLI's machine contract (docs/contract.md), black-box: the real
         # script under a fake HOME, with stub claude/curl/systemctl/zenity/…
-        # first on PATH. The script is built without curl, zenity, libnotify and
-        # xdg-terminal-exec in its runtime inputs, which would otherwise be put
-        # in front of the stubs; everything else is identical to the package.
+        # first on PATH (the curl stub is a tripwire: no command may call it).
+        # The script is built without zenity, libnotify and xdg-terminal-exec
+        # in its runtime inputs, which would otherwise be put in front of the
+        # stubs; everything else is identical to the package.
         contract = let
           vexosAi = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
           script = vexosAi.passthru.mkScript (with pkgs; [
-            coreutils findutils gnugrep jq glib util-linux
+            coreutils findutils gnugrep jq glib
           ]);
         in pkgs.runCommand "vexos-ai-contract" {
           nativeBuildInputs = with pkgs; [ bats jq coreutils findutils gnugrep util-linux ];

@@ -4,7 +4,8 @@
 # Every test runs the real `vexos-ai` under a fake HOME with stub programs
 # (claude, opencode, curl, systemctl, zenity, xdg-terminal-exec, notify-send,
 # gsettings) first on PATH. The stubs log how they were called, so a test can
-# assert that nothing opened a dialog or a terminal window.
+# assert that nothing opened a dialog or a terminal window, or called curl
+# (the curl stub is a tripwire: vexos-ai makes no network request).
 #
 # VEXOS_AI_BIN is the vexos-ai to test: the contract check passes the Nix-built
 # script; by hand, `VEXOS_AI_BIN=$(nix build --print-out-paths)/bin/vexos-ai`.
@@ -43,8 +44,6 @@ common_setup() {
   export VEXOS_AI_CURRENT_SYSTEM="$BATS_TEST_TMPDIR/current-system"
   export VEXOS_AI_BOOTED_SYSTEM="$BATS_TEST_TMPDIR/booted-system"
   mkdir -p "$VEXOS_AI_PROC"
-
-  write_usage_body 12.0 40.0
 }
 
 install_agents() {
@@ -81,9 +80,6 @@ nothing_opened() { never_called zenity.log && never_called terminal.log; }
 
 # State ------------------------------------------------------------------------
 
-future() { date -u -d "+$1" +%Y-%m-%dT%H:%M:%S+00:00; }
-past() { date -u -d "-$1" +%Y-%m-%dT%H:%M:%S+00:00; }
-
 make_account() {
   local label
   for label in "$@"; do mkdir -p "$DATA/$label"; done
@@ -102,33 +98,22 @@ write_creds() { # [label] [expires-in-seconds]
     >"$dir/.credentials.json"
 }
 
-# What the stub curl answers with. Percentages unless told otherwise.
-write_usage_body() { # session weekly
-  jq -n --argjson s "$1" --argjson w "$2" --arg sr "$(future 3hours)" --arg wr "$(future 3days)" \
-    '{five_hour: {utilization: $s, resets_at: $sr},
-      seven_day: {utilization: $w, resets_at: $wr},
-      seven_day_opus: {utilization: ($w - 10), resets_at: $wr}}' >"$STUB_LOG/usage-body.json"
-}
-
-# A usage reading as the cache holds it (legacy keys, plus any extra jq object).
-write_cache() { # label session weekly [extra-json]
-  local extra=${4:-}
-  [[ -n $extra ]] || extra='{}'
-  mkdir -p "$CACHE"
-  jq -n --argjson s "$2" --argjson w "$3" --arg sr "$(future 3hours)" --arg wr "$(future 3days)" \
-    --argjson x "$extra" \
-    '{ok: true, session: $s, sessionReset: $sr, weekly: $w, weeklyReset: $wr, why: ""} + $x' \
+# What older versions left behind per account for their usage readings: a cache
+# record that looks fresh, probe state, its lock and a warning stamp. Nothing
+# reads them any more.
+write_legacy_usage() { # label
+  mkdir -p "$CACHE" "$STATE"
+  jq -n --arg r "$(date -u -d '+3 hours' +%Y-%m-%dT%H:%M:%S+00:00)" \
+    '{ok: true, session: 12, sessionReset: $r, weekly: 40, weeklyReset: $r, why: ""}' \
     >"$CACHE/usage-$1.json"
+  echo '{"nextAt":0,"lastAt":0,"failures":0}' >"$STATE/probe-$1.json"
+  : >"$STATE/probe-$1.lock"
+  echo reset >"$STATE/warned-$1"
 }
 
-# probe state: nextAt/lastAt as seconds relative to now.
-write_probe_state() { # label next-offset last-offset failures
-  mkdir -p "$STATE"
-  jq -n --argjson n "$(($(date +%s) + $2))" --argjson l "$(($(date +%s) + $3))" --argjson f "$4" \
-    '{nextAt: $n, lastAt: $l, failures: $f}' >"$STATE/probe-$1.json"
-}
-
-probe_field() { jq -r ".$2" "$STATE/probe-$1.json"; }
+# Files under HOME, other than Claude's own credentials, that hold a token.
+# Bats does not fail a test on a bare `! cmd`, so tests assert this is empty.
+token_leaks() { grep -rlE "$TOKEN|$REFRESH" "$HOME" | grep -v '/\.credentials\.json$' || true; }
 
 # A running Claude session, in the fake /proc. Empty config means the default.
 fake_session() { # pid [config-dir]

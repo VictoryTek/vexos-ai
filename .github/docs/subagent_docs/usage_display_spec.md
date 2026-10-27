@@ -25,8 +25,8 @@ settle is listed under "Unverified" with exact steps (section 1.4).
 - **Subscription limits ("how much of my plan is left"): there is no
   documented, supported way** for a third-party UI to show them without the
   login token or an undocumented endpoint. **Do not build it.** This repo's
-  CLI already does it the unsupported way (section 3.3). That is outside this
-  task, but it conflicts with the rule set for the panel.
+  CLI did it the unsupported way; that probe has since been removed (section
+  3.3).
 - Recommended display: one read-only line, for example
   `Context 53k of 200k (26%) · 4 tool calls · 1 approval waiting`. It shows
   `Context unknown` until the agent reports a figure, and drops to
@@ -317,28 +317,36 @@ your limit" warning. It is an undocumented adapter key, Claude-only and
 event-driven. Revisit only if `claude-agent-acp` documents it, or if ACP adds
 a rate-limit message.
 
-### 3.3 Conflicts found in this repo (reported, not changed: out of scope)
+### 3.3 The shipped usage probe: removed (2026-10-27)
 
-The rule "never read the login token, never call private endpoints" is
-already broken outside the panel, by shipped code:
+**Status: removed.** This section first reported, without changing anything,
+that the rule "never read the login token, never call private endpoints" was
+already broken outside the panel. At the user's request the probe is now
+removed from the CLI, the module, the contract and the tests. Why: the panel's
+rule is that nothing in this repo reads the login token or calls a private
+endpoint, and the panel's own `/usage` line (the launch-time 5-hour line,
+"Update 2026-10-27 (later)" below) is the supported replacement.
 
-| Where | What it does |
-|---|---|
-| `bin/vexos-ai.sh:30` | `USAGE_ENDPOINT=https://api.anthropic.com/api/oauth/usage`. The comment at line 380 calls it "undocumented and rate-limited" |
-| `bin/vexos-ai.sh:535-554` | reads `accessToken` from `.credentials.json`, sends it through `curl` with `anthropic-beta: oauth-2025-04-20` |
-| `bin/vexos-ai.sh:452-470` | reads `refreshToken`/`accessToken`/`expiresAt`/`rateLimitTier` presence from the credentials for `signedIn` and `plan` |
-| `nix/module.nix:165-178` | a systemd user service and timer run `vexos-ai usage-check` on a schedule |
-| `docs/contract.md` "Usage probing", `tests/contract/usage.bats` | the public contract and its tests for the above |
+| Where it was | What it did | Now |
+|---|---|---|
+| `bin/vexos-ai.sh:30` | `USAGE_ENDPOINT=https://api.anthropic.com/api/oauth/usage` | removed |
+| `bin/vexos-ai.sh:535-554` | read `accessToken` from `.credentials.json`, sent it through `curl` with `anthropic-beta: oauth-2025-04-20` | removed, with the `usage` and `usage-check` commands, the cache and probe-state writers, and `curl` from the package's runtime inputs |
+| `bin/vexos-ai.sh:452-470` | read `refreshToken`/`accessToken`/`expiresAt`/`rateLimitTier` presence from the credentials for `signedIn` and `plan` | **kept** (`account_auth_json`): `status --json` and the account list report `signedIn` and `plan`. It emits no token, but it is still a read of the credentials file, and it is a separate decision |
+| `nix/module.nix:165-178` | a systemd user service and timer ran `vexos-ai usage-check` | removed. They were never options, so no option was removed and no `mkRemovedOptionModule` is needed |
+| `docs/contract.md` "Usage probing", `tests/contract/usage.bats` | the public contract and its tests for the above | rewritten as "Credentials and the network"; `usage.bats` now asserts the probe is gone |
 
-Earlier specs also plan on this data: `assistant_panel_spec.md` section 5.5
-(tile subtitle "<agent> · <N>% used", account rows with session and weekly
-bars), assumption 2 in its section 10, and step 5 ("usage near limit"
+What changed for callers: `vexos-ai usage` and `usage-check` exit 2 (unknown
+command); `status --json` keeps schema 1 and `accounts[].usage` is always
+`null`; `status --refresh` is accepted and ignored; `account list`, `status` in
+text and the zenity panel show no usage. The usage cache that released VexPortal
+reads is no longer written, so an old file is frozen at its last reading.
+`account mode` still stores `mode` and `threshold`, but they only steered the
+removed warning and auto-switch and now have no effect.
+
+Earlier specs also planned on this data and are out of date: `assistant_panel_spec.md`
+section 5.5 (tile subtitle "<agent> · <N>% used", account rows with session and
+weekly bars), assumption 2 in its section 10, and step 5 ("usage near limit"
 notification).
-
-These are a contract change (argv `usage`, `status --json` `usage`, exit
-codes) and a module change. Each needs its own decision, spec and review.
-This document does not decide them. The recommendation in 3.2 only keeps the
-panel from depending on them.
 
 ## 4. What can be shown honestly
 
@@ -528,9 +536,9 @@ label with a breakpoint in the panel (section 4).
 session token totals from `PromptResponse.usage`; the `_claude/rateLimit`
 warning; time since start (first slice); anything in the extension or tile.
 
-**Leave for a separate decision (section 3.3):** the CLI's undocumented usage
-probe and token reads, the `vexos-ai-usage` user timer, and the earlier specs'
-tile usage bars and "usage near limit" notification.
+**Decided, then done (section 3.3):** the CLI's undocumented usage probe and
+token reads and the `vexos-ai-usage` user timer are removed. The earlier specs'
+tile usage bars and "usage near limit" notification now have no data source.
 
 ## 9. Not confirmed
 

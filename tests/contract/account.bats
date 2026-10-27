@@ -66,15 +66,19 @@ setup() { common_setup; }
 @test "account remove deletes the account and what is kept about it" {
   make_account work
   set_file "$CONF/claude-account" work
-  write_cache work 10 20
-  write_probe_state work 0 0 0
+  write_legacy_usage work
+  write_legacy_usage main
   run vexos account remove work
   [ "$status" -eq 0 ]
   [ "$output" = "Removed 'work'." ]
   [ ! -e "$DATA/work" ]
   [ ! -e "$CONF/claude-account" ]
+  # What older versions kept for its usage readings goes too; main's stays.
   [ ! -e "$CACHE/usage-work.json" ]
   [ ! -e "$STATE/probe-work.json" ]
+  [ ! -e "$STATE/probe-work.lock" ]
+  [ ! -e "$STATE/warned-work" ]
+  [ -e "$CACHE/usage-main.json" ]
 }
 
 @test "account remove leaves the active account alone when another is removed" {
@@ -119,11 +123,9 @@ setup() { common_setup; }
 
 # ── rename ───────────────────────────────────────────────────────────────────
 
-@test "account rename moves the account, the active pointer and the cache" {
+@test "account rename moves the account and the active pointer" {
   make_account work
   set_file "$CONF/claude-account" work
-  write_cache work 10 20
-  write_probe_state work 0 0 0
   touch "$DATA/work/marker"
   run vexos account rename work office
   [ "$status" -eq 0 ]
@@ -131,9 +133,6 @@ setup() { common_setup; }
   [ -e "$DATA/office/marker" ]
   [ ! -e "$DATA/work" ]
   [ "$(cat "$CONF/claude-account")" = office ]
-  [ -e "$CACHE/usage-office.json" ]
-  [ -e "$STATE/probe-office.json" ]
-  [ ! -e "$CACHE/usage-work.json" ]
 }
 
 @test "account rename keeps another active account as it was" {
@@ -176,12 +175,12 @@ setup() { common_setup; }
 @test "account mode <mode> <pct> saves both" {
   run vexos account mode auto 90
   [ "$status" -eq 0 ]
-  [ "$output" = "Near 90% of a limit, new sessions switch to the account with the most headroom." ]
+  [ "$output" = "Switching: auto at 90%. Saved, but it has no effect now: nothing reads usage." ]
   [ "$(cat "$CONF/mode")" = auto ]
   [ "$(cat "$CONF/threshold")" = 90 ]
   run vexos account mode manual
   [ "$status" -eq 0 ]
-  [ "$output" = "Near 90% of a limit you get a notification; switching is up to you." ]
+  [ "$output" = "Switching: manual at 90%. Saved, but it has no effect now: nothing reads usage." ]
   [ "$(cat "$CONF/mode")" = manual ]
   [ "$(cat "$CONF/threshold")" = 90 ]
 }
@@ -216,7 +215,7 @@ setup() { common_setup; }
 @test "account mode with no arguments just reports" {
   run vexos account mode
   [ "$status" -eq 0 ]
-  [ "$output" = "Near 95% of a limit you get a notification; switching is up to you." ]
+  [ "$output" = "Switching: manual at 95%. Saved, but it has no effect now: nothing reads usage." ]
   [ ! -e "$CONF/mode" ]
 }
 
@@ -314,15 +313,16 @@ setup() { common_setup; }
 
 # ── list ─────────────────────────────────────────────────────────────────────
 
-@test "account list marks the active account and shows readings" {
+@test "account list marks the active account, and shows no usage" {
   make_account work
   set_file "$CONF/claude-account" work
-  write_cache work 31 62
-  write_probe_state work 3600 0 0 # backing off: listing must not probe
+  write_legacy_usage work
   run vexos account list
   [ "$status" -eq 0 ]
-  [[ ${lines[0]} == "  main"*"usage unknown" ]]
-  [[ ${lines[1]} == "* work"*"session 31%  weekly 62%" ]]
+  [ "${#lines[@]}" -eq 2 ]
+  [ "${lines[0]}" = "  main" ]
+  [ "${lines[1]}" = "* work" ]
+  [ "$(calls curl.count)" -eq 0 ]
 }
 
 @test "account (no subcommand) lists, an unknown one is a usage error" {

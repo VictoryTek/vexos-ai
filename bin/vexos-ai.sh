@@ -3,9 +3,8 @@
 # Opens the user's chosen coding agent (Claude Code or OpenCode) in a terminal,
 # working in /etc/nixos, with the VexOS skills (files/ai/skills) installed in
 # ~/.claude/skills — both agents read that directory. Also owns the pieces
-# around it: first-run picker, multiple Claude accounts, subscription usage
-# warnings, theme sync, and "diagnose with AI" for crashes, failed units and
-# failed rebuilds.
+# around it: first-run picker, multiple Claude accounts, theme sync, and
+# "diagnose with AI" for crashes, failed units and failed rebuilds.
 #
 # Agents always start in their default, asking permission mode. Applying a
 # change (nixos-rebuild switch/boot, just rebuild) is denied to them by the
@@ -27,7 +26,6 @@ THRESHOLD_FILE="$CONF_DIR/threshold"
 MUTE_DIR="$CONF_DIR/crash-ignore"
 CAPTURE_OFF_FILE="$CONF_DIR/crash-capture-off"
 WORKDIR=/etc/nixos
-USAGE_ENDPOINT=https://api.anthropic.com/api/oauth/usage
 TITLE="VexOS Assistant"
 
 # Overridable so the contract tests can run against a fake /proc and fake
@@ -65,8 +63,6 @@ finish() { [[ -z $JSON ]] || status_json; }
 # the --json document.
 human_fd() { if [[ -n $JSON ]]; then echo 2; else echo 1; fi; }
 
-notify() { notify-send -a "$TITLE" -i utilities-terminal "$@" 2>/dev/null || true; }
-
 have_gui() { [[ -n ${WAYLAND_DISPLAY:-}${DISPLAY:-} ]]; }
 
 in_terminal() { [[ -t 0 && -t 1 ]]; }
@@ -103,9 +99,7 @@ ask_text() {
   printf '%s\n' "$answer"
 }
 
-iso_utc() { date -u "$@"; }
 now_s() { date +%s; }
-ISO_FMT=+%Y-%m-%dT%H:%M:%S+00:00
 
 read_first_line() { [[ -f $1 ]] && head -n 1 "$1"; }
 
@@ -317,12 +311,11 @@ account_remove() {
   ! account_in_use "$label" || die_busy "a running Claude session is using '$label'; close it first"
   rm -rf "${ACCOUNTS_DIR:?}/${label:?}"
   if [[ $(read_first_line "$ACCOUNT_FILE" || true) == "$label" ]]; then rm -f "${ACCOUNT_FILE:?}"; fi
+  # Files that older versions kept per account for the usage readings.
   rm -f "${CACHE_DIR:?}/usage-$label.json" "${STATE_DIR:?}/warned-$label" \
     "${STATE_DIR:?}/probe-$label.json" "${STATE_DIR:?}/probe-$label.lock"
   say "Removed '$label'."
 }
-
-move_if_exists() { if [[ -e $1 ]]; then mv "$1" "$2"; fi; }
 
 account_rename() {
   local old=${1:-} new=${2:-}
@@ -334,10 +327,6 @@ account_rename() {
   ! account_in_use "$old" || die_busy "a running Claude session is using '$old'; close it first"
   mv "$ACCOUNTS_DIR/$old" "$ACCOUNTS_DIR/$new"
   if [[ $(read_first_line "$ACCOUNT_FILE" || true) == "$old" ]]; then printf '%s\n' "$new" >"$ACCOUNT_FILE"; fi
-  move_if_exists "$CACHE_DIR/usage-$old.json" "$CACHE_DIR/usage-$new.json"
-  move_if_exists "$STATE_DIR/warned-$old" "$STATE_DIR/warned-$new"
-  move_if_exists "$STATE_DIR/probe-$old.json" "$STATE_DIR/probe-$new.json"
-  rm -f "${STATE_DIR:?}/probe-$old.lock"
   say "Renamed '$old' to '$new'."
 }
 
@@ -355,100 +344,21 @@ account_mode() {
     mkdir -p "$CONF_DIR"
     printf '%s\n' "$((10#$t))" >"$THRESHOLD_FILE"
   fi
-  if [[ $(switch_mode) == auto ]]; then
-    say "Near $(threshold)% of a limit, new sessions switch to the account with the most headroom."
-  else
-    say "Near $(threshold)% of a limit you get a notification; switching is up to you."
-  fi
+  say "Switching: $(switch_mode) at $(threshold)%. Saved, but it has no effect now: nothing reads usage."
 }
 
 account_list() {
-  local a active rec mark
+  local a active mark
   if [[ -n $JSON ]]; then status_json; return; fi
   active=$(active_account)
   while read -r a; do
-    usage_refresh "$a" || true
-    rec=$(account_usage_json "$a")
     mark=" "
     [[ $a == "$active" ]] && mark="*"
-    printf '%s %-16s %s\n' "$mark" "$a" \
-      "$(jq -r 'if .ok then "session \(.session|floor)%  weekly \(.weekly|floor)%\(if .stale then "  (last known)" else "" end)" else "usage unknown" end' <<<"$rec")"
+    printf '%s %s\n' "$mark" "$a"
   done < <(list_accounts)
 }
 
-# ── Usage (Claude subscriptions) ─────────────────────────────────────────────
-# Anthropic's OAuth usage endpoint is the one Claude Code's own /usage reads.
-# It is undocumented and rate-limited, so it is treated as hostile:
-#   - one probe per account at a time (flock), whoever asks: timer, CLI, UI;
-#   - at most every 10 min for the active account, 3 min when it is within 15
-#     points of the threshold, 60 min for the others; `--refresh` skips the
-#     interval but never a backoff, and never runs twice within 15 s;
-#   - 429 honours Retry-After, any other failure backs off 1, 2, 4 … 60 min;
-#     a transport error retries in a minute and is not counted as a failure;
-#   - a failed probe keeps the last good numbers, marked stale, with a short
-#     human reason; an unknown payload is "usage format changed", not a crash.
-# The access token is read from .credentials.json, piped to curl's stdin (never
-# argv, which other users can read) and goes nowhere but the Authorization
-# header. It is never logged, cached, written to state or printed.
-#
-# The cache file keeps the original keys (ok session weekly sessionReset
-# weeklyReset why — released VexPortal reads them, and `why` must stay a
-# string) and adds fetchedAt plan scoped stale.
-
-# jq helpers: when a window's reset time has passed, its percentage is 0.
-# shellcheck disable=SC2016 # jq variables, not shell ones
-USAGE_JQ_DEFS='
-def epoch: if type == "string" and . != "" then (sub("\\.[0-9]+"; "") | sub("\\+00:00$"; "Z") | (try fromdateiso8601 catch null)) else null end;
-def live($now; $at): (($at | epoch)) as $e | if $e != null and $e <= $now then 0 else . end;
-def nz: if . == "" then null else . end;
-'
-
-probe_state_file() { echo "$STATE_DIR/probe-$1.json"; }
-
-state_num() {
-  local v
-  v=$(jq -r --arg k "$2" '(.[$k] // 0) | if type == "number" then floor else 0 end' "$1" 2>/dev/null || true)
-  echo "${v:-0}"
-}
-
-write_state() { # acct nextAt failures lastAt
-  local file
-  file=$(probe_state_file "$1")
-  mkdir -p "$STATE_DIR"
-  jq -nc --argjson n "$2" --argjson f "$3" --argjson l "$4" '{nextAt: $n, failures: $f, lastAt: $l}' >"$file.tmp" &&
-    mv "$file.tmp" "$file"
-}
-
-write_cache() { # acct json
-  local file="$CACHE_DIR/usage-$1.json"
-  mkdir -p "$CACHE_DIR"
-  printf '%s\n' "$2" >"$file.tmp" && mv "$file.tmp" "$file"
-}
-
-# The cache as the status document's `usage` object, or null before any reading.
-account_usage_json() {
-  local file="$CACHE_DIR/usage-$1.json" mtime
-  if [[ ! -f $file ]]; then echo null; return; fi
-  mtime=$(iso_utc -d "@$(stat -c %Y "$file")" "$ISO_FMT")
-  jq -c --argjson now "$(now_s)" --arg mtime "$mtime" "$USAGE_JQ_DEFS"'
-    . as $c
-    | ($c.ok // false) as $ok
-    | { ok: $ok,
-        session: (if $ok then (($c.session // 0) | live($now; $c.sessionReset)) else null end),
-        sessionResetsAt: (if $ok then ($c.sessionReset | nz) else null end),
-        weekly: (if $ok then (($c.weekly // 0) | live($now; $c.weeklyReset)) else null end),
-        weeklyResetsAt: (if $ok then ($c.weeklyReset | nz) else null end),
-        scoped: (if $ok then [($c.scoped // [])[] | . as $s
-                              | { label, percent: (.percent | live($now; $s.resetsAt)), resetsAt: (.resetsAt | nz) }] else [] end),
-        fetchedAt: ($c.fetchedAt // (if $ok then $mtime else null end)),
-        stale: ($c.stale // false),
-        why: (($c.why // "") | nz) }' "$file" 2>/dev/null || echo null
-}
-
-peak_of() {
-  account_usage_json "$1" | jq -r 'if .ok then ([.session, .weekly] | max | floor) else -1 end'
-}
-
+# ── Sign-in state ────────────────────────────────────────────────────────────
 # What the credentials say, never the tokens: whether the account is signed in
 # and its plan label ("Max 5x"). An expired *access* token is routine (Claude
 # Code refreshes it when it starts), so only a missing refresh token counts as
@@ -465,197 +375,6 @@ account_auth_json() {
   ' "$creds" 2>/dev/null || echo '{"signedIn":false,"plan":null}'
 }
 
-backoff_delay() { # failures -> seconds: 60, 120, 240 … capped at 3600
-  local d=$((60 * (1 << ($1 > 7 ? 6 : $1 - 1))))
-  echo $((d > 3600 ? 3600 : d))
-}
-
-# Keep the last good numbers (marked stale), or record that there are none.
-write_degraded() { # acct why
-  local file="$CACHE_DIR/usage-$1.json" old=null mtime=""
-  if [[ -f $file ]]; then
-    old=$(cat "$file")
-    mtime=$(iso_utc -d "@$(stat -c %Y "$file")" "$ISO_FMT")
-  fi
-  write_cache "$1" "$(jq -c --arg why "$2" --arg mtime "$mtime" '
-    if type == "object" and .ok == true then
-      .why = $why | .stale = true | .fetchedAt = (.fetchedAt // $mtime)
-    else
-      { ok: false, session: 0, sessionReset: "", weekly: 0, weeklyReset: "", why: $why,
-        scoped: [], plan: (if type == "object" then .plan // "" else "" end), stale: false }
-    end' <<<"$old" 2>/dev/null ||
-    jq -nc --arg why "$2" '{ok: false, session: 0, sessionReset: "", weekly: 0, weeklyReset: "", why: $why, scoped: [], plan: "", stale: false}')"
-}
-
-# The payload as a cache record. Fails on a shape it does not know.
-parse_usage() { # body-file plan
-  jq -ce --arg fetched "$(iso_utc "$ISO_FMT")" --arg plan "$2" '
-    def num: if type == "number" then . elif type == "string" then (tonumber? // null) else null end;
-    if type != "object" then error("shape") else . end
-    | (.seven_day_oauth_apps // .seven_day) as $w
-    | [to_entries[]
-        | select((.key | startswith("seven_day_")) and .key != "seven_day_oauth_apps"
-                 and (.value | type) == "object" and (.value.utilization | num) != null)
-        | { label: ((.key | ltrimstr("seven_day_") | split("_") | map((.[0:1] | ascii_upcase) + .[1:]) | join(" ")) + " Weekly"),
-            raw: (.value.utilization | num), resetsAt: (.value.resets_at // "") }] as $sc
-    | [(.five_hour.utilization | num), ($w.utilization | num)] as $v
-    | (([$v[], $sc[].raw] | map(select(. != null and . >= 1)) | length) > 0) as $percent
-    | def pct: if . == null then null elif $percent then . else . * 100 end;
-      if ($v | any(. != null)) | not then error("shape") else
-      { ok: true,
-        session: (($v[0] | pct) // 0), sessionReset: (.five_hour.resets_at // ""),
-        weekly: (($v[1] | pct) // 0), weeklyReset: ($w.resets_at // ""),
-        why: "", fetchedAt: $fetched, plan: $plan,
-        scoped: [$sc[] | {label, percent: (.raw | pct), resetsAt}], stale: false } end
-  ' "$1"
-}
-
-probe_locked() { # acct [force]
-  local acct=$1 force=${2:-} sfile now next last fails home creds token expires
-  local hdr body code rc=0 retry delay rec plan interval=3600 p
-  sfile=$(probe_state_file "$acct")
-  now=$(now_s)
-  next=$(state_num "$sfile" nextAt)
-  last=$(state_num "$sfile" lastAt)
-  fails=$(state_num "$sfile" failures)
-
-  ((now >= next)) || return 0 # backing off — --refresh does not override that
-  if [[ -n $force ]]; then
-    ((now - last >= 15)) || return 0
-  else
-    if [[ $acct == "$(active_account)" ]]; then
-      interval=600
-      p=$(peak_of "$acct")
-      if ((p >= 0 && p >= $(threshold) - 15)); then interval=180; fi
-    fi
-    ((now - last >= interval)) || return 0
-  fi
-
-  home=$(account_home "$acct")
-  creds="$home/.credentials.json"
-  token=$(jq -r '.claudeAiOauth.accessToken // empty' "$creds" 2>/dev/null || true)
-  expires=$(jq -r '.claudeAiOauth.expiresAt // 0' "$creds" 2>/dev/null || echo 0)
-  plan=$(account_auth_json "$acct" | jq -r '.plan // ""')
-  if [[ -z $token ]]; then
-    write_degraded "$acct" "not signed in"
-    return 0
-  fi
-  if [[ ! $expires =~ ^[0-9]+$ ]] || ((expires < now * 1000)); then
-    token=""
-    write_degraded "$acct" "start Claude Code to refresh it"
-    return 0
-  fi
-
-  hdr=$(mktemp)
-  body=$(mktemp)
-  printf 'Authorization: Bearer %s\n' "$token" |
-    curl -sS --max-time 10 -H @- \
-      -H "anthropic-beta: oauth-2025-04-20" -H "Accept: application/json" \
-      -D "$hdr" -o "$body" -w '%{http_code}' "$USAGE_ENDPOINT" >"$body.code" 2>/dev/null || rc=$?
-  token=""
-  code=$(cat "$body.code" 2>/dev/null || true)
-
-  if ((rc != 0)); then
-    # No route yet (just logged in, resuming): retry soon, and do not count it.
-    write_state "$acct" $((now + 60)) "$fails" "$now"
-    write_degraded "$acct" "cannot reach the usage service; retrying"
-  else
-    case "$code" in
-    200)
-      if rec=$(parse_usage "$body" "$plan" 2>/dev/null); then
-        write_state "$acct" 0 0 "$now"
-        write_cache "$acct" "$rec"
-      else
-        fails=$((fails + 1))
-        write_state "$acct" $((now + $(backoff_delay "$fails"))) "$fails" "$now"
-        write_degraded "$acct" "usage format changed"
-      fi
-      ;;
-    429)
-      fails=$((fails + 1))
-      retry=$(grep -i '^retry-after:' "$hdr" | head -n 1 | tr -d '\r ' | cut -d: -f2 || true)
-      if [[ $retry =~ ^[0-9]{1,9}$ ]]; then
-        delay=$((10#$retry < 1 ? 1 : (10#$retry > 86400 ? 86400 : 10#$retry)))
-      else
-        delay=$(backoff_delay "$fails")
-      fi
-      write_state "$acct" $((now + delay)) "$fails" "$now"
-      write_degraded "$acct" "rate limited; retrying in $(((delay + 59) / 60)) min"
-      ;;
-    401 | 403)
-      fails=$((fails + 1))
-      write_state "$acct" $((now + $(backoff_delay "$fails"))) "$fails" "$now"
-      write_degraded "$acct" "sign-in was rejected; start Claude Code to refresh it"
-      ;;
-    *)
-      fails=$((fails + 1))
-      write_state "$acct" $((now + $(backoff_delay "$fails"))) "$fails" "$now"
-      write_degraded "$acct" "usage service unavailable (HTTP ${code:-?})"
-      ;;
-    esac
-  fi
-  rm -f "${body:?}.code" "${hdr:?}" "${body:?}"
-}
-
-# Refresh one account's reading if it is due. Single-flight: with `force`
-# (--refresh, `usage`) wait for a probe already running, otherwise skip.
-usage_refresh() { # acct [force]
-  local acct=$1 force=${2:-}
-  mkdir -p "$STATE_DIR" "$CACHE_DIR"
-  (
-    if [[ -n $force ]]; then flock -w 30 9 || exit 0; else flock -n 9 || exit 0; fi
-    probe_locked "$acct" "$force"
-  ) 9>"$STATE_DIR/probe-$acct.lock" || true
-}
-
-# `usage [account]`: the cache record, as it has always been printed.
-usage_cmd() {
-  local acct=${1:-$(active_account)}
-  require_account "$acct"
-  usage_refresh "$acct" force
-  if [[ -f $CACHE_DIR/usage-$acct.json ]]; then
-    cat "$CACHE_DIR/usage-$acct.json"
-  else
-    echo '{"ok":false,"why":"no reading yet"}'
-  fi
-}
-
-# Run by vexos-ai-usage.timer. Warns once per account per limit window; in
-# auto mode also moves new sessions to the account with the most headroom.
-usage_check() {
-  local t active p key stamp best best_p a ap usage
-  [[ $(default_agent) == claude ]] || return 0
-  t=$(threshold)
-  active=$(active_account)
-  while read -r a; do usage_refresh "$a" || true; done < <(list_accounts)
-  p=$(peak_of "$active")
-  ((p >= t)) || return 0
-
-  usage=$(account_usage_json "$active")
-  key=$(jq -r '"\(.sessionResetsAt)|\(.weeklyResetsAt)"' <<<"$usage")
-  stamp="$STATE_DIR/warned-$active"
-  [[ $(read_first_line "$stamp" || true) == "$key" ]] && return 0
-  mkdir -p "$STATE_DIR"
-  printf '%s\n' "$key" >"$stamp"
-
-  if [[ $(switch_mode) == auto ]]; then
-    best="" best_p=101
-    while read -r a; do
-      [[ $a == "$active" ]] && continue
-      ap=$(peak_of "$a")
-      if ((ap >= 0 && ap < t && ap < best_p)); then best=$a best_p=$ap; fi
-    done < <(list_accounts)
-    if [[ -n $best ]]; then
-      account_use "$best" >/dev/null
-      notify -u normal "Claude account '$active' is at ${p}%" \
-        "New sessions now use '$best' (${best_p}%). Running sessions are unchanged."
-      return 0
-    fi
-  fi
-  notify -u critical "Claude account '$active' is at ${p}% of its limit" \
-    "Open VexOS Assistant → Accounts & usage to switch accounts."
-}
-
 # ── Status ───────────────────────────────────────────────────────────────────
 
 # The status document, schema 1 (docs/contract.md). Additive keys never bump
@@ -670,9 +389,9 @@ status_json() {
 
   while read -r a; do
     rows+=("$(jq -nc --arg label "$a" --arg active "$active" --arg in_use "$in_use" \
-      --argjson auth "$(account_auth_json "$a")" --argjson usage "$(account_usage_json "$a")" '
+      --argjson auth "$(account_auth_json "$a")" '
       { label: $label, active: ($label == $active), signedIn: $auth.signedIn, plan: $auth.plan,
-        inUse: (($in_use | split("\n")) | index($label) != null), usage: $usage }')")
+        inUse: (($in_use | split("\n")) | index($label) != null), usage: null }')")
   done < <(list_accounts)
 
   # -M: jq colours its output on a terminal, and this runs in VexPortal's VTE.
@@ -690,57 +409,47 @@ status_json() {
 
 status_text() {
   status_json | jq -r '
-    def pct: if . == null then "?" else "\(floor)%" end;
     "Assistant:  \(.agent // "not chosen")",
     "Account:    \(.activeAccount) (for new sessions)",
     "Switching:  \(.switching.mode) at \(.switching.threshold)%",
     "Crashes:    capture \(if .crash.capture then "on" else "off" end)\(if (.crash.muted | length) > 0 then ", muted: \(.crash.muted | join(", "))" else "" end)",
     (if .needsReboot then "Reboot:     needed to start the background services" else empty end),
     "Accounts:",
-    (.accounts[] | "  \(if .active then "*" else " " end) \(.label)\(if .plan then " (\(.plan))" else "" end)\(if .signedIn then "" else "  not signed in" end)\(if .inUse then "  in use" else "" end)",
-      "      " + (if .usage == null then "no usage reading yet"
-        elif .usage.ok then "session \(.usage.session | pct)  weekly \(.usage.weekly | pct)\(if .usage.stale then "  (last known)" else "" end)"
-        else "usage unknown\(if .usage.why then ": \(.usage.why)" else "" end)" end))'
+    (.accounts[] | "  \(if .active then "*" else " " end) \(.label)\(if .plan then " (\(.plan))" else "" end)\(if .signedIn then "" else "  not signed in" end)\(if .inUse then "  in use" else "" end)")'
 }
 
 status_cmd() {
-  local refresh="" a
   while (($#)); do
     case "$1" in
-    --refresh) refresh=1 ;;
+    # Accepted so existing callers keep working. There is nothing to re-read:
+    # the CLI no longer takes usage readings (docs/contract.md).
+    --refresh) ;;
     *) die_usage "usage: vexos-ai status [--json] [--refresh]" ;;
     esac
     shift
   done
-  if [[ -n $refresh ]]; then
-    while read -r a; do usage_refresh "$a" force; done < <(list_accounts)
-  fi
   if [[ -n $JSON ]]; then status_json; else status_text; fi
 }
 
 # ── Panel (point-and-click) ──────────────────────────────────────────────────
 
 panel() {
-  local rows=() a active rec mark agent out rc label
+  local rows=() a active mark agent out rc label
   have_gui || { account_list; return; }
   while true; do
     rows=()
     active=$(active_account)
     agent=$(default_agent)
     while read -r a; do
-      usage_refresh "$a" || true
-      rec=$(account_usage_json "$a")
       mark=""
       [[ $a == "$active" ]] && mark="●"
-      rows+=("$mark" "$a"
-        "$(jq -r 'if .ok then "\(.session|floor)%" else "—" end' <<<"$rec")"
-        "$(jq -r 'if .ok then "\(.weekly|floor)%" else (.why // "unknown") end' <<<"$rec")")
+      rows+=("$mark" "$a")
     done < <(list_accounts)
 
     rc=0
     out=$(zenity --list --title="$TITLE" --width=680 --height=380 \
-      --text="Assistant: ${agent:-not chosen}   ·   Autoswitch: $(switch_mode) at $(threshold)%\nClaude accounts (● = used by new sessions):" \
-      --column="" --column="Account" --column="Session (5h)" --column="Weekly" \
+      --text="Assistant: ${agent:-not chosen}   ·   Autoswitch: $(switch_mode) at $(threshold)% (inactive: nothing reads usage)\nClaude accounts (● = used by new sessions):" \
+      --column="" --column="Account" \
       --print-column=2 --ok-label="Use selected" --cancel-label="Close" \
       --extra-button="Open assistant" --extra-button="Add account" \
       --extra-button="Remove account" --extra-button="Change AI tool" \
@@ -993,20 +702,19 @@ Usage: vexos-ai [--non-interactive] [--json] [command]
   --prompt "<text>"         open it with a task
   prompt <text…>            the same, words joined
   pick [claude|opencode]    choose the assistant (no argument: ask)
-  status [--json] [--refresh]   state; --refresh re-reads usage (rate-limited)
-  panel                     accounts & usage window
+  status [--json] [--refresh]   state; --refresh is accepted and ignored
+  panel                     accounts window
   diagnose [unit|rebuild]   collect logs (or reproduce a failed rebuild) and ask what is wrong
   crash <pid> [comm exe sig]  diagnose a core dump (see: coredumpctl list)
   crash-mute [name [on|off]]  mute / unmute / list crash notifications
   crash-mute --off <name>   unmute
   crash-capture [on|off]    watch for crashes at all (no argument: show)
-  account list              Claude accounts and their usage
+  account list              Claude accounts
   account add <label>       sign in an extra Claude account (opens a browser)
   account use <label|next>  account for new sessions
   account remove <label>
   account rename <label> <new>
-  account mode [manual|auto] [threshold]   warn only, or also switch, near a limit
-  usage [account]           print usage JSON (re-read, rate-limited)
+  account mode [manual|auto] [threshold]   saved, but unused: nothing reads usage now
   theme                     sync Claude Code's theme with the desktop
 
 With the arguments a command needs it never asks anything. --non-interactive
@@ -1091,8 +799,6 @@ account)
   *) usage >&2; exit 2 ;;
   esac
   ;;
-usage) usage_cmd "${1:-}" ;;
-usage-check) usage_check ;;
 theme) theme_sync ;;
 theme-watch) theme_watch ;;
 welcome) welcome ;;

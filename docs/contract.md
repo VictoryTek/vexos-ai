@@ -50,7 +50,7 @@ vexos-ai                                  open the assistant (in /etc/nixos)
 vexos-ai --prompt "<text>"                … with a task
 vexos-ai prompt <text…>                   same, words joined with spaces
 vexos-ai pick [claude|opencode]           set the agent; no argument → ask
-vexos-ai status [--json] [--refresh]      state; --refresh re-reads usage
+vexos-ai status [--json] [--refresh]      state; --refresh is accepted and ignored
 vexos-ai account list
 vexos-ai account add <label>              interactive sign-in (terminal)
 vexos-ai account use <label|next>         main, a label, or the next account
@@ -63,13 +63,15 @@ vexos-ai crash-mute --off <prog>          same as '<prog> off'
 vexos-ai crash-capture [on|off]           no argument → print "on" or "off"
 vexos-ai crash <pid> [comm exe sig]       diagnose a core dump
 vexos-ai diagnose [unit|rebuild]
-vexos-ai usage [account]                  the usage cache record (see Files)
 vexos-ai theme
-internal: panel, crash-watch, usage-check, theme-watch, welcome
+internal: panel, crash-watch, theme-watch, welcome
 ```
 
 Notes:
 
+- **Removed:** `vexos-ai usage [account]` and the internal `usage-check` (and its
+  `vexos-ai-usage` user timer) are gone. They are unknown commands now: exit 2,
+  usage on stderr. See "Credentials and the network".
 - `account use` with no target means `next`. `next` cycles `main`, then the
   labels in name order, then `main`.
 - Labels are 1-32 of `A-Za-z0-9_-`. `main` and `next` are reserved. `account use`
@@ -97,15 +99,7 @@ Notes:
       "signedIn": true,
       "plan": "Max 5x",
       "inUse": false,
-      "usage": {
-        "ok": true,
-        "session": 12.0, "sessionResetsAt": "2026-10-07T18:36:41+00:00",
-        "weekly": 40.0,  "weeklyResetsAt":  "2026-10-10T15:36:41+00:00",
-        "scoped": [ { "label": "Opus Weekly", "percent": 30.0, "resetsAt": "2026-10-10T15:36:41+00:00" } ],
-        "fetchedAt": "2026-10-07T15:36:41+00:00",
-        "stale": false,
-        "why": null
-      }
+      "usage": null
     }
   ],
   "activeAccount": "main",
@@ -117,24 +111,21 @@ Notes:
 - `schema` is an integer. It changes only on a breaking change. Additive keys do
   not bump it, so **consumers must ignore unknown keys**.
 - `agent` is `null` until one is chosen (or if the file holds something else).
-  `usage` is `null` until the first reading.
-- Percentages are 0-100 floats. A source that reports 0-1 fractions is converted.
-  A window whose `…ResetsAt` has passed reads 0.
-- `usage.ok` is false when there are no numbers at all; `session`, `weekly` and
-  the reset times are then `null` and `why` says why. `ok: true` with
-  `stale: true` means the numbers are the last good ones and `why` says why they
-  could not be refreshed (rate limited, expired sign-in …).
+- `usage` is **always `null`**. Earlier versions filled it from a usage probe,
+  which is removed (see "Credentials and the network"). The key stays so that
+  schema 1 consumers, which already handle `null`, keep parsing. Do not rely on
+  it: it may be dropped in a later schema.
 - `signedIn` is false only when the account has no refresh token (or an expired
   access token and nothing to renew it). An expired *access* token is routine:
-  `signedIn` stays true and `usage.why` is "start Claude Code to refresh it".
+  `signedIn` stays true.
 - `plan` comes from the account's credentials ("Max 5x", "Pro"), or is `null`.
 - `inUse`: a running Claude Code process of this user has the account as its
   `CLAUDE_CONFIG_DIR` (none set means `main`).
 - `needsReboot`: `sw/bin/vexos-ai` is in `/run/current-system` but not in
   `/run/booted-system` (the user services start at login).
 - `installed` is always true when the CLI runs.
-- Plain `status` reads files only. It never goes to the network. Only
-  `--refresh` (and `usage`) re-read usage, and they respect backoff.
+- `status` reads files only. It never goes to the network. `--refresh` is
+  accepted for callers that still pass it and does nothing.
 
 ## Files
 
@@ -148,32 +139,34 @@ reads the files below directly and keeps working.
 | `…/crash-ignore/<prog>` | empty file per muted program |
 | `…/crash-capture-off` | flag file. The crash-watch unit has `ConditionPathExists=!%h/.config/vexos/ai/crash-capture-off` (systemd cannot see an `XDG_CONFIG_HOME` override) |
 | `$XDG_DATA_HOME/vexos/ai/claude-accounts/<label>/` | Claude config home |
-| `$XDG_CACHE_HOME/vexos/ai/usage-<label>.json` | `ok` (bool) `session` `weekly` (numbers) `sessionReset` `weeklyReset` `why` (strings, `why` is `""` when fine), plus `fetchedAt` `plan` `scoped` `stale` |
-| `$XDG_STATE_HOME/vexos/ai/probe-<label>.json` | `{nextAt, lastAt, failures}`, epoch seconds. Never a token |
-| `$XDG_STATE_HOME/vexos/ai/probe-<label>.lock` | `flock` file |
 
-## Usage probing
+Versions before the usage probe was removed also wrote
+`$XDG_CACHE_HOME/vexos/ai/usage-<label>.json` and
+`$XDG_STATE_HOME/vexos/ai/{probe-<label>.json,probe-<label>.lock,warned-<label>}`.
+**Nothing writes or reads them now.** An old `usage-<label>.json` is frozen at
+its last reading and no longer updates, so a caller that reads it directly (the
+released VexPortal did) must stop trusting it. `account remove` deletes the
+ones of the account it removes; any others are harmless leftovers.
 
-The usage endpoint is undocumented and rate-limited, so:
+## Credentials and the network
 
-- **Token handling.** The access token is read from `.credentials.json`, sent to
-  curl on stdin for one `Authorization` header, and dropped. It is never in argv,
-  logs, the cache, state, error text or `status`. A test greps every file the CLI
-  writes and every output for it.
-- **Single flight.** One probe per account at a time (`flock`), whichever of the
-  timer, the CLI, VexPortal or the panel asks. A caller that does not force
-  skips; `--refresh` and `usage` wait for the one in flight.
-- **Intervals.** The active account every 10 minutes, every 3 when within 15
-  points of the threshold, other accounts every 60. `--refresh` skips the
-  interval but never a backoff, and never probes twice within 15 seconds.
-- **Backoff.** On 429, `Retry-After` (seconds) is honoured. Other failures
-  (including 401, 403, 5xx and an unknown payload) back off 1, 2, 4 … 60 minutes.
-  A transport error retries in a minute and does not count as a failure.
-- **Degrade.** The last good numbers are kept, with `stale: true` and a short
-  reason. An unknown payload is "usage format changed", never a crash.
-- Scoped (per-model) limits are read from `seven_day_<model>` keys in the
-  payload, labelled "<Model> Weekly". The payload is undocumented, so this is
-  best effort and `scoped` may be empty.
+- **No network.** The CLI makes no network request. Nothing in it calls
+  `api.anthropic.com` or any other endpoint, and `curl` is not one of its
+  runtime inputs. The usage probe (a timer that read the login token and called
+  Anthropic's undocumented OAuth usage endpoint) is removed. A caller that wants
+  usage asks the agent itself: the assistant panel shows the 5-hour line that
+  Claude Code's own `/usage` reports.
+- **What it still reads.** `status` reads each account's `.credentials.json` for
+  `signedIn` and `plan` only: whether a refresh token exists, whether the access
+  token has not expired, and the subscription and rate-limit tier labels. A
+  token is never printed, logged, sent anywhere or written to any file; a test
+  greps every output and every file under `HOME` for it.
+- **What it never does.** It does not copy credentials. `account add` has Claude
+  sign in to the new account's own config directory (`claude auth login`),
+  `account rename` moves that directory and `account remove` deletes it.
+- **Switching mode and threshold.** `account mode` still stores `mode` and
+  `threshold` (and `status` still reports them as `switching`), but they have no
+  effect: they only ever steered the removed usage warning and auto-switch.
 
 ## What the safety policy covers, and what it does not
 
@@ -217,14 +210,15 @@ they edit or run commands. That is a guardrail. What to know:
 fake `HOME`, a fake `/proc` and system profiles, and stub `claude`, `opencode`,
 `curl`, `systemctl`, `zenity`, `xdg-terminal-exec`, `notify-send` and `gsettings`
 first on `PATH`. The stubs log their calls, so "never opens a dialog" is an
-assertion. Terminal cases run under `script(1)` for a real pty. It runs as
+assertion; the `curl` stub is a tripwire that fails and logs if anything calls
+it. Terminal cases run under `script(1)` for a real pty. It runs as
 `checks.<system>.contract`; by hand:
 
 ```sh
-nix develop -c env VEXOS_AI_BIN=<path to a vexos-ai built without curl, zenity,
+nix develop -c env VEXOS_AI_BIN=<path to a vexos-ai built without zenity,
   libnotify, xdg-terminal-exec in its runtime inputs> bats tests/contract
 ```
 
 (`packages.<system>.default.passthru.mkScript [ … ]` builds that variant. The
-packaged `vexos-ai` puts its own `curl` in front of `PATH`, which would hide the
-stub.)
+packaged `vexos-ai` puts its own `zenity`, `libnotify` and `xdg-terminal-exec`
+in front of `PATH`, which would hide the stubs.)
