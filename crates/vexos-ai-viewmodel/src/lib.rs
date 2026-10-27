@@ -12,16 +12,27 @@
 //!   become markup, a clickable link or a loaded image.
 //! - Rebuilding the system is a separate state machine with a fixed command;
 //!   nothing in a conversation can start it.
+//! - A failure notification leads to a draft for the input box, never to a
+//!   prompt: collected text is redacted, capped and fenced as untrusted, and
+//!   the user decides whether to send it.
 
 mod conversation;
+mod diagnose;
 mod markdown;
+mod notify;
 mod proposal;
 mod rebuild;
+mod redact;
 
 pub use conversation::{
     Answer, ApprovalCard, ClickError, Conversation, Decider, Item, NOT_SENT, State, ToolCard,
     agent_label, choice_label, mode_label,
 };
+pub use diagnose::{
+    BEGIN, Crash, END, Excerpt, HeldDraft, INSTRUCTION, Log, Missing, Subject, UnitName, core_file,
+    coredump_argv, coredump_log, draft, excerpt, journal_argv, journal_log,
+};
 pub use markdown::{Run, Style, markdown};
+pub use notify::{Crashes, FailedUnits, SETTINGS_FILE, Settings};
 pub use proposal::{DiffLine, Proposal, line_diff};
 pub use rebuild::{Rebuild, RebuildCommand, describe_wait_status};

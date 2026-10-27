@@ -3,18 +3,21 @@
 //! (what reaches the user, what counts as an answer) live in the core and the
 //! view-model, which are tested headless.
 
+mod notify;
 mod rebuild;
+#[cfg(test)]
+mod scan_tests;
 
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 
 use adw::prelude::*;
-use gtk::{gio, glib};
+use gtk::{gdk, gio, glib};
 use vexos_ai_core::{Agent, Config, Decision, Error, Session};
 use vexos_ai_viewmodel::{
-    Answer, ApprovalCard, Conversation, DiffLine, Item, Proposal, Rebuild, State, agent_label,
-    markdown, mode_label,
+    Answer, ApprovalCard, Conversation, DiffLine, HeldDraft, Item, Proposal, Rebuild, State,
+    agent_label, markdown, mode_label,
 };
 
 const APP_ID: &str = "io.github.victorytek.VexosAssistant";
@@ -49,6 +52,8 @@ fn toggle(window: Option<bool>) -> Toggle {
 fn main() -> glib::ExitCode {
     let app = adw::Application::builder().application_id(APP_ID).build();
     let slot = Slot::default();
+    // Watchers run only in the primary instance.
+    app.connect_startup(notify::start_watchers);
     app.connect_activate({
         let slot = slot.clone();
         move |app| window(app, &slot).window.present()
@@ -70,6 +75,7 @@ fn main() -> glib::ExitCode {
         })
         .build();
     app.add_action_entries([toggle_action]);
+    app.add_action_entries(notify::actions(&slot));
     app.run()
 }
 
@@ -98,13 +104,20 @@ struct Ui {
     list: gtk::Box,
     scroller: gtk::ScrolledWindow,
     rows: RefCell<Vec<gtk::Widget>>,
-    entry: gtk::Entry,
+    input: gtk::TextView,
     send: gtk::Button,
     cancel: gtk::Button,
     rebuild_button: gtk::Button,
     conversation: RefCell<Option<Conversation>>,
     session: RefCell<Option<Arc<Session>>>,
     rebuild: RefCell<Rebuild>,
+    rebuild_view: RefCell<Option<rebuild::RebuildView>>,
+    /// A draft from a notification, until the conversation can take it.
+    held: RefCell<HeldDraft>,
+    /// On the agent-choice page: a draft is waiting.
+    waiting: gtk::Label,
+    /// Above the input: the draft in it has not been sent.
+    draft_note: gtk::Label,
 }
 
 impl Ui {
@@ -130,10 +143,20 @@ impl Ui {
             button.add_css_class("suggested-action");
             choices.append(button);
         }
+        let waiting = gtk::Label::builder()
+            .label("A draft from a notification is waiting. It goes into the input once the session is ready; nothing is sent until you press Send.")
+            .wrap(true)
+            .justify(gtk::Justification::Center)
+            .visible(false)
+            .build();
+        waiting.add_css_class("dim-label");
+        let start_body = gtk::Box::new(gtk::Orientation::Vertical, 18);
+        start_body.append(&choices);
+        start_body.append(&waiting);
         let start = adw::StatusPage::builder()
             .title("Start a session")
             .description("Choose the agent for this session. It works in /etc/nixos and asks before it changes anything.")
-            .child(&choices)
+            .child(&start_body)
             .build();
 
         let list = gtk::Box::builder()
@@ -149,11 +172,36 @@ impl Ui {
             .vexpand(true)
             .child(&list)
             .build();
-        let entry = gtk::Entry::builder()
-            .hexpand(true)
-            .placeholder_text("Ask about this system…")
+        // Multi-line, so a draft shows exactly what would be sent. Enter
+        // sends, Shift+Enter starts a new line.
+        let input = gtk::TextView::builder()
+            .wrap_mode(gtk::WrapMode::WordChar)
+            .accepts_tab(false)
+            .tooltip_text("Ask about this system… (Enter sends, Shift+Enter for a new line)")
+            .top_margin(6)
+            .bottom_margin(6)
+            .left_margin(6)
+            .right_margin(6)
             .sensitive(false)
             .build();
+        let input_scroller = gtk::ScrolledWindow::builder()
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .hexpand(true)
+            .propagate_natural_height(true)
+            .max_content_height(200)
+            .child(&input)
+            .build();
+        input_scroller.add_css_class("card");
+        let draft_note = gtk::Label::builder()
+            .label("Draft from a notification, not sent. Review it (the log is in the marked block), edit it if you like, then press Send.")
+            .wrap(true)
+            .xalign(0.0)
+            .margin_start(12)
+            .margin_end(12)
+            .visible(false)
+            .build();
+        draft_note.add_css_class("dim-label");
+        draft_note.add_css_class("caption");
         let send = gtk::Button::builder()
             .label("Send")
             .sensitive(false)
@@ -166,10 +214,11 @@ impl Ui {
             .margin_start(12)
             .margin_end(12)
             .build();
-        composer.append(&entry);
+        composer.append(&input_scroller);
         composer.append(&send);
         let chat = gtk::Box::new(gtk::Orientation::Vertical, 0);
         chat.append(&scroller);
+        chat.append(&draft_note);
         chat.append(&composer);
 
         let stack = gtk::Stack::new();
@@ -194,13 +243,17 @@ impl Ui {
             list,
             scroller,
             rows: RefCell::new(Vec::new()),
-            entry,
+            input,
             send,
             cancel,
             rebuild_button,
             conversation: RefCell::new(None),
             session: RefCell::new(None),
             rebuild: RefCell::new(Rebuild::default()),
+            rebuild_view: RefCell::new(None),
+            held: RefCell::new(HeldDraft::default()),
+            waiting,
+            draft_note,
         });
 
         for (button, agent) in [(&claude, Agent::Claude), (&opencode, Agent::OpenCode)] {
@@ -215,7 +268,19 @@ impl Ui {
             let on_send = on_send.clone();
             move |_| on_send()
         });
-        ui.entry.connect_activate(move |_| on_send());
+        let keys = gtk::EventControllerKey::new();
+        keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+        keys.connect_key_pressed(move |_, key, _, modifiers| {
+            if matches!(key, gdk::Key::Return | gdk::Key::KP_Enter)
+                && !modifiers.contains(gdk::ModifierType::SHIFT_MASK)
+            {
+                on_send();
+                glib::Propagation::Stop
+            } else {
+                glib::Propagation::Proceed
+            }
+        });
+        ui.input.add_controller(keys);
         ui.cancel.connect_clicked({
             let ui = ui.clone();
             move |_| ui.cancel_turn()
@@ -280,8 +345,22 @@ impl Ui {
         self.refresh();
     }
 
+    fn input_text(&self) -> String {
+        let buffer = self.input.buffer();
+        buffer
+            .text(&buffer.start_iter(), &buffer.end_iter(), false)
+            .to_string()
+    }
+
+    /// A notification's draft: into the input when the conversation can
+    /// take it, held until then. Never sent from here.
+    fn hold_draft(&self, draft: String) {
+        self.held.borrow_mut().hold(draft);
+        self.refresh();
+    }
+
     fn send_prompt(self: &Rc<Self>) {
-        let text = self.entry.text().to_string();
+        let text = self.input_text();
         let (Some(session), Some(index)) = (
             self.session(),
             self.conversation
@@ -291,7 +370,8 @@ impl Ui {
         ) else {
             return;
         };
-        self.entry.set_text("");
+        self.input.buffer().set_text("");
+        self.draft_note.set_visible(false);
         self.render(index);
         self.refresh();
         let turn = runtime().spawn(async move { session.prompt(&text).await });
@@ -308,7 +388,7 @@ impl Ui {
                 .as_mut()
                 .and_then(|c| c.take_unsent())
             {
-                ui.entry.set_text(&text);
+                ui.input.buffer().set_text(&text);
             }
         });
     }
@@ -349,9 +429,17 @@ impl Ui {
             Rebuild::Idle | Rebuild::Finished(_)
         ));
         let conversation = self.conversation.borrow();
+        self.waiting
+            .set_visible(conversation.is_none() && self.held.borrow().is_held());
         let Some(c) = conversation.as_ref() else {
             return;
         };
+        // Replaces what is in the input. Focus is not moved to the input, so
+        // a stray Enter elsewhere does not send it.
+        if let Some(draft) = self.held.borrow_mut().release(c.can_send()) {
+            self.input.buffer().set_text(&draft);
+            self.draft_note.set_visible(true);
+        }
         let state = match c.state() {
             State::Starting => "starting…".to_owned(),
             State::Ended(_) => "ended".to_owned(),
@@ -362,7 +450,7 @@ impl Ui {
         };
         self.title
             .set_subtitle(&format!("{} · {state}", agent_label(c.agent())));
-        self.entry.set_sensitive(c.can_send());
+        self.input.set_sensitive(c.can_send());
         self.send.set_sensitive(c.can_send());
         self.cancel.set_sensitive(*c.state() == State::Busy);
     }

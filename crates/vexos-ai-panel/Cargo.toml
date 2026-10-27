@@ -13,4 +13,5 @@ gtk = { package = "gtk4", version = "0.11", features = ["v4_18"] }
 tokio = { version = "1", features = ["rt-multi-thread"] }
 vexos-ai-core = { path = "../vexos-ai-core" }
 vexos-ai-viewmodel = { path = "../vexos-ai-viewmodel" }
-vte = { package = "vte4", version = "0.10" }
+# v0_72: Terminal::text_range_format, to read a failed rebuild's output.
+vte = { package = "vte4", version = "0.10", features = ["v0_72"] }
