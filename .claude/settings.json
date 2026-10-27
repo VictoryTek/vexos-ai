@@ -10,7 +10,13 @@
       "Bash(stat:*)",
       "Bash(nix build:*)",
       "Bash(nix eval:*)",
-      "Bash(shellcheck:*)"
+      "Bash(shellcheck:*)",
+      "Bash(scripts/preflight.sh:*)",
+      "Bash(nix develop:*)",
+      "Bash(bash -n:*)",
+      "WebSearch",
+      "mcp__context7",
+      "mcp__nixos"
     ],
     "deny": [
       "Bash(git add:*)",
@@ -41,7 +47,24 @@
       "Bash(pkexec just update-all:*)",
       "Bash(nix flake check:*)",
       "Bash(sudo nix flake check:*)",
-      "Bash(pkexec nix flake check:*)"
+      "Bash(pkexec nix flake check:*)",
+      "Bash(nix-collect-garbage:*)",
+      "Bash(nix store gc:*)",
+      "Bash(sudo nix-collect-garbage:*)",
+      "Bash(sudo nix store gc:*)"
+    ]
+  },
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/verify.sh\"",
+            "timeout": 600
+          }
+        ]
+      }
     ]
   }
 }
