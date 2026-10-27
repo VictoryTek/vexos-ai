@@ -86,7 +86,9 @@ impl Fake {
 }
 
 fn config() -> Config {
-    let mut config = Config::new("/tmp/vexos-ai-test");
+    // Absolute on every platform (the core refuses a relative cwd, and on
+    // Windows "/tmp/..." has no drive). The fake agent never touches it.
+    let mut config = Config::new(std::env::temp_dir().join("vexos-ai-test"));
     config.permission_timeout = Duration::from_secs(30);
     config
 }
