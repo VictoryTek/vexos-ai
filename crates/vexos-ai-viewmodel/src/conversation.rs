@@ -5,8 +5,11 @@ use std::fmt;
 
 use vexos_ai_core::{Agent, Decision, Error, Event, PermissionRequest, Session, ToolCall};
 
+use std::time::Instant;
+
 use crate::composer::Outgoing;
 use crate::proposal::Proposal;
+use crate::usage::{Disabled, Shown, UsageButton, five_hour, tooltip};
 
 /// Where a click's answer goes. [`Session`] in the app; a recorder in tests.
 pub trait Decider {
@@ -151,11 +154,54 @@ pub struct Conversation {
     approvals: HashMap<String, usize>,
     /// A message the core refused to send, for the input to offer again.
     unsent: Option<String>,
+    /// The panel's setting: `/usage` runs once when the session is ready.
+    usage_on_launch: bool,
+    /// Set by the ready transition and cleared by the next call: the launch
+    /// `/usage` can be taken only right then.
+    launch_due: bool,
+    /// The launch `/usage` was handed out: the next [`Self::send`] of it is
+    /// the hidden turn.
+    hidden_due: bool,
+    /// The hidden launch turn while it runs: `true` while it locks the input.
+    hidden: Option<bool>,
+    /// Agent text goes to the hidden turn's reply, not the transcript: from
+    /// its start until a visible turn takes over after it ended.
+    hidden_route: bool,
+    hidden_reply: String,
+    /// The last usage result; `None` before any.
+    usage: Option<Shown>,
 }
+
+/// What [`Conversation::send`] did with a message.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Sent {
+    /// A user line was added at this index; end it with
+    /// [`Conversation::turn_ended`].
+    Shown(usize),
+    /// The launch `/usage`: not in the transcript; end it with
+    /// [`Conversation::usage_ended`].
+    Hidden,
+}
+
+/// The hidden turn's reply is kept up to this many bytes for the parser.
+const MAX_HIDDEN_REPLY: usize = 64 * 1024;
 
 /// Shown instead of the core's `NotPinned` error.
 pub const NOT_SENT: &str =
     "Not sent: the agent's mode was being reset. Your message is back in the input; send it again.";
+
+/// Shown when `/usage` gets no text back.
+pub const NO_REPLY: &str = "The agent finished without a reply.";
+
+/// Shown when `/usage` was refused during a mode reset. Unlike typed text, it
+/// is not put back in the input.
+pub const USAGE_NOT_SENT: &str =
+    "Not sent: the agent's mode was being reset. Ask for /usage again when you want it.";
+
+/// The only text [`Conversation::check_usage`] sends, at launch or on a click
+/// on the usage line: Claude Code's own usage report. A constant, so nothing
+/// else can go out that way.
+pub const USAGE_COMMAND: &str = "/usage";
 
 impl Conversation {
     pub fn new(agent: Agent) -> Self {
@@ -169,7 +215,20 @@ impl Conversation {
             cards: HashMap::new(),
             approvals: HashMap::new(),
             unsent: None,
+            usage_on_launch: true,
+            launch_due: false,
+            hidden_due: false,
+            hidden: None,
+            hidden_route: false,
+            hidden_reply: String::new(),
+            usage: None,
         }
+    }
+
+    /// The panel's `usage-on-launch` setting (on by default).
+    pub fn usage_on_launch(mut self, on: bool) -> Self {
+        self.usage_on_launch = on;
+        self
     }
 
     pub fn agent(&self) -> Agent {
@@ -189,20 +248,134 @@ impl Conversation {
         &self.items
     }
 
+    /// A message can be sent: ready, and not locked by the launch `/usage`.
     pub fn can_send(&self) -> bool {
-        self.state == State::Ready
+        self.state == State::Ready && !self.usage_locked()
+    }
+
+    /// A turn is in flight, visible or the hidden launch one: Cancel works.
+    pub fn turn_running(&self) -> bool {
+        self.state == State::Busy || self.hidden.is_some()
+    }
+
+    /// The launch `/usage` is running and holds the input.
+    pub fn usage_locked(&self) -> bool {
+        self.hidden == Some(true)
+    }
+
+    /// The usage line is shown: only Claude has the command.
+    pub fn offers_usage_check(&self) -> bool {
+        self.agent == Agent::Claude
+    }
+
+    /// Why a click on the usage line would do nothing now, if it would.
+    pub fn usage_disabled(&self) -> Option<Disabled> {
+        if !self.offers_usage_check() {
+            Some(Disabled::OpenCode)
+        } else if matches!(self.state, State::Starting | State::Ended(_)) {
+            Some(Disabled::NotReady)
+        } else if self.hidden.is_some() {
+            Some(Disabled::Loading)
+        } else if self.state == State::Busy {
+            Some(Disabled::TurnRunning)
+        } else if self.approval_waiting() {
+            Some(Disabled::ApprovalWaiting)
+        } else {
+            None
+        }
+    }
+
+    /// A click on the usage line works now: Claude, the mode confirmed, no
+    /// turn running (the launch one included), and no approval waiting.
+    pub fn can_check_usage(&self) -> bool {
+        self.usage_disabled().is_none() && self.can_send()
+    }
+
+    /// [`USAGE_COMMAND`] as a message when [`Self::can_check_usage`], else
+    /// `None`. It takes no text, so it can send nothing else; it is the only
+    /// maker of an [`Outgoing`] besides [`crate::Composer::submit`]. Called by
+    /// a click on the usage line, and once by [`Self::take_launch_usage`].
+    /// The caller sends it through [`Self::send`] like any message.
+    pub fn check_usage(&self) -> Option<Outgoing> {
+        self.can_check_usage()
+            .then(|| Outgoing(USAGE_COMMAND.to_owned()))
+    }
+
+    /// The launch `/usage`: [`Self::check_usage`]'s message, once per
+    /// conversation, and only right after the call that made it ready (a
+    /// Claude session, with the setting on). Any later call gets `None`,
+    /// whatever happens: a mode reset, a refused send, or a failure. Sent
+    /// through [`Self::send`], it becomes the hidden turn.
+    pub fn take_launch_usage(&mut self) -> Option<Outgoing> {
+        if !std::mem::take(&mut self.launch_due) {
+            return None;
+        }
+        let out = self.check_usage()?;
+        self.hidden_due = true;
+        Some(out)
+    }
+
+    /// The launch turn has held the input for [`crate::USAGE_LOCK`]: the input
+    /// opens; the turn keeps running and the line keeps saying "loading".
+    pub fn release_usage_lock(&mut self) -> Vec<usize> {
+        if self.hidden.is_some() {
+            self.hidden = Some(false);
+        }
+        Vec::new()
+    }
+
+    /// The usage line as the window shows it, at `now` (a monotonic clock).
+    pub fn usage_button(&self, now: Instant) -> UsageButton {
+        let disabled = self.usage_disabled();
+        let (wide, narrow) = self.shown().labels(now);
+        UsageButton {
+            visible: self.offers_usage_check(),
+            enabled: disabled.is_none() && self.can_send(),
+            wide,
+            narrow,
+            tooltip: tooltip(disabled),
+        }
+    }
+
+    fn shown(&self) -> Shown {
+        let launch_ahead =
+            self.state == State::Starting && self.offers_usage_check() && self.usage_on_launch;
+        if self.hidden.is_some() || launch_ahead {
+            return Shown::Loading;
+        }
+        self.usage.clone().unwrap_or(Shown::Unknown)
+    }
+
+    /// The result of a `/usage` reply, or "unknown" when it doesn't parse.
+    fn record_usage(&mut self, reply: Option<&str>) {
+        self.usage = Some(match reply.and_then(five_hour) {
+            Some(f) => Shown::Known(f, Instant::now()),
+            None => Shown::Unknown,
+        });
+    }
+
+    fn approval_waiting(&self) -> bool {
+        self.items
+            .iter()
+            .any(|item| matches!(item, Item::Approval(card) if card.answer == Answer::Pending))
     }
 
     /// The session started. Prompts open once the core confirms a mode too.
     pub fn started(&mut self) {
+        self.launch_due = false;
         self.started = true;
         self.open();
     }
 
-    /// The core sends the first mode when it opens prompts.
+    /// The core sends the first mode when it opens prompts. This is the one
+    /// ready transition (nothing goes back to `Starting`), and the only place
+    /// the launch `/usage` is armed.
     fn open(&mut self) {
         if self.state == State::Starting && self.started && self.mode.is_some() {
             self.state = State::Ready;
+            if self.offers_usage_check() && self.usage_on_launch {
+                self.launch_due = true;
+            }
         }
     }
 
@@ -214,7 +387,23 @@ impl Conversation {
     /// Takes one event from the core. Returns the indices of the items that
     /// changed or were added, in order. Never answers a request.
     pub fn apply(&mut self, event: Event) -> Vec<usize> {
+        self.launch_due = false;
         match event {
+            // The hidden turn's reply goes to the parser only. Text arriving
+            // after it ended (before a visible turn) is still its reply.
+            Event::AgentText(text) if self.hidden_route => {
+                if self.hidden_reply.len() + text.len() <= MAX_HIDDEN_REPLY {
+                    self.hidden_reply.push_str(&text);
+                }
+                if self.hidden.is_none() {
+                    let reply = std::mem::take(&mut self.hidden_reply);
+                    if five_hour(&reply).is_some() {
+                        self.record_usage(Some(&reply));
+                    }
+                    self.hidden_reply = reply;
+                }
+                Vec::new()
+            }
             Event::AgentText(text) => match self.items.last_mut() {
                 Some(Item::Agent(last)) => {
                     last.push_str(&text);
@@ -360,14 +549,50 @@ impl Conversation {
         self.end(format!("The agent could not start: {why}"))
     }
 
-    /// The user sent a message. The caller sends the prompt only on `Some`.
-    /// Only [`crate::Composer::submit`] makes an [`Outgoing`].
-    pub fn send(&mut self, out: &Outgoing) -> Option<usize> {
+    /// A message goes out. The caller sends the prompt only on `Some`. Only
+    /// [`crate::Composer::submit`] and [`Self::check_usage`] make an
+    /// [`Outgoing`]. The launch `/usage`, right after
+    /// [`Self::take_launch_usage`], is the hidden turn; anything else adds a
+    /// user line.
+    pub fn send(&mut self, out: &Outgoing) -> Option<Sent> {
+        let hidden = std::mem::take(&mut self.hidden_due) && out.text() == USAGE_COMMAND;
+        self.launch_due = false;
         if !self.can_send() || out.text().trim().is_empty() {
             return None;
         }
+        if hidden {
+            self.hidden = Some(true);
+            self.hidden_route = true;
+            self.hidden_reply.clear();
+            return Some(Sent::Hidden);
+        }
+        // Text goes to the hidden turn until it ends, then to this one; the
+        // agent answers prompts in order.
+        if self.hidden.is_none() {
+            self.hidden_route = false;
+        }
         self.state = State::Busy;
-        Some(self.push(Item::User(out.text().to_owned())))
+        Some(Sent::Shown(self.push(Item::User(out.text().to_owned()))))
+    }
+
+    /// The hidden launch turn finished. Its reply goes to the parser and
+    /// nowhere else; a failure, a cancel or a refusal makes the line
+    /// "unknown". Nothing is retried, and the transcript doesn't change.
+    pub fn usage_ended(&mut self, result: Result<String, Error>) -> Vec<usize> {
+        if self.hidden.take().is_none() {
+            return Vec::new();
+        }
+        if self.state == State::Busy {
+            // A visible turn was sent meanwhile: the text is its now.
+            self.hidden_route = false;
+        }
+        let reply = std::mem::take(&mut self.hidden_reply);
+        let done = matches!(&result, Ok(reason) if reason != "cancelled");
+        self.record_usage(done.then_some(reply.as_str()));
+        if self.hidden_route {
+            self.hidden_reply = reply;
+        }
+        Vec::new()
     }
 
     /// The prompt turn finished, with its stop reason or an error.
@@ -376,21 +601,72 @@ impl Conversation {
             return Vec::new();
         }
         self.state = State::Ready;
+        // A `/usage` the user clicked or typed: its reply refreshes the line
+        // when it parses; a failure leaves the line as it was. No other
+        // turn's reply reaches the parser.
+        if self.last_sent().map(str::trim) == Some(USAGE_COMMAND)
+            && matches!(&result, Ok(reason) if reason != "cancelled")
+        {
+            let reply = self.visible_reply();
+            if five_hour(&reply).is_some() {
+                self.record_usage(Some(&reply));
+            }
+        }
         match result {
+            // `/usage` is a command, not the user's words: it never goes into
+            // the input, where it would end up in front of what they typed.
+            Err(Error::NotPinned) if self.last_sent() == Some(USAGE_COMMAND) => {
+                vec![self.push(Item::Notice(USAGE_NOT_SENT.to_owned()))]
+            }
             // A mode reset ran: nothing was sent. Not an error to show raw.
             Err(Error::NotPinned) => {
-                self.unsent = self.items.iter().rev().find_map(|item| match item {
-                    Item::User(text) => Some(text.clone()),
-                    _ => None,
-                });
+                self.unsent = self.last_sent().map(str::to_owned);
                 vec![self.push(Item::Notice(NOT_SENT.to_owned()))]
             }
             Ok(reason) if reason == "cancelled" => {
                 vec![self.push(Item::Notice("Cancelled.".into()))]
             }
+            // An empty answer to `/usage` is said plainly, not left silent.
+            // Never retried.
+            Ok(_) if self.last_sent() == Some(USAGE_COMMAND) && !self.replied() => {
+                vec![self.push(Item::Notice(NO_REPLY.to_owned()))]
+            }
             Ok(_) => Vec::new(),
             Err(why) => vec![self.push(Item::Notice(format!("The request failed: {why}")))],
         }
+    }
+
+    /// The user's last message.
+    fn last_sent(&self) -> Option<&str> {
+        self.items.iter().rev().find_map(|item| match item {
+            Item::User(text) => Some(text.as_str()),
+            _ => None,
+        })
+    }
+
+    /// The agent's text since the user's last message.
+    fn visible_reply(&self) -> String {
+        let mut parts: Vec<&str> = self
+            .items
+            .iter()
+            .rev()
+            .take_while(|item| !matches!(item, Item::User(_)))
+            .filter_map(|item| match item {
+                Item::Agent(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        parts.reverse();
+        parts.join("\n")
+    }
+
+    /// The agent wrote some text since the user's last message.
+    fn replied(&self) -> bool {
+        self.items
+            .iter()
+            .rev()
+            .take_while(|item| !matches!(item, Item::User(_)))
+            .any(|item| matches!(item, Item::Agent(text) if !text.trim().is_empty()))
     }
 
     /// The user cancelled the turn; the core answers pending requests
@@ -457,6 +733,7 @@ impl Conversation {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::usage::{CLICK_TOOLTIP, USAGE_LOCK};
     use serde_json::json;
     use std::cell::RefCell;
 
@@ -905,10 +1182,10 @@ mod tests {
         c.started();
         c.apply(Event::Mode("build".into()));
         assert_eq!(c.send(&Outgoing("   ".into())), None);
-        assert_eq!(c.send(&Outgoing("hi".into())), Some(0));
+        assert_eq!(c.send(&Outgoing("hi".into())), Some(Sent::Shown(0)));
         assert_eq!(c.send(&Outgoing("again".into())), None);
         assert_eq!(c.turn_ended(Ok("end_turn".into())), Vec::<usize>::new());
-        assert_eq!(c.send(&Outgoing("again".into())), Some(1));
+        assert_eq!(c.send(&Outgoing("again".into())), Some(Sent::Shown(1)));
         assert_eq!(c.turn_ended(Err(Error::Closed)), [2]);
         assert_eq!(
             c.items()[2],
@@ -916,6 +1193,520 @@ mod tests {
         );
         c.failed("gone");
         assert_eq!(c.send(&Outgoing("more".into())), None);
+    }
+
+    // `check_usage`: the click on the usage line ---------------------------------
+
+    /// The action's whole surface, by type: no argument but the conversation,
+    /// read-only, so it can't take text or change anything; it can only hand
+    /// back the constant.
+    #[test]
+    fn check_usage_takes_nothing_but_the_conversation() {
+        let _: fn(&Conversation) -> Option<Outgoing> = Conversation::check_usage;
+        assert_eq!(USAGE_COMMAND, "/usage");
+    }
+
+    #[test]
+    fn check_usage_sends_exactly_slash_usage_through_the_normal_path() {
+        let mut c = ready();
+        assert!(c.offers_usage_check());
+        let out = c.check_usage().expect("enabled");
+        assert_eq!(out.text(), "/usage");
+        assert_eq!(c.send(&out), Some(Sent::Shown(0)));
+        assert_eq!(c.items()[0], Item::User("/usage".into()));
+        assert_eq!(*c.state(), State::Busy);
+        // The reply is ordinary agent text in the transcript (and the line's
+        // parser reads it too; see the tests below).
+        c.apply(Event::AgentText(
+            "## Usage\n**5-hour limit** — **12%**".into(),
+        ));
+        assert_eq!(c.turn_ended(Ok("end_turn".into())), Vec::<usize>::new());
+        assert_eq!(
+            c.items()[1],
+            Item::Agent("## Usage\n**5-hour limit** — **12%**".into())
+        );
+    }
+
+    #[test]
+    fn check_usage_is_not_offered_for_opencode() {
+        let mut c = Conversation::new(Agent::OpenCode);
+        c.started();
+        c.apply(Event::Mode("build".into()));
+        assert!(c.can_send());
+        assert!(!c.offers_usage_check());
+        assert!(!c.can_check_usage());
+        assert_eq!(c.check_usage(), None);
+    }
+
+    #[test]
+    fn check_usage_waits_for_the_session_and_its_confirmed_mode() {
+        let mut c = Conversation::new(Agent::Claude);
+        assert_eq!(c.check_usage(), None);
+        c.started();
+        assert_eq!(c.check_usage(), None);
+        c.apply(Event::Mode("default".into()));
+        assert!(c.check_usage().is_some());
+
+        let mut c = Conversation::new(Agent::Claude);
+        c.apply(Event::Mode("plan".into()));
+        assert_eq!(c.check_usage(), None);
+        c.started();
+        assert!(c.check_usage().is_some());
+    }
+
+    #[test]
+    fn check_usage_is_off_while_a_turn_runs() {
+        let mut c = ready();
+        c.send(&Outgoing("how big is swap?".into())).unwrap();
+        assert!(!c.can_check_usage());
+        assert_eq!(c.check_usage(), None);
+        c.apply(Event::AgentText("4 GiB".into()));
+        c.turn_ended(Ok("end_turn".into()));
+        assert!(c.check_usage().is_some());
+    }
+
+    #[test]
+    fn check_usage_is_off_while_an_approval_waits() {
+        let mut c = ready();
+        c.send(&Outgoing("touch x".into())).unwrap();
+        c.apply(request(1, &BOTH));
+        // The turn ended but the card is still waiting for a click.
+        c.turn_ended(Ok("end_turn".into()));
+        assert!(c.can_send());
+        assert!(!c.can_check_usage());
+        assert_eq!(c.check_usage(), None);
+        c.click(1, Decision::DenyOnce, &Recorder::default())
+            .unwrap();
+        assert!(c.check_usage().is_some());
+    }
+
+    #[test]
+    fn check_usage_is_off_once_the_session_ends() {
+        let mut c = ready();
+        c.apply(Event::Closed);
+        assert_eq!(c.check_usage(), None);
+        let mut c = Conversation::new(Agent::Claude);
+        c.failed("gone");
+        assert_eq!(c.check_usage(), None);
+    }
+
+    #[test]
+    fn a_disabled_click_changes_nothing() {
+        let mut c = ready();
+        c.send(&Outgoing("hi".into())).unwrap();
+        let (items, state) = (c.items().to_vec(), c.state().clone());
+        assert_eq!(c.check_usage(), None);
+        assert_eq!((c.items(), c.state()), (items.as_slice(), &state));
+    }
+
+    /// Nothing but a click sends it: starting, every kind of event and the end
+    /// of a turn leave no message behind.
+    #[test]
+    fn check_usage_is_never_sent_by_itself() {
+        let mut c = Conversation::new(Agent::Claude);
+        c.started();
+        for event in [
+            Event::Mode("default".into()),
+            Event::AgentText("Run /usage to see your limits.".into()),
+            tool("t1", Some("ls"), Some("read"), Some("completed")),
+            request(2, &BOTH),
+            Event::TimedOut(2),
+            Event::Mode("plan".into()),
+        ] {
+            c.apply(event);
+        }
+        c.turn_ended(Ok("end_turn".into()));
+        assert!(!c.items().iter().any(|item| matches!(item, Item::User(_))));
+        assert_eq!(*c.state(), State::Ready);
+    }
+
+    #[test]
+    fn an_empty_reply_is_said_plainly_and_not_retried() {
+        let mut c = ready();
+        c.send(&c.check_usage().unwrap()).unwrap();
+        assert_eq!(c.turn_ended(Ok("end_turn".into())), [1]);
+        assert_eq!(c.items()[1], Item::Notice(NO_REPLY.into()));
+        // Blank text is no reply either.
+        c.send(&c.check_usage().unwrap()).unwrap();
+        c.apply(Event::AgentText(" \n".into()));
+        assert_eq!(c.turn_ended(Ok("end_turn".into())), [4]);
+        assert_eq!(c.items()[4], Item::Notice(NO_REPLY.into()));
+        // Nothing was sent again by itself.
+        let sent = c.items().iter().filter(|i| matches!(i, Item::User(_)));
+        assert_eq!(sent.count(), 2);
+        assert_eq!(*c.state(), State::Ready);
+    }
+
+    #[test]
+    fn an_empty_reply_to_typed_text_adds_nothing() {
+        let mut c = ready();
+        c.send(&Outgoing("touch x".into())).unwrap();
+        c.apply(request(1, &BOTH));
+        assert_eq!(c.turn_ended(Ok("end_turn".into())), Vec::<usize>::new());
+        assert!(!c.items().contains(&Item::Notice(NO_REPLY.into())));
+    }
+
+    #[test]
+    fn a_refused_usage_check_never_goes_into_the_input() {
+        let mut c = ready();
+        c.send(&c.check_usage().unwrap()).unwrap();
+        assert_eq!(c.turn_ended(Err(Error::NotPinned)), [1]);
+        assert_eq!(c.items()[1], Item::Notice(USAGE_NOT_SENT.into()));
+        assert_eq!(c.take_unsent(), None);
+        // Not retried, and the button works again.
+        assert_eq!(c.items().len(), 2);
+        assert!(c.check_usage().is_some());
+        // Typed text still comes back as before.
+        c.send(&Outgoing("check the swap size".into())).unwrap();
+        c.turn_ended(Err(Error::NotPinned));
+        assert_eq!(c.take_unsent().as_deref(), Some("check the swap size"));
+    }
+
+    #[test]
+    fn an_error_is_shown_as_text_and_not_retried() {
+        let mut c = ready();
+        c.send(&c.check_usage().unwrap()).unwrap();
+        assert_eq!(c.turn_ended(Err(Error::Closed)), [1]);
+        assert_eq!(
+            c.items()[1],
+            Item::Notice("The request failed: the agent closed the connection".into())
+        );
+        assert_eq!(c.items().len(), 2);
+        assert_eq!(*c.state(), State::Ready);
+    }
+
+    // The launch `/usage` and the usage line ---------------------------------------
+
+    const LINE: &str = "**5-hour limit** — **25%** · Resets Oct 27, 1:40 PM CDT";
+    const WEEKLY: &str = "**Weekly · all models** — **49%** · Resets Oct 30, 6:00 PM CDT";
+
+    fn report(five: &str) -> String {
+        format!(
+            "## Usage\n\n### Limits\n\n{five}\n\n{WEEKLY}\n\n| Cost | Active |\n|:--|:--|\n| $0.12 | 1m |"
+        )
+    }
+
+    /// A Claude session through its ready transition, with the setting.
+    fn launching(on: bool) -> Conversation {
+        let mut c = Conversation::new(Agent::Claude).usage_on_launch(on);
+        c.started();
+        c.apply(Event::Mode("default".into()));
+        c
+    }
+
+    /// The launch `/usage` sent, as the hidden turn.
+    fn hidden() -> Conversation {
+        let mut c = launching(true);
+        let out = c.take_launch_usage().expect("launch");
+        assert_eq!(c.send(&out), Some(Sent::Hidden));
+        c
+    }
+
+    fn label(c: &Conversation) -> String {
+        c.usage_button(Instant::now()).wide
+    }
+
+    fn users(c: &Conversation) -> usize {
+        c.items()
+            .iter()
+            .filter(|i| matches!(i, Item::User(_)))
+            .count()
+    }
+
+    #[test]
+    fn launch_sends_the_constant_once_right_after_ready() {
+        let mut c = launching(true);
+        let out = c.take_launch_usage().expect("launch");
+        assert_eq!(out.text(), "/usage");
+        assert_eq!(c.take_launch_usage(), None);
+        // The ready transition in the other order arms it too.
+        let mut c = Conversation::new(Agent::Claude);
+        c.apply(Event::Mode("default".into()));
+        c.started();
+        assert!(c.take_launch_usage().is_some());
+    }
+
+    #[test]
+    fn launch_is_only_right_at_the_ready_transition() {
+        // Any call in between, and the moment has passed.
+        let mut c = launching(true);
+        c.apply(Event::AgentText("hello".into()));
+        assert_eq!(c.take_launch_usage(), None);
+        // Before ready: nothing.
+        let mut c = Conversation::new(Agent::Claude);
+        c.started();
+        assert_eq!(c.take_launch_usage(), None);
+    }
+
+    #[test]
+    fn no_launch_for_opencode_or_with_the_setting_off() {
+        let mut c = Conversation::new(Agent::OpenCode);
+        c.started();
+        c.apply(Event::Mode("build".into()));
+        assert_eq!(c.take_launch_usage(), None);
+        assert!(!c.usage_button(Instant::now()).visible);
+
+        let mut c = launching(false);
+        assert_eq!(c.take_launch_usage(), None);
+        assert_eq!(label(&c), "Usage: unknown");
+        // A click still works.
+        assert!(c.check_usage().is_some());
+    }
+
+    #[test]
+    fn no_launch_again_after_a_reset_a_refusal_or_a_failure() {
+        let mut c = hidden();
+        assert_eq!(c.usage_ended(Err(Error::NotPinned)), Vec::<usize>::new());
+        // The panel asks right after every call: nothing to send again.
+        assert_eq!(c.take_launch_usage(), None);
+        assert_eq!(label(&c), "Usage: unknown");
+        // A mode reset and a new mode report: no second launch.
+        c.apply(Event::Mode("plan".into()));
+        c.apply(Event::Mode("default".into()));
+        assert_eq!(c.take_launch_usage(), None);
+        c.started();
+        assert_eq!(c.take_launch_usage(), None);
+        assert_eq!(users(&c), 0);
+    }
+
+    #[test]
+    fn no_launch_while_an_approval_waits() {
+        let mut c = Conversation::new(Agent::Claude);
+        c.started();
+        c.apply(request(1, &BOTH));
+        c.apply(Event::Mode("default".into()));
+        assert_eq!(c.take_launch_usage(), None);
+        c.click(1, Decision::DenyOnce, &Recorder::default())
+            .unwrap();
+        assert_eq!(c.take_launch_usage(), None);
+    }
+
+    #[test]
+    fn a_launch_message_sent_later_is_an_ordinary_one() {
+        // Taken, then something else happened first: no hidden turn later.
+        let mut c = launching(true);
+        let out = c.take_launch_usage().unwrap();
+        c.send(&Outgoing("hi".into())).unwrap();
+        c.apply(Event::AgentText("hello".into()));
+        c.turn_ended(Ok("end_turn".into()));
+        assert_eq!(c.send(&out), Some(Sent::Shown(2)));
+    }
+
+    #[test]
+    fn the_hidden_reply_goes_only_to_the_parser() {
+        let mut c = hidden();
+        assert_eq!(label(&c), "Usage: loading");
+        assert_eq!(c.apply(Event::AgentText(report(LINE))), Vec::<usize>::new());
+        assert_eq!(c.usage_ended(Ok("end_turn".into())), Vec::<usize>::new());
+        assert!(c.items().is_empty());
+        let b = c.usage_button(Instant::now());
+        assert_eq!(
+            b.wide,
+            "5-hour 25% · resets Oct 27, 1:40 PM CDT · updated just now"
+        );
+        assert_eq!(b.narrow, "25%");
+        assert!(b.enabled);
+    }
+
+    #[test]
+    fn a_click_shows_the_full_reply_and_refreshes_the_line() {
+        let mut c = hidden();
+        c.apply(Event::AgentText(report(LINE)));
+        c.usage_ended(Ok("end_turn".into()));
+        let out = c.check_usage().unwrap();
+        assert_eq!(c.send(&out), Some(Sent::Shown(0)));
+        let full = report("**5-hour limit** — **30%** · Resets Oct 27, 6:40 PM CDT");
+        c.apply(Event::AgentText(full.clone()));
+        c.turn_ended(Ok("end_turn".into()));
+        assert_eq!(c.items(), [Item::User("/usage".into()), Item::Agent(full)]);
+        assert!(label(&c).starts_with("5-hour 30% · resets Oct 27, 6:40 PM CDT"));
+    }
+
+    #[test]
+    fn a_failed_or_unparsable_click_keeps_the_line() {
+        let mut c = hidden();
+        c.apply(Event::AgentText(LINE.into()));
+        c.usage_ended(Ok("end_turn".into()));
+        for result in [
+            Ok("end_turn".to_owned()),
+            Ok("cancelled".to_owned()),
+            Err(Error::Closed),
+        ] {
+            c.send(&c.check_usage().unwrap()).unwrap();
+            c.apply(Event::AgentText("Usage is not available right now.".into()));
+            c.turn_ended(result);
+            assert!(
+                label(&c).starts_with("5-hour 25%"),
+                "{label}",
+                label = label(&c)
+            );
+        }
+    }
+
+    #[test]
+    fn a_typed_usage_refreshes_the_line_too() {
+        let mut c = launching(false);
+        c.send(&Outgoing("/usage".into())).unwrap();
+        c.apply(Event::AgentText(report(LINE)));
+        c.turn_ended(Ok("end_turn".into()));
+        assert!(label(&c).starts_with("5-hour 25%"));
+        assert_eq!(users(&c), 1);
+    }
+
+    #[test]
+    fn no_other_turns_reply_reaches_the_parser() {
+        let mut c = launching(false);
+        c.send(&Outgoing("what does /usage show?".into())).unwrap();
+        c.apply(Event::AgentText(format!("It shows:\n{LINE}")));
+        c.turn_ended(Ok("end_turn".into()));
+        assert_eq!(label(&c), "Usage: unknown");
+        // After a known value, another turn's reply doesn't change it.
+        let mut c = hidden();
+        c.apply(Event::AgentText(LINE.into()));
+        c.usage_ended(Ok("end_turn".into()));
+        c.send(&Outgoing("hi".into())).unwrap();
+        c.apply(Event::AgentText(
+            "**5-hour limit** — **99%** · Resets Jan 1, 1:00 AM UTC".into(),
+        ));
+        c.turn_ended(Ok("end_turn".into()));
+        assert!(label(&c).starts_with("5-hour 25%"));
+    }
+
+    #[test]
+    fn an_empty_failed_or_cancelled_launch_says_unknown() {
+        for result in [
+            Ok("end_turn".to_owned()),
+            Ok("cancelled".to_owned()),
+            Err(Error::Closed),
+        ] {
+            let mut c = hidden();
+            c.usage_ended(result);
+            assert_eq!(label(&c), "Usage: unknown");
+            assert!(c.items().is_empty());
+        }
+        // Claude Code's own fallback text, not the adapter's report.
+        let mut c = hidden();
+        c.apply(Event::AgentText(
+            "Current session\n  25% used\n  Resets 1:40pm".into(),
+        ));
+        c.usage_ended(Ok("end_turn".into()));
+        assert_eq!(label(&c), "Usage: unknown");
+    }
+
+    #[test]
+    fn late_hidden_text_still_goes_to_the_parser_until_a_visible_turn() {
+        let mut c = hidden();
+        c.usage_ended(Ok("end_turn".into()));
+        assert_eq!(label(&c), "Usage: unknown");
+        c.apply(Event::AgentText(LINE.into()));
+        assert!(c.items().is_empty());
+        assert!(label(&c).starts_with("5-hour 25%"));
+        c.send(&Outgoing("hi".into())).unwrap();
+        c.apply(Event::AgentText("hello".into()));
+        assert_eq!(c.items()[1], Item::Agent("hello".into()));
+    }
+
+    #[test]
+    fn the_launch_turn_locks_the_input_until_it_ends_or_is_released() {
+        let mut c = hidden();
+        assert!(c.usage_locked() && c.turn_running());
+        assert!(!c.can_send());
+        assert_eq!(c.check_usage(), None);
+        assert_eq!(c.usage_disabled(), Some(Disabled::Loading));
+        // The panel's 15 s timer releases it; the turn keeps running.
+        assert_eq!(USAGE_LOCK, std::time::Duration::from_secs(15));
+        c.release_usage_lock();
+        assert!(!c.usage_locked() && c.turn_running());
+        assert!(c.can_send());
+        assert_eq!(label(&c), "Usage: loading");
+        assert_eq!(c.check_usage(), None);
+        // A visible turn meanwhile: the launch reply still goes to the parser.
+        c.send(&Outgoing("hi".into())).unwrap();
+        c.apply(Event::AgentText(LINE.into()));
+        c.usage_ended(Ok("end_turn".into()));
+        assert!(label(&c).starts_with("5-hour 25%"));
+        c.apply(Event::AgentText("hello".into()));
+        assert_eq!(
+            c.items(),
+            [Item::User("hi".into()), Item::Agent("hello".into())]
+        );
+        // Release after the end does nothing.
+        c.release_usage_lock();
+        assert!(!c.usage_locked());
+    }
+
+    #[test]
+    fn button_states_and_their_reasons() {
+        let now = Instant::now();
+        let mut c = Conversation::new(Agent::Claude);
+        let b = c.usage_button(now);
+        assert!(b.visible && !b.enabled);
+        assert_eq!(
+            (b.wide.as_str(), b.tooltip),
+            ("Usage: loading", tooltip(Some(Disabled::NotReady)))
+        );
+        c.started();
+        c.apply(Event::Mode("default".into()));
+        let out = c.take_launch_usage().unwrap();
+        c.send(&out);
+        assert_eq!(
+            c.usage_button(now).tooltip,
+            tooltip(Some(Disabled::Loading))
+        );
+        c.usage_ended(Ok("end_turn".into()));
+        let b = c.usage_button(now);
+        assert!(b.enabled);
+        assert_eq!(b.tooltip, CLICK_TOOLTIP);
+        c.send(&Outgoing("touch x".into())).unwrap();
+        assert_eq!(c.usage_disabled(), Some(Disabled::TurnRunning));
+        assert!(!c.usage_button(now).enabled);
+        c.apply(request(1, &BOTH));
+        c.turn_ended(Ok("end_turn".into()));
+        assert_eq!(c.usage_disabled(), Some(Disabled::ApprovalWaiting));
+        assert!(!c.usage_button(now).enabled);
+        c.apply(Event::Closed);
+        assert_eq!(c.usage_disabled(), Some(Disabled::NotReady));
+        let c = Conversation::new(Agent::OpenCode);
+        assert_eq!(c.usage_disabled(), Some(Disabled::OpenCode));
+        assert!(!c.usage_button(now).visible);
+    }
+
+    /// The real adapter's reset text has U+202F before "PM". The label gets
+    /// the validated text, with an ASCII space, and nothing else.
+    #[test]
+    fn a_no_break_space_in_the_reply_reaches_the_label_as_an_ascii_space() {
+        let mut c = hidden();
+        c.apply(Event::AgentText(report(
+            "**5-hour limit** — **25%** · Resets Oct 27, 1:40\u{202f}PM CDT",
+        )));
+        c.usage_ended(Ok("end_turn".into()));
+        let b = c.usage_button(Instant::now());
+        assert_eq!(
+            b.wide,
+            "5-hour 25% · resets Oct 27, 1:40 PM CDT · updated just now"
+        );
+        assert!(!b.wide.contains('\u{202f}'));
+        assert_eq!(b.narrow, "25%");
+        assert!(c.items().is_empty());
+        // Mapped, but something else invalid: the whole value is unknown.
+        let mut c = hidden();
+        c.apply(Event::AgentText(
+            "**5-hour limit** — **25%** · Resets 1:40\u{202f}PM GMT+2".into(),
+        ));
+        c.usage_ended(Ok("end_turn".into()));
+        assert_eq!(label(&c), "Usage: unknown");
+    }
+
+    #[test]
+    fn the_line_ages_from_a_monotonic_clock() {
+        let mut c = hidden();
+        c.apply(Event::AgentText(LINE.into()));
+        c.usage_ended(Ok("end_turn".into()));
+        let later = Instant::now() + std::time::Duration::from_secs(3 * 60 + 5);
+        assert_eq!(
+            c.usage_button(later).wide,
+            "5-hour 25% · resets Oct 27, 1:40 PM CDT · updated 3 min ago"
+        );
     }
 
     /// The core opens prompts when it confirms the first mode; until then they

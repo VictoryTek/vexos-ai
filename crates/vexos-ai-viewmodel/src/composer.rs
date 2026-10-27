@@ -1,9 +1,11 @@
 //! The input box. It holds what the user typed and any draft a notification
 //! put there, and decides what may be sent.
 //!
-//! - [`Composer::submit`] is the only way to get an [`Outgoing`] message, and
-//!   [`crate::Conversation::send`] takes nothing else. Holding, placing,
-//!   editing and discarding a draft never produce one.
+//! - [`Composer::submit`] is the only way to get an [`Outgoing`] message
+//!   with typed text, and [`crate::Conversation::send`] takes nothing else.
+//!   Holding, placing, editing and discarding a draft never produce one. The
+//!   only other maker is [`crate::Conversation::check_usage`], whose text is
+//!   the constant [`crate::USAGE_COMMAND`].
 //! - A draft is placed only once the conversation can send. While it waits
 //!   for review, Enter does nothing; only the Send button sends it. Once the
 //!   user edits it, Enter works again, but it is still a draft (the banner
@@ -13,7 +15,8 @@
 
 use std::mem;
 
-/// A message the user chose to send. Only [`Composer::submit`] makes one.
+/// A message the user chose to send. Only [`Composer::submit`] (typed text)
+/// and [`crate::Conversation::check_usage`] (the constant `/usage`) make one.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Outgoing(pub(crate) String);
 

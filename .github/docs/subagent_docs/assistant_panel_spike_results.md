@@ -1450,3 +1450,541 @@ VexOS Desktop 26.05, kernel 7.3.0, Nix 2.34.9. Exit codes:
   GNOME Shell path was read in source, not exercised.
 - **`set_text` signal order**: the `syncing` guard is by construction; the
   exact "changed" sequence of a real `GtkTextBuffer` was not observed.
+
+## Usage action
+
+2026-10-27. This makes `/usage` a first-class action and renders markdown
+tables. It follows `usage_display_spec.md`, "Update 2026-10-27", which
+supersedes recommendation (c) there.
+
+Not changed: `crates/vexos-ai-core`, `nix/policy.nix`, `docs/contract.md`,
+CI, the extension, `nix/`, `Cargo.lock`. Nothing was written outside the
+repo except the cargo build caches. All of this work was done on a
+**Windows** workstation, so no nix check ran (see "Checks run").
+
+Live input (from the user, not observed here): typing `/usage` with Claude
+returned plan limits, a session table and a "What's using your limits?"
+section. No approval card appeared, and the mode did not change. Tables
+showed as raw `|` lines.
+
+### 1. Markdown tables (`crates/vexos-ai-viewmodel/src/markdown.rs`)
+
+GFM tables are parsed (`Options::ENABLE_TABLES`, pulldown-cmark 0.13.5, read
+in its source) and shown as monospace text runs:
+
+- **Layout.** The header row is bold; a `─┼─` rule goes under it; columns
+  are separated by ` │ `. Left, centre and right alignment come from the
+  delimiter row.
+- **Cell content is plain text.** Formatting inside a cell is dropped, and
+  link and image targets are shown as text, as elsewhere. Nothing in a cell
+  becomes markup: cell text is collected as a string and inserted with the
+  table's own tags only.
+- **Ragged rows.** The parser pads short rows with empty cells, and drops
+  cells past the header's count. The dropped tail is recovered from the
+  row's source range and kept as one more literal cell, so nothing the
+  agent wrote is lost.
+- **Very wide cells** are kept whole. Columns are padded to at most 40
+  characters, so a long cell pushes only its own line along.
+- **Size bound.** A table whose padded text would exceed 100,000 bytes is
+  shown unaligned, with trailing empty cells dropped. Without this, a wide
+  header with many short rows would turn kilobytes into megabytes.
+- **An unterminated table** ends with the input. A following plain line is
+  a row, as in GFM: shown, not lost.
+- **Known limit:** widths count characters, so CJK, emoji and tabs can
+  misalign a column (recorded in the module doc).
+
+The panel needed no change for tables: it already maps `bold` and `code`
+to text tags.
+
+### 2. The "Check usage" action
+
+View-model (`conversation.rs`, headless):
+
+- `USAGE_COMMAND = "/usage"`, a constant.
+- `Conversation::check_usage(&self) -> Option<Outgoing>` is the only maker
+  of an `Outgoing` besides `Composer::submit`. It takes no argument and
+  can't change the conversation. A test pins its type,
+  `fn(&Conversation) -> Option<Outgoing>`, and a mutation that adds a text
+  parameter does not compile.
+- It is enabled (`can_check_usage`) only when the agent is Claude, the
+  conversation is `Ready` (session started, mode confirmed, no turn
+  running), and no approval card is pending. `offers_usage_check` hides it
+  for OpenCode.
+- The message goes through `Conversation::send` like any other, so the
+  transcript shows the user line `/usage` and the reply as ordinary agent
+  text. Nothing parses the reply.
+- **Errors and empty replies** (item 3): an error turn shows the existing
+  "The request failed: …" notice. A `/usage` turn with no agent text shows
+  `NO_REPLY` ("The agent finished without a reply."). That notice applies
+  only to `/usage` turns; other turns behave as before. Nothing is retried.
+- **A refused `/usage`** (`NotPinned`, during a mode reset) shows
+  `USAGE_NOT_SENT` and is **not** put back in the input, where it would land
+  in front of the user's typed text. Typed text still comes back as before.
+  This was review finding 1.
+
+Panel (`main.rs`): a "Check usage" button between the input and Send,
+hidden for OpenCode, sensitive only while `can_check_usage()` holds. Its
+click handler is the only caller of `Ui::check_usage`. That method returns
+early without a session, takes the view-model's `Outgoing`, and passes it
+to the single `send_prompt`. The input is not touched. Nothing calls it at
+launch, on a timer or from a notification.
+
+Source scan (`scan_tests.rs`, extended):
+
+- `.prompt(` still appears once, in `send_prompt(self, out: Outgoing)`.
+  `send_prompt` is called from `submit` and `check_usage` only.
+- Across every shipped view-model file (comments and test modules
+  excluded), an `Outgoing(` is constructed exactly twice:
+  `Outgoing(mem::take(&mut self.text))` in `submit`, and
+  `Outgoing(USAGE_COMMAND.to_owned())` in `check_usage`. The field stays
+  `pub(crate)`, and `main.rs` constructs none.
+- `.check_usage()` appears once in `main.rs`, inside the button's
+  `connect_clicked`. `start`, `refresh`, `hold_draft`, `show_input` and
+  `submit` don't call it. The `check_usage` body has the session guard and
+  mentions no composer, input, text, `submit` or `format!`.
+- The notification and rebuild code don't mention `usage`.
+
+### Tests and mutation checks
+
+- View-model: 120 tests (was 97). There are 10 new table tests:
+  - aligned layout, and the table as a block between others;
+  - markup, links, images, HTML and an escaped pipe inside cells;
+  - ragged rows with kept extra cells, and empty cells;
+  - a 10,000-character cell;
+  - 5,000 rows;
+  - the size bound;
+  - unterminated tables;
+  - a pipe line without a delimiter row.
+
+  There are 13 new usage tests:
+  - the type pin;
+  - the exact `/usage` text through the normal path;
+  - off for OpenCode, before ready, mid-turn, with a pending approval, and
+    after the session ends;
+  - a disabled click changes nothing;
+  - never sent by any event;
+  - an empty reply said plainly and not retried, while typed text adds no
+    notice;
+  - a refused `/usage` never goes into the input;
+  - an error shown as text and not retried.
+- Panel scan tests: 4 (2 new, 2 extended).
+- **Mutation checks** ran on a copy (`target/mut/tree`, never the repo
+  files). The runner is `target/mut/run.py`. Baselines passed first, and
+  each change was reverted. **28 of 29 were caught by a failing test.** The
+  29th, "`check_usage` takes text", does not compile: that is the
+  type-level guarantee, and it is not counted as caught. None survived.
+  - **Tables (10):** tables not parsed; dropped cells not kept; no size
+    budget; header not bold; right alignment ignored; centre alignment
+    ignored; cell text styled as runs; no column cap; trailing empty cells
+    kept when unaligned; body not monospace.
+  - **Gate (13):** OpenCode offered; ready not required; allowed mid-turn;
+    a pending approval ignored; answered cards still block; the constant
+    changed; text other than the constant; retried after an empty reply;
+    an empty reply silent; the no-reply notice on every turn; a refused
+    `/usage` back in the input; blank text counted as a reply; `check_usage`
+    takes text (does not compile).
+  - **Panel wiring, caught by the scan (6):** sent at session start; sent
+    on a timer; sent from a notification; the button sends the input; a
+    second text constructor in the view-model; the panel sends without a
+    session.
+  - **Harness notes.** On the first run, one mutation ("sent from a
+    notification") matched two lines, so it did not run. It was re-pointed,
+    and the whole suite was re-run. After the review fixes, the suite was
+    re-run again with four mutations re-pointed or added. The 28/29 is from
+    that final run.
+
+### Review
+
+The independent review was by the `reviewer` subagent, given the plan and
+the changed files. **First pass: NEEDS_REFINEMENT**, with two CRITICAL and
+three RECOMMENDED findings:
+
+1. A refused `/usage` was restored into the input, in front of typed text.
+   Fixed: see item 2 above.
+2. The no-reply notice fired on every turn and changed existing flows.
+   Fixed: it now applies to `/usage` turns only, and the edited
+   pre-existing test was restored to its original form.
+3. Character-width alignment. Documented as a known limit.
+4. The spec pointed to this section before it existed, and the spec's row
+   4 was stale. Fixed by this section and a correction note in the spec.
+5. Recorded only: the reviewer had no "Docs consulted" line. It checked
+   the pulldown-cmark and gtk4 API use itself and found it correct.
+
+**Second pass: PASS.** No CRITICAL findings remain, and none of the
+RECOMMENDED ones need a code change. One side effect was noted: the
+handling keys on the text, so a `/usage` the user typed is treated the same
+as a click. A refused one is not put back in the input, and an empty reply
+shows `NO_REPLY`. That is deliberate: Claude Code treats both the same. The
+refusal notice was made button-neutral as a result ("Ask for /usage
+again"), since OpenCode has no button.
+
+### Checks run
+
+Windows 11, Rust 1.98.0 (rustup, not the nixpkgs 1.95 toolchain). Exit
+codes, on the repo itself:
+
+- `cargo build -p vexos-ai-core -p vexos-ai-viewmodel --all-targets`: 0.
+- `cargo test -p vexos-ai-viewmodel`: 0 (120 passed).
+- `cargo test -p vexos-ai-core`: **101**. Unit tests: 3 passed. Session
+  tests: 2 passed, 41 failed, all with "closed while expecting initialize".
+  This is the pre-existing Windows failure predicted in
+  `platform_boundary_spec.md`, section 2: `/tmp/vexos-ai-test` is not
+  absolute on Windows. The core is unchanged, and these tests passed on
+  Linux in earlier runs.
+- `cargo clippy -p vexos-ai-core -p vexos-ai-viewmodel --all-targets -- -D
+  warnings`: 0.
+- `cargo fmt --all --check`: 0.
+- **Panel scan tests, compiled alone:** `rustc --test` and `clippy-driver
+  --test -D warnings` on a one-line harness (`target/scan-harness/lib.rs`)
+  that `#[path]`-includes `scan_tests.rs`. Both exited 0, and 4 tests
+  passed. The panel crate itself needs GTK and **was not compiled**, so
+  `main.rs` is unbuilt here. The reviewer read it against the gtk4 0.11 API.
+- **Not run (no Nix on this host or in its WSL distro):** `nix build`,
+  `checks.x86_64-linux.{policy,contract,core,panel,module,extension}`,
+  `scripts/preflight.sh`, and the panel's `cargo build`, `test` and
+  `clippy` in the devShell. These must run on the Linux host before this is
+  pushed. `checks.panel` is the first real compile of the GTK changes.
+- Not run: `nix flake check` (forbidden), the panel GUI, any agent.
+
+### Not tested
+
+- **The button on screen:** its place between the input and Send, hiding
+  for OpenCode, sensitivity changes, and the click in a real window.
+- **Table rendering on screen:** monospace alignment in the reply
+  `TextView`. That view wraps (`WordChar`), so a table wider than the
+  window wraps and loses alignment. Bold header weight in the theme's
+  monospace font.
+- **The adapter's fallback:** `claude-agent-acp` builds the `/usage` reply
+  from `usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET`. If that
+  call fails or times out, it forwards Claude Code's own text, whose format
+  is unknown. The panel would show it as ordinary text, but it was never
+  seen.
+- **A real refused `/usage`** during a mode reset, and a real empty reply.
+  Both are covered headless only.
+- **The `/usage` turn's effect on context.** Whether it adds to the
+  session's context or history was not measured.
+
+## Automatic usage
+
+2026-10-27. This follows the user's decision: a launch-time 5-hour line
+that is also the button. It **supersedes** "Usage action" above in three
+places: `/usage` is now sent once at launch, its reply is parsed, and the
+separate "Check usage" button is gone. Spec: `usage_display_spec.md`,
+"Update 2026-10-27 (later)".
+
+Not changed: `crates/vexos-ai-core`, `nix/`, `nix/policy.nix`,
+`docs/contract.md`, CI, the extension, `Cargo.lock`. Nothing was written
+outside the repo except the cargo build caches. Everything was done on
+**Windows**: no nix check ran, and the GTK panel was not compiled (see
+"Checks run").
+
+### What it does
+
+- **Launch, once** (`conversation.rs`).
+  - The `Starting → Ready` transition in `open()` arms `launch_due`, for
+    Claude and with the setting on. Nothing returns to `Starting`, so this
+    happens once per conversation.
+  - `apply`, `started` and `send` clear the flag first, so
+    `take_launch_usage()` returns `check_usage()`'s message only right
+    after the call that made the session ready.
+  - The panel calls it in one place: `with_conversation`, after every call
+    into the conversation. It sends only with a session.
+  - It never fires for OpenCode, with `usage-on-launch = false`, after a
+    mode reset, after a refused or failed send, or while an approval
+    waits. A refused launch is not retried.
+  - `check_usage(&self)` is still the only `Outgoing` maker besides
+    `Composer::submit`. The launch path builds none.
+- **Setting.** `$XDG_CONFIG_HOME/vexos-ai/panel.conf`,
+  `usage-on-launch = true|false`, default on. It is read once, never
+  written, and parsed like `notifications.conf` (`PanelSettings`).
+- **Hidden turn.** The next `send` of that message returns `Sent::Hidden`:
+  - there is no user line;
+  - agent text goes to a parser-only buffer (capped at 64 KB) until the
+    turn ends, or later, until a visible turn takes over;
+  - `usage_ended` parses it, and a failure, cancel or refusal gives
+    "unknown";
+  - approvals and tool calls during it still appear in the transcript.
+- **Input lock.**
+  - While the hidden turn runs, the input and Send are disabled, a note
+    says so, and Cancel stays enabled (`turn_running`).
+  - A one-shot `USAGE_LOCK` (15 s) timer calls only `release_usage_lock`
+    (not `with_conversation`). The input opens, the turn keeps running, and
+    the line stays "Usage: loading".
+  - Text keeps going to the hidden reply until that turn ends; the agent
+    answers prompts in order.
+- **Parser** (`usage.rs`, `five_hour`).
+  - It reads only the first line starting with `5-hour limit` (after
+    removing `**`), which must be exactly
+    `5-hour limit — <N>% · Resets <text>`.
+  - `N` is ASCII digits, from 0 to 100.
+  - `<text>` is trimmed, and U+202F and U+00A0 become ASCII spaces (see
+    "Parser fix" below). After that it must be at most 40 characters and
+    contain only ASCII letters, digits, spaces, commas, colons and periods.
+  - Anything else gives `None`. No guessing or converting.
+- **The line** (`UsageButton`, `usage_button(now)`).
+  - A flat button in a top bar under the header, hidden for OpenCode.
+  - Wide label: `5-hour 25% · resets Oct 27, 1:40 PM CDT · updated just
+    now`. Narrow (an `adw::Breakpoint` at `max-width: 480sp`): `25%`.
+    Otherwise `Usage: loading` or `Usage: unknown`.
+  - The freshness note comes from `Instant`: "updated just now" under a
+    minute, then "updated N min ago". A 30 s timer only redraws it.
+  - Tooltip: "Click to show the full usage report in the chat". When
+    disabled, it gives the reason: OpenCode, not ready, loading, turn
+    running, or approval waiting.
+  - Its accessible label is set to the visible text. It is a focusable
+    `gtk::Button` with no other behaviour.
+- **Click.** The click handler calls `Ui::check_usage`, the line's only
+  handler:
+  - it shows the user line `/usage` and the full reply, tables included;
+  - the reply also refreshes the line, but only when it parses. A failed,
+    cancelled or unparsable click keeps the old value (review finding 2).
+  - A typed `/usage` behaves the same.
+  - No other turn's reply reaches the parser.
+- **Removed:** the "Check usage" button in the input row, its wiring, its
+  scan test, and the earlier "never at launch / never parsed" rules.
+
+### Source scan (`scan_tests.rs`, 7 tests)
+
+- `.prompt(` appears once. `send_prompt` is called by `submit`,
+  `check_usage` and `with_conversation`.
+- Across the shipped view-model (comments and test modules removed), an
+  `Outgoing(` is constructed only in `submit` and `check_usage`.
+- `launch_due = true` appears once, inside `open()`'s `Starting` check.
+  Nothing assigns `State::Starting;`. `apply`, `started` and `send` clear
+  the flag. `take_launch_usage` calls `self.check_usage()?`, which is the
+  only such call.
+- In `main.rs`:
+  - `take_launch_usage()` is called once, in `with_conversation`, and sent
+    only with a session;
+  - `.check_usage()` is called once, in the line's `connect_clicked`;
+  - both timers' closures mention none of `check_usage`,
+    `take_launch_usage`, `with_conversation`, `send_prompt`, `submit` or
+    `.prompt(`;
+  - notification and rebuild code don't mention usage.
+- The label is set in one place (`show_usage`), from
+  `c.usage_button(Instant::now())`, together with the accessible label.
+  `Shown::Known` is built only from `five_hour`'s result, and `FiveHour`
+  only inside `five_hour`.
+- The old button is gone: no `"Check usage"`, no
+  `composer.append(&usage)`. The line is a top bar with one connected
+  signal.
+
+### Tests and mutation checks
+
+- View-model: **147 tests** (120 before).
+  - 11 in `usage.rs`:
+    - the known line, as plain text and inside the full markdown report;
+    - weekly and per-model lines first, including a "Weekly limit" line;
+    - a missing 5-hour line, and an empty reply;
+    - percent 0, 100, 101, negative, decimal, non-numeric, `+25`,
+      fullwidth digits;
+    - reset text with markup, a link, a backtick, BEL, a tab, ESC, 41
+      characters, Cyrillic and fullwidth lookalikes, a ratio colon, and
+      U+202F (rejected, as specified);
+    - the first match wins even when it is bad;
+    - Claude Code's fallback text;
+    - wide and narrow labels, freshness, tooltips, and the setting.
+  - 16 in `conversation.rs`:
+    - once right after ready, in either order;
+    - only right at the transition;
+    - not for OpenCode, and not with the setting off;
+    - not after a reset, a refusal or `started()`;
+    - not while an approval waits;
+    - a stale launch message is sent as an ordinary one;
+    - the hidden reply goes only to the parser;
+    - a click shows the full reply and refreshes the line;
+    - a typed `/usage` refreshes the line;
+    - no other turn is parsed;
+    - empty, failed and cancelled launches say "unknown";
+    - late hidden text;
+    - the lock, the release, and a visible turn while it runs;
+    - the button states and their reasons;
+    - the freshness clock;
+    - a failed or unparsable click keeps the line.
+- Scan tests: 7 (5 new or rewritten, 2 updated).
+- **Mutation checks** ran on a copy (`target/mut/tree`). The runner is
+  `target/mut/run.py`. Baselines passed first, and each change was
+  reverted. **61 of 63 were caught by a failing test**:
+  - 10 for tables, 4 for the composer and gate from the "Usage action"
+    round, and 8 for the parser;
+  - 7 for the launch gate, 8 for routing, 7 for the lock and the line, and
+    6 for panel wiring caught by the scan;
+  - plus the rest carried over from the "Usage action" round.
+  - **Did not compile** (the type-level guarantee, not counted):
+    "`check_usage` takes text".
+  - **Survived, equivalent:** "launch for OpenCode", which removes the
+    Claude check from `open()`. `take_launch_usage` goes through
+    `check_usage`, which refuses OpenCode, and that gate's own mutation
+    ("OpenCode offered") is caught. The check in `open()` is a second guard
+    and was kept.
+- **Harness notes.** The first run on this round had 4 survivors.
+  - "weekly line accepted": the fixture had no other line containing
+    "limit". A per-model "Weekly limit" line was added.
+  - "launch rearmed after a refusal": a real test gap. The test cleared the
+    flag with `apply` before checking, which the panel doesn't do. The test
+    now checks right after `usage_ended`.
+  - "launch rearmed by a reset": exposed the redundant `launched` field,
+    which was removed. The mutation now resets the state to `Starting`, and
+    is caught.
+  - "launch for OpenCode": equivalent (above).
+  - After review finding 2, the suite was re-run with one mutation added.
+    The 61/63 is from that final run.
+
+### Review
+
+The independent review was by the `reviewer` subagent, given the user's
+plan and the files. It is reported here separately from my own checks.
+
+**First pass: PASS.** No CRITICAL findings. The reviewer checked:
+
+- event and prompt-result ordering, using the core's reader loop: hidden
+  text reaches `apply` before `usage_ended`;
+- the `RefCell` borrows in `with_conversation` and in both timers;
+- the `Rc` cycles;
+- every path that could put `/usage` back in the input;
+- the GTK and libadwaita API use against the docs.
+
+Its RECOMMENDED findings, and what was done:
+
+1. **The strict parser will probably always say "unknown" on a real
+   system.** `Intl.DateTimeFormat` puts U+202F before "PM", and non-US
+   zones look like `GMT+2`. The user then approved the U+202F/U+00A0
+   mapping, now applied (see "Parser fix" below). **`GMT+N` remains open.**
+2. **A failed or unparsable typed or clicked `/usage` wiped a good label.**
+   Fixed: visible turns update the line only when the reply parses. New
+   test, and a new mutation, caught.
+3. **A typed `/usage` refused during a mode reset is not put back in the
+   input.** Not changed. This is the deliberate, reviewed behaviour from
+   "Usage action": typed and clicked can't be told apart. Six characters to
+   retype.
+4. **Stale comments about the removed button.** Fixed.
+
+**Second pass: PASS.** Findings 2 and 4 were confirmed fixed, and removing
+`launched` was confirmed safe: `State::Starting` is set only in `new()`. No
+new findings. Findings 1 and 3 remain the user's decisions.
+
+### Checks run (my own)
+
+Windows 11, **Rust 1.98.0** (stable through rustup). The pinned 1.95.0 is
+not installed, and installing a toolchain was out of scope. Rust 1.88 is
+installed but below the crates' `rust-version`. Exit codes, on the repo
+itself:
+
+- `cargo build -p vexos-ai-core -p vexos-ai-viewmodel --all-targets`: 0.
+- `cargo test -p vexos-ai-viewmodel`: 0 (147 passed).
+- `cargo test -p vexos-ai-core`: **101**. Unit tests: 3 passed. Session
+  tests: 2 passed, 41 failed, all "closed while expecting initialize". This
+  is the known Windows `/tmp` working-directory failure
+  (`platform_boundary_spec.md`, section 2). The core is unchanged.
+- `cargo clippy -p vexos-ai-core -p vexos-ai-viewmodel --all-targets -- -D
+  warnings`: 0.
+- `cargo fmt --all --check`: 0.
+- **Panel scan tests, compiled alone**
+  (`target/scan-harness/lib.rs`, which `#[path]`-includes
+  `scan_tests.rs`): `rustc --test` 0, with 7 passed; `clippy-driver --test
+  -D warnings` 0.
+- **Not run:** `nix build`,
+  `checks.x86_64-linux.{policy,contract,core,panel,module,extension}`,
+  `scripts/preflight.sh`, and the panel's devShell build, test and clippy.
+  There is no Nix on this host or in its WSL distro. `main.rs` has never
+  been compiled: `checks.panel` will be its first compile.
+- **Untracked files and Nix:** `crates/vexos-ai-viewmodel/src/usage.rs` is
+  new and untracked. A flake built from the git tree does not see untracked
+  files, so `nix build` and the checks on the repo will fail until it is
+  committed. Otherwise, run them on a copy of the tree, as in "Draft flow
+  hardening".
+- Not run: `nix flake check` (forbidden), the panel GUI, any agent.
+
+### Not tested
+
+- **The line on screen:**
+  - its place under the header, and the flat style;
+  - the label switching between wide and narrow at the breakpoint (also
+    that `max-width: 480sp` parses and applies);
+  - the tooltip on an insensitive button;
+  - keyboard focus and the screen-reader name.
+- **The lock and its timeout in a real window:** the note, the input
+  opening after 15 s, Cancel during the lock, and a message sent while the
+  released turn still runs. Ordering is relied on, not observed: the agent
+  answers queued prompts in order, and the core delivers updates before the
+  prompt result.
+- **An adapter wording change:** any change to `usage-markdown.ts`, or the
+  SDK's experimental usage call, gives "unknown". Never observed.
+- **A failing usage call:** when
+  `usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET` fails or
+  times out, the adapter forwards Claude Code's own text. Covered only with
+  an invented fallback text.
+- **The real reset text:** U+202F and U+00A0 are now accepted (see
+  "Parser fix"), but the live reply's bytes and the line on screen have
+  not been seen. A non-US time zone (`GMT+2`) still gives "unknown" by
+  design, and was not tried live.
+- **Narrow-window switching** and the 30 s freshness redraw in a running
+  window.
+- **The setting file** on a real system (`panel.conf`), and the first
+  launch with it missing.
+
+### Parser fix: no-break spaces in the reset time
+
+2026-10-27, approved by the user.
+
+**The fix.** In `five_hour` (`usage.rs`), the reset text is trimmed as
+before. Then U+202F and U+00A0, and nothing else, each become one ASCII
+space, before validation:
+
+- nothing is collapsed;
+- the 40-character cap counts characters after the mapping;
+- the label shows the mapped, validated text.
+
+Thin (U+2009), em (U+2003) and ideographic (U+3000) spaces, zero-width
+characters, `+`, `-`, lookalikes, control characters and markup are still
+rejected. `GMT+N` remains open.
+
+**Tests.** View-model: 150 tests (147 before).
+
+- **Changed:** `reset_text_must_be_short_plain_ascii`. It pinned U+202F as
+  rejected. That entry is replaced by U+2009, U+2003, U+3000, U+200B, and
+  a mapped space next to `GMT+2` or `<b>`, all still rejected.
+- **New:**
+  - `no_break_spaces_before_am_pm_become_ascii_spaces`: U+202F and U+00A0
+    each parse, and the label has the ASCII space and no no-break space.
+    Two in a row stay two spaces. Also checked inside the markdown report.
+  - `the_cap_counts_characters_after_the_mapping`: 40 characters (more
+    than 40 bytes) are accepted; 41 are rejected.
+  - In `conversation.rs`,
+    `a_no_break_space_in_the_reply_reaches_the_label_as_an_ascii_space`:
+    end to end through the hidden turn, the label is exact, the transcript
+    stays empty, and a mapped value with `GMT+2` still says "unknown".
+- The existing scan test already checks that `FiveHour` is built only
+  inside `five_hour` and the label only from `usage_button`. So the mapped
+  text reaches the label only through validation.
+
+**Mutation checks.** On a copy (`target/mut/tree`), with baselines passing
+first. **All 8 new mutations were caught:**
+
+- no mapping;
+- only U+202F mapped;
+- only U+00A0 mapped;
+- every Unicode space mapped;
+- mapped to nothing;
+- spaces collapsed;
+- the cap measured in bytes before the mapping;
+- the original text shown.
+
+The whole suite: **69 of 71 caught**. As before, "`check_usage` takes
+text" does not compile, and "launch for OpenCode" survives as an
+equivalent mutant.
+
+**Checks run** (Windows, Rust 1.98.0; 1.95.0 not installed). Exit codes:
+
+| Check | Exit | Notes |
+|---|---|---|
+| `cargo build` (core, view-model, `--all-targets`) | 0 | |
+| `cargo test -p vexos-ai-viewmodel` | 0 | 150 passed |
+| `cargo test -p vexos-ai-core` | **101** | the known Windows `/tmp` failure: 41 session tests; core unchanged |
+| `cargo clippy --all-targets -D warnings` | 0 | |
+| `cargo fmt --all --check` | 0 | |
+| panel scan tests, compiled alone | 0 | 7 passed; `clippy-driver` also 0 |
+
+**Not run:** no Nix here, so no `nix build`, `checks.*` or
+`scripts/preflight.sh`. The GTK panel was not compiled. No independent
+review was run for this fix.

@@ -4,13 +4,29 @@
 //! in a reply can become markup. Raw HTML is shown as text. Links and images
 //! are text followed by their real target: never clickable, never loaded.
 //!
+//! Tables are monospace text: each cell's content as plain text, padded into
+//! columns, the header row bold with a rule under it. Formatting inside a
+//! cell is dropped, link and image targets are kept, and cells past the
+//! header's count are kept as one more cell. Widths are counted in
+//! characters, so wide characters (CJK, emoji) and tabs can misalign a
+//! column; the text itself is unaffected.
+//!
 //! Only agent replies go through here. Approval cards (command, plan, diff)
 //! and the user's own messages are shown literally.
 
-use pulldown_cmark::{Event, LinkType, Options, Parser, Tag, TagEnd};
+use std::ops::Range;
+
+use pulldown_cmark::{Alignment, Event, LinkType, Options, Parser, Tag, TagEnd};
 
 /// Lists nested deeper than this are indented as this level.
 const MAX_INDENT: usize = 8;
+/// Columns are padded to at most this many characters; a longer cell is kept
+/// whole and pushes the rest of its line along.
+const MAX_COLUMN: usize = 40;
+/// A table whose padded text would be longer than this is shown unaligned, so
+/// a short reply can't become a huge one.
+const MAX_PADDED: usize = 100_000;
+const SEPARATOR: &str = " │ ";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Style {
@@ -29,15 +45,116 @@ pub struct Run {
 
 /// `text` as runs of literal text. Adjacent runs never share a style.
 pub fn markdown(text: &str) -> Vec<Run> {
-    let mut out = Out::default();
-    for event in Parser::new_ext(text, Options::empty()) {
-        out.event(event);
+    let mut out = Out {
+        source: text,
+        ..Out::default()
+    };
+    for (event, range) in Parser::new_ext(text, Options::ENABLE_TABLES).into_offset_iter() {
+        out.event(event, range);
     }
     out.finish()
 }
 
+const TABLE: Style = Style {
+    bold: false,
+    italic: false,
+    code: true,
+    heading: false,
+};
+const TABLE_HEADER: Style = Style {
+    bold: true,
+    ..TABLE
+};
+
+/// A table being read: its cells as plain text, shown when it ends.
 #[derive(Default)]
-struct Out {
+struct Table {
+    aligns: Vec<Alignment>,
+    rows: Vec<Vec<String>>,
+    row: Vec<String>,
+    /// The cell being read; text goes here instead of into runs.
+    cell: Option<String>,
+    /// Where the current row ends in the source, and where its last cell
+    /// ended: anything between them is cells the parser dropped.
+    row_end: usize,
+    cell_end: usize,
+}
+
+impl Table {
+    fn end_row(&mut self, source: &str) {
+        let dropped = source
+            .get(self.cell_end..self.row_end)
+            .unwrap_or_default()
+            .trim()
+            .trim_matches('|')
+            .trim();
+        let mut row = std::mem::take(&mut self.row);
+        if !dropped.is_empty() {
+            row.push(dropped.to_owned());
+        }
+        self.rows.push(row);
+    }
+
+    /// The header line, and everything under it.
+    fn render(&self) -> (String, String) {
+        let columns = self.rows.iter().map(Vec::len).max().unwrap_or(0);
+        let mut widths = vec![0; columns];
+        for row in &self.rows {
+            for (width, cell) in widths.iter_mut().zip(row) {
+                *width = (*width).max(cell.chars().count().min(MAX_COLUMN));
+            }
+        }
+        let line_width: usize = widths.iter().sum::<usize>() + SEPARATOR.len() * columns;
+        let aligned = line_width.saturating_mul(self.rows.len()) <= MAX_PADDED;
+        let line = |row: &[String]| {
+            let mut cells: Vec<String> = Vec::with_capacity(columns);
+            for (i, &width) in widths.iter().enumerate() {
+                let cell = row.get(i).map_or("", String::as_str);
+                if !aligned {
+                    cells.push(cell.to_owned());
+                    continue;
+                }
+                let pad = width.saturating_sub(cell.chars().count());
+                cells.push(match self.aligns.get(i) {
+                    Some(Alignment::Right) => format!("{}{cell}", " ".repeat(pad)),
+                    Some(Alignment::Center) => {
+                        format!("{}{cell}{}", " ".repeat(pad / 2), " ".repeat(pad - pad / 2))
+                    }
+                    _ => format!("{cell}{}", " ".repeat(pad)),
+                });
+            }
+            if !aligned {
+                // Unaligned, empty cells at the end say nothing.
+                while cells.last().is_some_and(String::is_empty) {
+                    cells.pop();
+                }
+            }
+            cells.join(SEPARATOR).trim_end().to_owned()
+        };
+        let mut rows = self.rows.iter();
+        let header = rows.next().map(|row| line(row)).unwrap_or_default();
+        let rule = if aligned {
+            widths
+                .iter()
+                .map(|&w| "─".repeat(w))
+                .collect::<Vec<_>>()
+                .join("─┼─")
+        } else {
+            "───".to_owned()
+        };
+        let mut body = rule;
+        for row in rows {
+            body.push('\n');
+            body.push_str(&line(row));
+        }
+        (header, body)
+    }
+}
+
+#[derive(Default)]
+struct Out<'a> {
+    source: &'a str,
+    table: Option<Table>,
     runs: Vec<Run>,
     bold: usize,
     italic: usize,
@@ -51,7 +168,7 @@ struct Out {
     after_marker: bool,
 }
 
-impl Out {
+impl Out<'_> {
     fn style(&self) -> Style {
         Style {
             bold: self.bold > 0 || self.heading,
@@ -63,6 +180,10 @@ impl Out {
 
     fn push(&mut self, text: &str, style: Style) {
         if text.is_empty() {
+            return;
+        }
+        if let Some(cell) = self.table.as_mut().and_then(|t| t.cell.as_mut()) {
+            cell.push_str(text);
             return;
         }
         self.after_marker = false;
@@ -107,7 +228,17 @@ impl Out {
         }
     }
 
-    fn event(&mut self, event: Event) {
+    fn event(&mut self, event: Event, range: Range<usize>) {
+        if let Some(table) = self.table.as_mut() {
+            match &event {
+                Event::Start(Tag::TableHead | Tag::TableRow) => {
+                    table.row_end = range.end;
+                    table.cell_end = range.start;
+                }
+                Event::End(TagEnd::TableCell) => table.cell_end = range.end,
+                _ => {}
+            }
+        }
         match event {
             Event::Start(tag) => self.start(tag),
             Event::End(tag) => self.end(tag),
@@ -178,6 +309,18 @@ impl Out {
                 self.text("[image: ");
                 self.targets.push(Some(dest_url.into_string()));
             }
+            Tag::Table(aligns) => {
+                self.block();
+                self.table = Some(Table {
+                    aligns,
+                    ..Table::default()
+                });
+            }
+            Tag::TableCell => {
+                if let Some(table) = self.table.as_mut() {
+                    table.cell = Some(String::new());
+                }
+            }
             _ => {}
         }
     }
@@ -196,8 +339,31 @@ impl Out {
                 self.show_target();
             }
             TagEnd::Link => self.show_target(),
+            TagEnd::TableCell => {
+                if let Some(table) = self.table.as_mut() {
+                    let cell = table.cell.take().unwrap_or_default();
+                    table.row.push(cell);
+                }
+            }
+            TagEnd::TableHead | TagEnd::TableRow => {
+                let source = self.source;
+                if let Some(table) = self.table.as_mut() {
+                    table.end_row(source);
+                }
+            }
+            TagEnd::Table => self.show_table(),
             _ => {}
         }
+    }
+
+    fn show_table(&mut self) {
+        let Some(table) = self.table.take() else {
+            return;
+        };
+        let (header, body) = table.render();
+        self.push(&header, TABLE_HEADER);
+        self.push("\n", TABLE);
+        self.push(&body, TABLE);
     }
 
     fn show_target(&mut self) {
@@ -207,6 +373,7 @@ impl Out {
     }
 
     fn finish(mut self) -> Vec<Run> {
+        self.show_table();
         while let Some(last) = self.runs.last_mut() {
             let kept = last.text.trim_end_matches('\n').len();
             last.text.truncate(kept);
@@ -410,5 +577,127 @@ mod tests {
             assert!(!text_of(&markdown(input)).is_empty(), "{input}");
         }
         assert_eq!(markdown(""), []);
+    }
+
+    // Tables -------------------------------------------------------------------
+
+    /// The table as shown: its header line and everything under it.
+    fn table(header: &str, body: &str) -> [Run; 2] {
+        [run(header, TABLE_HEADER), run(body, TABLE)]
+    }
+
+    #[test]
+    fn a_table_is_aligned_monospace_with_a_bold_header() {
+        assert_eq!(
+            markdown("| Breakdown | Tokens |\n|:--|--:|\n| Input | 1.2k |\n| Output | 30 |"),
+            table(
+                "Breakdown │ Tokens",
+                "\n──────────┼───────\nInput     │   1.2k\nOutput    │     30"
+            )
+        );
+        assert_eq!(
+            markdown("| a | b | c |\n|:-:|---|--:|\n| wide | x | y |"),
+            table(" a   │ b │ c", "\n─────┼───┼──\nwide │ x │ y")
+        );
+    }
+
+    #[test]
+    fn a_table_is_a_block_between_others() {
+        let mut expected = vec![run("This session", HEADING), run("\n\n", PLAIN)];
+        expected.extend(table("Cost  │ API time", "\n──────┼─────────\n$0.12 │ 4s"));
+        expected.push(run("\n\nAfter.", PLAIN));
+        assert_eq!(
+            markdown(
+                "### This session\n\n| Cost | API time |\n|:--|:--|\n| $0.12 | 4s |\n\nAfter."
+            ),
+            expected
+        );
+    }
+
+    #[test]
+    fn markup_inside_cells_is_literal_text() {
+        let input = "| <b>x</b> | **bold** | [l](javascript:x) | `c` |\n|---|---|---|---|\n\
+                     | a \\| b | _i_ | ![i](http://t/p.png) | <span foreground=\"red\">r</span> |";
+        let rule = ["─".repeat(9), "─".repeat(6), "─".repeat(29), "─".repeat(32)].join("┼");
+        assert_eq!(
+            markdown(input),
+            table(
+                "<b>x</b> │ bold │ l (javascript:x)            │ c",
+                &format!(
+                    "\n{rule}\na | b    │ i    │ [image: i] (http://t/p.png) │ <span foreground=\"red\">r</span>"
+                )
+            )
+        );
+    }
+
+    #[test]
+    fn ragged_rows_are_padded_and_extra_cells_are_kept() {
+        assert_eq!(
+            markdown("| a | b |\n|---|---|\n| 1 |\n| 1 | 2 | 3 | **4** |"),
+            table("a │ b │", "\n──┼───┼──────────\n1 │   │\n1 │ 2 │ 3 | **4**")
+        );
+    }
+
+    #[test]
+    fn empty_cells_stay_empty() {
+        assert_eq!(
+            markdown("| a | |\n|---|---|\n| | b |\n| | |"),
+            table("a │", "\n──┼──\n  │ b\n  │")
+        );
+    }
+
+    #[test]
+    fn a_very_wide_cell_is_kept_whole_and_columns_stay_capped() {
+        let wide = "x".repeat(10_000);
+        let shown = text_of(&markdown(&format!(
+            "| a | b |\n|---|---|\n| {wide} | 1 |\n| c | 2 |"
+        )));
+        assert!(shown.contains(&format!("{wide} │ 1")));
+        assert!(shown.contains(&format!("c{} │ 2", " ".repeat(MAX_COLUMN - 1))));
+    }
+
+    #[test]
+    fn many_rows_are_all_shown_aligned() {
+        let rows = 5_000;
+        let input: String = std::iter::once("| row | n |\n|---|--:|\n".to_owned())
+            .chain((0..rows).map(|i| format!("| r{i} | {i} |\n")))
+            .collect();
+        let shown = text_of(&markdown(&input));
+        assert_eq!(shown.lines().count(), rows + 2);
+        assert!(shown.contains("\nr0    │    0\n"));
+        assert!(shown.ends_with("\nr4999 │ 4999"));
+    }
+
+    #[test]
+    fn a_table_cannot_blow_up_the_reply() {
+        // A wide header and many short rows: padded, this would be megabytes.
+        let columns = 1_000;
+        let mut input = format!("|{}\n", format!("{}|", "x".repeat(40)).repeat(columns));
+        input.push_str(&format!("|{}\n", "---|".repeat(columns)));
+        input.push_str(&"| y |\n".repeat(200));
+        let shown = text_of(&markdown(&input));
+        assert!(
+            shown.len() <= 2 * input.len(),
+            "{} from {}",
+            shown.len(),
+            input.len()
+        );
+        assert_eq!(shown.matches("\ny").count(), 200);
+        assert!(shown.starts_with(&format!("{} │ ", "x".repeat(40))));
+    }
+
+    #[test]
+    fn an_unterminated_table_ends_with_the_input() {
+        assert_eq!(markdown("| a |\n|---|"), table("a", "\n─"));
+        // A plain line goes on as a row, as in GFM: shown, not lost.
+        assert_eq!(
+            markdown("| a |\n|---|\n| 1 |\nnot a row"),
+            table("a", "\n─────────\n1\nnot a row")
+        );
+    }
+
+    #[test]
+    fn a_pipe_line_without_a_delimiter_row_is_not_a_table() {
+        assert_plain("| a | b |\n| 1 | 2 |", "| a | b |\n| 1 | 2 |");
     }
 }

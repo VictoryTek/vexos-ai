@@ -15,9 +15,17 @@
 //! - A failure notification leads to a draft for the input box, never to a
 //!   prompt: collected text is redacted, capped and fenced as untrusted, and
 //!   the user decides whether to send it.
-//! - The input ([`Composer`]) is the only source of a message to send: a
+//! - The input ([`Composer`]) is the only source of typed text to send: a
 //!   draft needs the Send button until the user edits it, and never
-//!   replaces typed text without asking.
+//!   replaces typed text without asking. The one other message is the
+//!   constant [`USAGE_COMMAND`] from [`Conversation::check_usage`]: Claude
+//!   only, when ready with no turn running and no approval waiting. It is
+//!   sent once when the session becomes ready (hidden: its reply goes only
+//!   to the usage parser), and on a click on the usage line (shown, reply in
+//!   the transcript). Nothing else sends it.
+//! - The usage line shows the 5-hour limit read by a strict parser from a
+//!   `/usage` reply, or "unknown". It is display text only: never sent,
+//!   logged or stored, and nothing else depends on it.
 
 mod composer;
 mod conversation;
@@ -27,11 +35,12 @@ mod notify;
 mod proposal;
 mod rebuild;
 mod redact;
+mod usage;
 
 pub use composer::{Composer, Draft, Offer, Outgoing, Placement, Via};
 pub use conversation::{
-    Answer, ApprovalCard, ClickError, Conversation, Decider, Item, NOT_SENT, State, ToolCard,
-    agent_label, choice_label, mode_label,
+    Answer, ApprovalCard, ClickError, Conversation, Decider, Item, NO_REPLY, NOT_SENT, Sent, State,
+    ToolCard, USAGE_COMMAND, USAGE_NOT_SENT, agent_label, choice_label, mode_label,
 };
 pub use diagnose::{
     BEGIN, Crash, END, Excerpt, INSTRUCTION, Log, Missing, Subject, UnitName, core_file,
@@ -41,3 +50,7 @@ pub use markdown::{Run, Style, markdown};
 pub use notify::{Crashes, FailedUnits, SETTINGS_FILE, Settings};
 pub use proposal::{DiffLine, Proposal, line_diff};
 pub use rebuild::{Rebuild, RebuildCommand, describe_wait_status};
+pub use usage::{
+    CLICK_TOOLTIP, Disabled, FiveHour, PANEL_SETTINGS_FILE, PanelSettings, USAGE_LOCK, UsageButton,
+    five_hour, freshness, tooltip,
+};

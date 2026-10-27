@@ -11,18 +11,30 @@ mod scan_tests;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
+use std::time::Instant;
 
 use adw::prelude::*;
 use gtk::{gdk, gio, glib};
 use vexos_ai_core::{Agent, Config, Decision, Error, Session};
 use vexos_ai_viewmodel::{
-    Answer, ApprovalCard, Composer, Conversation, DiffLine, Item, Offer, Outgoing, Placement,
-    Proposal, Rebuild, State, Via, agent_label, markdown, mode_label,
+    Answer, ApprovalCard, Composer, Conversation, DiffLine, Item, Offer, Outgoing,
+    PANEL_SETTINGS_FILE, PanelSettings, Placement, Proposal, Rebuild, Sent, State, USAGE_LOCK, Via,
+    agent_label, markdown, mode_label,
 };
 
 const APP_ID: &str = "io.github.victorytek.VexosAssistant";
 /// Where every session runs, as `vexos-ai` does in the terminal.
 const WORKDIR: &str = "/etc/nixos";
+
+/// The panel's own settings, read once; the file is never written.
+fn panel_settings() -> PanelSettings {
+    static SETTINGS: OnceLock<PanelSettings> = OnceLock::new();
+    *SETTINGS.get_or_init(|| {
+        std::fs::read_to_string(glib::user_config_dir().join(PANEL_SETTINGS_FILE))
+            .map(|text| PanelSettings::parse(&text))
+            .unwrap_or_default()
+    })
+}
 
 /// The core is async on tokio; GTK owns the main thread.
 fn runtime() -> &'static tokio::runtime::Runtime {
@@ -106,6 +118,14 @@ struct Ui {
     rows: RefCell<Vec<gtk::Widget>>,
     input: gtk::TextView,
     send: gtk::Button,
+    /// The usage line under the header. Its text is only ever the
+    /// view-model's label, and a click sends the view-model's constant
+    /// `/usage`; it has no other behaviour.
+    usage: gtk::Button,
+    /// The window is narrow: the usage line shows only the percent.
+    narrow: Cell<bool>,
+    /// Above the input while the launch `/usage` holds it.
+    lock_note: gtk::Label,
     cancel: gtk::Button,
     rebuild_button: gtk::Button,
     conversation: RefCell<Option<Conversation>>,
@@ -216,16 +236,35 @@ impl Ui {
             .build();
         composer.append(&input_scroller);
         composer.append(&send);
+        let lock_note = gtk::Label::builder()
+            .label("Checking usage… The input opens when it finishes, or in 15 seconds.")
+            .visible(false)
+            .build();
+        lock_note.add_css_class("dim-label");
+        lock_note.add_css_class("caption");
         let chat = gtk::Box::new(gtk::Orientation::Vertical, 0);
         chat.append(&scroller);
         chat.append(&banner);
+        chat.append(&lock_note);
         chat.append(&composer);
+
+        // The usage line: flat, under the header, and the only control that
+        // shows the full report. Shown once a Claude session exists.
+        let usage = gtk::Button::builder()
+            .label("Usage: loading")
+            .halign(gtk::Align::Center)
+            .visible(false)
+            .sensitive(false)
+            .build();
+        usage.add_css_class("flat");
+        usage.add_css_class("caption");
 
         let stack = gtk::Stack::new();
         stack.add_named(&start, Some("start"));
         stack.add_named(&chat, Some("chat"));
         let content = adw::ToolbarView::new();
         content.add_top_bar(&header);
+        content.add_top_bar(&usage);
         content.set_content(Some(&stack));
 
         let window = adw::ApplicationWindow::builder()
@@ -233,6 +272,9 @@ impl Ui {
             .title("VexOS Assistant")
             .default_width(760)
             .default_height(820)
+            // A breakpoint needs a minimum size.
+            .width_request(360)
+            .height_request(400)
             .content(&content)
             .build();
 
@@ -245,6 +287,9 @@ impl Ui {
             rows: RefCell::new(Vec::new()),
             input,
             send,
+            usage,
+            narrow: Cell::new(false),
+            lock_note,
             cancel,
             rebuild_button,
             conversation: RefCell::new(None),
@@ -264,6 +309,36 @@ impl Ui {
         ui.send.connect_clicked({
             let ui = ui.clone();
             move |_| ui.submit(Via::SendButton)
+        });
+        ui.usage.connect_clicked({
+            let ui = ui.clone();
+            move |_| ui.check_usage()
+        });
+        // Narrow windows show only the percent.
+        if let Ok(condition) = adw::BreakpointCondition::parse("max-width: 480sp") {
+            let breakpoint = adw::Breakpoint::new(condition);
+            for narrow in [true, false] {
+                let ui = ui.clone();
+                let redraw = move |_: &adw::Breakpoint| {
+                    ui.narrow.set(narrow);
+                    ui.redraw_usage();
+                };
+                if narrow {
+                    breakpoint.connect_apply(redraw);
+                } else {
+                    breakpoint.connect_unapply(redraw);
+                }
+            }
+            ui.window.add_breakpoint(breakpoint);
+        }
+        // Ages "updated N min ago". It only redraws the line.
+        let weak = Rc::downgrade(&ui);
+        glib::timeout_add_seconds_local(30, move || match weak.upgrade() {
+            Some(ui) => {
+                ui.redraw_usage();
+                glib::ControlFlow::Continue
+            }
+            None => glib::ControlFlow::Break,
         });
         // Enter goes to the composer, which refuses it for a draft not yet
         // reviewed. Either way it never inserts a line (that would count as
@@ -326,7 +401,8 @@ impl Ui {
         if self.conversation.borrow().is_some() {
             return;
         }
-        *self.conversation.borrow_mut() = Some(Conversation::new(agent));
+        *self.conversation.borrow_mut() =
+            Some(Conversation::new(agent).usage_on_launch(panel_settings().usage_on_launch));
         self.stack.set_visible_child_name("chat");
         self.refresh();
 
@@ -356,16 +432,26 @@ impl Ui {
         self.session.borrow().clone()
     }
 
-    /// Runs `f` on the conversation, then redraws the items it reports.
+    /// Runs `f` on the conversation, then redraws the items it reports. If
+    /// `f` made the session ready, the view-model hands out the launch
+    /// `/usage` (once per conversation, only right then), and it is sent.
     fn with_conversation(self: &Rc<Self>, f: impl FnOnce(&mut Conversation) -> Vec<usize>) {
-        let changed = match self.conversation.borrow_mut().as_mut() {
-            Some(c) => f(c),
+        let (changed, launch) = match self.conversation.borrow_mut().as_mut() {
+            Some(c) => {
+                let changed = f(c);
+                (changed, c.take_launch_usage())
+            }
             None => return,
         };
         for index in changed {
             self.render(index);
         }
         self.refresh();
+        if let Some(out) = launch
+            && self.session().is_some()
+        {
+            self.send_prompt(out);
+        }
     }
 
     /// Fills the input from the composer.
@@ -426,10 +512,29 @@ impl Ui {
         }
     }
 
-    /// The one place a prompt goes to the agent, with what the composer let
-    /// out.
+    /// A click on the usage line: the view-model decides, and its message is
+    /// the constant `/usage`, shown with its full reply. The input is left as
+    /// it is: with a session and a message, `send_prompt` sends rather than
+    /// restoring, and a refused `/usage` is never handed back to the input
+    /// (`turn_ended`).
+    fn check_usage(self: &Rc<Self>) {
+        if self.session().is_none() {
+            return;
+        }
+        let out = self
+            .conversation
+            .borrow()
+            .as_ref()
+            .and_then(Conversation::check_usage);
+        if let Some(out) = out {
+            self.send_prompt(out);
+        }
+    }
+
+    /// The one place a prompt goes to the agent, with an `Outgoing` from the
+    /// composer or the view-model's `/usage`.
     fn send_prompt(self: &Rc<Self>, out: Outgoing) {
-        let index = match self.session() {
+        let sent = match self.session() {
             Some(_) => self
                 .conversation
                 .borrow_mut()
@@ -437,7 +542,7 @@ impl Ui {
                 .and_then(|c| c.send(&out)),
             None => None,
         };
-        let (Some(session), Some(index)) = (self.session(), index) else {
+        let (Some(session), Some(sent)) = (self.session(), sent) else {
             self.composer.borrow_mut().restore(out.into_text());
             self.show_input();
             self.refresh();
@@ -445,7 +550,20 @@ impl Ui {
         };
         let text = out.into_text();
         self.show_input();
-        self.render(index);
+        match sent {
+            Sent::Shown(index) => self.render(index),
+            // The launch `/usage` holds the input for at most `USAGE_LOCK`;
+            // then the input opens and the turn keeps running.
+            Sent::Hidden => {
+                let ui = self.clone();
+                glib::timeout_add_local_once(USAGE_LOCK, move || {
+                    if let Some(c) = ui.conversation.borrow_mut().as_mut() {
+                        c.release_usage_lock();
+                    }
+                    ui.refresh();
+                });
+            }
+        }
         self.refresh();
         let turn = runtime().spawn(async move { session.prompt(&text).await });
         let ui = self.clone();
@@ -453,15 +571,18 @@ impl Ui {
             let result = turn
                 .await
                 .unwrap_or_else(|e| Err(Error::Protocol(e.to_string())));
-            ui.with_conversation(|c| {
-                let changed = c.turn_ended(result);
-                // A refused message goes back in the input, before a waiting
-                // draft is offered.
-                if let Some(text) = c.take_unsent() {
-                    ui.composer.borrow_mut().restore(text);
-                    ui.show_input();
+            ui.with_conversation(|c| match sent {
+                Sent::Hidden => c.usage_ended(result),
+                Sent::Shown(_) => {
+                    let changed = c.turn_ended(result);
+                    // A refused message goes back in the input, before a
+                    // waiting draft is offered.
+                    if let Some(text) = c.take_unsent() {
+                        ui.composer.borrow_mut().restore(text);
+                        ui.show_input();
+                    }
+                    changed
                 }
-                changed
             });
         });
     }
@@ -527,7 +648,33 @@ impl Ui {
             .set_subtitle(&format!("{} · {state}", agent_label(c.agent())));
         self.input.set_sensitive(c.can_send());
         self.send.set_sensitive(c.can_send());
-        self.cancel.set_sensitive(*c.state() == State::Busy);
+        self.lock_note.set_visible(c.usage_locked());
+        self.cancel.set_sensitive(c.turn_running());
+        self.show_usage(c);
+    }
+
+    /// The usage line from the view-model: its label, accessible name,
+    /// tooltip and state. Nothing else sets its text.
+    fn show_usage(&self, c: &Conversation) {
+        let line = c.usage_button(Instant::now());
+        let text = if self.narrow.get() {
+            line.narrow
+        } else {
+            line.wide
+        };
+        self.usage.set_label(&text);
+        self.usage
+            .update_property(&[gtk::accessible::Property::Label(&text)]);
+        self.usage.set_tooltip_text(Some(line.tooltip));
+        self.usage.set_visible(line.visible);
+        self.usage.set_sensitive(line.enabled);
+    }
+
+    /// Redraws only the usage line: for its age and the window width.
+    fn redraw_usage(&self) {
+        if let Some(c) = self.conversation.borrow().as_ref() {
+            self.show_usage(c);
+        }
     }
 
     fn render(self: &Rc<Self>, index: usize) {

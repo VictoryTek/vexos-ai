@@ -590,3 +590,303 @@ tile usage bars and "usage near limit" notification.
 > Honest reporting: never write "passes" for something that did not run.
 > List anything unverified in one line each. End with one commit message in
 > the project format, with check lines only for checks that ran and passed.
+
+## Live check: /usage over ACP
+
+Added 2026-10-27. Validation only; nothing was implemented.
+
+### Status: **live checks not run**
+
+This session ran on a Windows workstation. The harness needs Linux with
+`bwrap`, the pinned agents and the NixOS stub path (`spike/acp/sandbox.sh`).
+None of these exist here: no `bwrap`, `claude-agent-acp`, `opencode`, `nix`
+or `node` on the host. The WSL Ubuntu 24.04 distro has none of them either
+(checked read-only, with `command -v`). Installing any of them would change
+state outside the repo, which the scope rule forbids. The run therefore
+stopped **before** the login step. No scratch HOME was created, and no
+Claude login exists for this check. No credentials were read, copied or
+printed. Every result below is **"not run"**. The "Expected" column comes
+from reading the adapters' published source, and is not evidence of
+behaviour.
+
+### What to run (on the NixOS host, from `spike/acp`)
+
+`spike/acp/usage/run.sh` (new) does checks 1-7 in one go:
+
+- `HOME`, the XDG dirs, `CLAUDE_CONFIG_DIR` and the agents' working dir all
+  live under `$SPIKE_SCRATCH`, which defaults to
+  `/tmp/vexos-ai-spike-usage`. The script refuses a scratch dir inside the
+  repo, because that would load this repo's `CLAUDE.md` and `.claude/`
+  hooks.
+- Every permission request is rejected by `acp_client.py`.
+- Raw logs go to `out/usage/` (gitignored). If any file of a run matches a
+  credential pattern (`sk-ant-`, `accessToken`, `refreshToken`,
+  `"authorization"`, a long `Bearer` value), all files of that run are
+  deleted before anything is reported from it.
+- `out/usage/report.txt` holds the command lists and, per turn: elapsed
+  time, the final response, the kinds of updates, the `usage_update`s, mode
+  reports, tool calls, the permission request count, and the text exactly as
+  received. Emails and UUIDs are redacted.
+
+```sh
+cd spike/acp
+bash usage/run.sh            # OpenCode runs; Claude stops: no login yet
+# Throwaway login, through Anthropic's own flow, into the scratch config dir
+# only (the script prints this exact line with the paths filled in):
+HOME=/tmp/vexos-ai-spike-usage/home \
+  CLAUDE_CONFIG_DIR=/tmp/vexos-ai-spike-usage/claude-config claude auth login
+bash usage/run.sh            # now runs /usage, a control turn, then /status and /cost if listed
+cat out/usage/report.txt     # check for organisation names before sharing
+bash usage/run.sh clean      # deletes the scratch dir, throwaway login included
+```
+
+The Claude session sends `/usage`, then `Reply with the single word ok.` in
+the same session. The second turn is the baseline for model-like timing and
+for context tokens. It costs one small model turn on the throwaway login.
+`ACP_BIN` overrides the pinned adapter path
+(`/nix/store/w2vz79sc…-claude-agent-acp-0.88.0`, as in `fix/routes.sh`).
+OpenCode must report `--version` 1.19.0, or that part is skipped.
+
+### Checks: result and expectation
+
+Sources: `zed-industries/claude-agent-acp` tag `v0.88.0` (`src/acp-agent.ts`,
+`src/usage-markdown.ts`); `anomalyco/opencode` tag `v1.19.0`
+(`packages/opencode/src/acp/service.ts`, `src/command/index.ts`); Agent SDK
+docs (code.claude.com/docs/en/agent-sdk/slash-commands, `/typescript`).
+
+| # | Check | Live result | Expected from source |
+|---|---|---|---|
+| 1 | Command list after `session/new` | **not run** | Built from the SDK's `supportedCommands()`. The adapter then drops `clear`, **`cost`**, `keybindings-help`, `login`, `logout`, `output-style:new`, `release-notes` and `todos` (`UNSUPPORTED_COMMANDS`), drops whatever the CLI tags terminal-bound, and re-adds its own `mcp`. **`/cost` should not be listed.** `/usage` probably is: the SDK docs' example list contains `"usage"`, and the adapter has a dedicated `/usage` path. Unknown: whether the CLI tags `usage` or `status` terminal-bound, and the exact descriptions. |
+| 2 | `/usage` turn | **not run** | When the prompt is exactly `/usage` (trimmed), the adapter starts `structuredUsageMarkdown` at turn activation. It calls the SDK's `query.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET()` with a timeout, and on success **replaces** Claude Code's text with its own markdown. On timeout or schema mismatch it forwards Claude Code's original output unchanged. The command "always runs through Claude Code" as a normal SDK turn. Expected: agent message chunks, no tool call, no permission request, `stopReason: end_turn`. Whether a `usage_update` appears, and the elapsed time, are unknown. |
+| 3 | Claude Code itself, or the model? | **cannot tell without the run** | Source says Claude Code runs it ("a local `/usage` turn", "Claude Code runs itself"). But `/usage` is **not** in the adapter's `LOCAL_ONLY_COMMANDS` (`/context`, `/heapdump`, `/extra-usage`), which the adapter defines as "handled locally … without invoking the model". The report's control turn settles it: real plan percentages with reset times, a turn of about a second, and no rise in `used` point to Claude Code; prose, model-like timing and rising `used` point to the model. |
+| 4 | Output format | **not run** | On the structured path, **markdown**: `## Usage`, `> Claude <plan> subscription usage`, `### Limits` with lines such as `**5-hour limit** — **N%** · Resets <date>` and a block bar (`█░`), then `### This session` tables (estimated `Cost $x.xx`, API time, active time, token breakdown) and `### What’s using your limits?`. Plain text with markdown markup; not a TUI fragment. The panel renders it as literal text, with tables as `|` lines, since `markdown.rs` uses `Options::empty()`. The fallback text's format is unknown. |
+| 5 | `/status`, `/cost` | **not run** | `/cost`: filtered out of the list (row 1), so the script skips it. `/status` is in `REPLAY_HIDDEN_COMMANDS`, so the adapter expects it as a local command. It runs only if listed. Its output likely contains account identity; the report redacts emails and UUIDs. |
+| 6 | Mode change or approval card | **not run** | No code path in the `/usage` handling sets a mode or asks for permission. Expected: no `current_mode_update`/`config_option_update`, 0 permission requests, no tool call. The panel's core would reset any disallowed mode report anyway. |
+| 7 | OpenCode 1.19.0 | **not run** | **No usage command.** The advertised list is OpenCode's command service: built-in `init` and `review`, plus config commands, MCP prompts and skills (none in a scratch HOME). A `/usage` prompt is parsed as a slash command that is neither known nor `compact`, so it falls through to the last branch: **no model call, no text**, a `usage_update` if the model's limit is known, and `{stopReason: "end_turn", _meta: {}}`. |
+
+### Unverified
+
+- Everything in the "Live result" column.
+- Whether `usage_EXPERIMENTAL_…` succeeds on a subscription login, or the
+  fallback text is what arrives, and what that text looks like.
+- Whether the model is invoked for `/usage` (row 3).
+- The exact command names and descriptions (row 1).
+- Whether the credential and identifier scan in `run.sh` catches everything
+  `/status` prints. Read the report before sharing it.
+- `run.sh` itself: only `bash -n` ran (exit 0), and its two `jq` filters were
+  run against a synthetic log on stdin. `shellcheck` did not run: it is not
+  installed here or in WSL, and installing it was out of scope.
+
+### Recommendation: **(c) not feasible as a header display**
+
+Even if the live run shows `/usage` working exactly as the source suggests,
+putting its output in the header is the wrong build:
+
+1. **A launch-time send is a prompt the user did not send.** The panel's
+   rule is that the composer is the only source of a message
+   (`crates/vexos-ai-viewmodel/src/lib.rs`, "The input ([`Composer`]) is the
+   only source of a message to send"). `scan_tests.rs`
+   `prompts_go_out_only_through_the_composer` asserts exactly one
+   `.prompt(` call and two `send_prompt(` references. Option (a) breaks
+   that rule by design.
+2. **The header number would come from scraping.** The figures exist only
+   inside adapter-formatted markdown, built from an SDK method named
+   `…EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET` that is not in the
+   SDK reference. When that call fails, the adapter forwards text in an
+   unknown format. A parser would break silently, which is the opposite of
+   "unknown, never a guess".
+3. **It occupies the session.** A turn at launch makes the conversation
+   `Busy`, so the user can't send until it ends. It is also recorded in the
+   agent's session history.
+4. **It brings back what section 3 rejected:** the subscription limit as a
+   product feature (Anthropic's SDK overview: no "rate limits for their
+   products"; your call under spike open question 5), and the estimated
+   `Cost $` line.
+5. **It is Claude-only.** OpenCode returns an empty turn.
+
+**(b), button only:** a button that sends `/usage` by itself has problems 1,
+3 and 5. One that only fills the input with `/usage` and still needs Send is
+the same as typing it. It adds UI for no new capability. Not recommended
+now; revisit only if the live run confirms `/usage` works and you want the
+shortcut.
+
+**What remains, with no code:** you can type `/usage` in the input. It goes
+through the composer like any message, and the reply is shown as an
+ordinary agent message (literal text; nothing becomes markup or a link).
+That this works over ACP is exactly what the live run must confirm. Nothing
+in sections 1-10 changes.
+
+### If (a) were chosen anyway: what it would take
+
+View-model (all of it new, and each item conflicts with an existing rule):
+
+- A second source of outgoing messages besides `Composer::submit`, for
+  example `Outgoing::system("/usage")`. This breaks the send gate and
+  `scan_tests.rs`, and needs a rule for when it may fire: only in `Ready`,
+  never while a draft is waiting, never during a mode reset (`NotPinned`).
+- A turn kind in `Conversation` that is not a user turn: no `Item::User`, and
+  its agent text routed away from the transcript to the header, so
+  `apply(Event::AgentText)` would need to know which turn a chunk belongs
+  to. It cannot today: the core's events carry no turn id.
+- A parser for the adapter's markdown (`**5-hour limit** — **N%**`) with
+  "unknown" on any mismatch, plus handling for the fallback text.
+- A refresh state machine (idle, sending, shown, failed), and a rule that a
+  refresh never interrupts or queues behind a user turn.
+
+Core: **nothing**, and it should stay that way. `Session::prompt` already
+takes any text. The core must not gain a `usage()` method, must not
+special-case slash commands, must not parse or forward `_meta`, and must not
+send anything on its own. Every one of the core's safety rules (mode
+pinning, the options filter, deny by default) applies to a `/usage` turn
+unchanged, because to the core it is just a prompt.
+
+## Update 2026-10-27: live result and the "Check usage" button
+
+### Live result (reported by the user)
+
+The user typed `/usage` into the panel with Claude. The reply had:
+
+- plan limits: 5-hour and weekly percentages, with reset times;
+- a session table;
+- a "What's using your limits?" section.
+
+No approval card appeared, and the mode did not change. Tables showed as raw
+`|` lines. This matches the structured path in the "Live check" table
+(rows 2, 4 and 6).
+
+Row 4's rendering note is now out of date. `markdown.rs` parses GFM tables
+(`Options::ENABLE_TABLES`) and shows them as aligned monospace text with a
+bold header. Cells are literal text.
+
+I did not observe this run, and no raw logs from it are in this repo. The
+items not covered by the report stay unverified: rows 1, 3 and 5
+(the command list, whether the model was involved, `/status` and `/cost`),
+row 7 (OpenCode), and the fallback when the adapter's experimental call
+fails.
+
+### Decision: recommendation (c) is superseded
+
+`/usage` becomes a first-class action, the "Check usage" button. It is not
+option (a): nothing is sent at launch, on a timer or from a notification,
+and nothing is parsed. Problems 1 and 3 of the (c) reasoning are handled
+like this:
+
+- **Click only.** `Conversation::check_usage(&self) -> Option<Outgoing>` is
+  the only maker of an `Outgoing` besides `Composer::submit`. Its text is
+  the constant `USAGE_COMMAND = "/usage"`. It takes no argument, and a test
+  pins its type. It is enabled only for Claude, once the mode is confirmed,
+  with no turn running and no approval waiting. Source-scan tests prove the
+  panel calls it only from the button's click handler.
+- **Normal path.** The message goes through `Conversation::send` and the
+  panel's single `send_prompt`. The transcript shows the user line `/usage`
+  and the reply as ordinary agent text, with tables rendered as aligned
+  monospace text. An error or an empty reply is shown as text and never
+  retried. A `/usage` refused during a mode reset is not put back in the
+  input, unlike typed text. The user clicks again if they want it.
+
+Details and checks: `assistant_panel_spike_results.md`, "Usage action".
+
+### Still out of scope
+
+- A header number taken from `/usage`, or any parsing of its reply into
+  figures.
+- Showing cost, including the reply's estimated `Cost $` line as a figure.
+  It appears only as part of the agent's text.
+- Parsing or showing subscription limits anywhere except in the agent's
+  reply text: no `_claude/rateLimit`, no CLI usage cache, no
+  `status --json`.
+- OpenCode: the button is hidden. OpenCode has no usage command (from
+  source; not run).
+
+### Separate and still unapproved
+
+The `Event::Usage { used, size }` context line (sections 2, 4 and 7) is
+unchanged by this. It needs its own approval, and the core is not changed.
+
+## Update 2026-10-27 (later): the launch-time 5-hour line
+
+### Decision (the user's)
+
+This supersedes the "Check usage" button above, together with its rules
+"never at launch" and "never parse the reply":
+
+- When a Claude session becomes ready, the panel sends `/usage` **once**,
+  hidden.
+- A strict parser reads only the 5-hour limit from that reply.
+- One flat button under the header shows it: wide
+  `5-hour 25% · resets Oct 27, 1:40 PM CDT · updated just now`, narrow
+  `25%`; `Usage: loading` before the first result, and `Usage: unknown`
+  when nothing parses or the turn fails.
+- Clicking the line sends the same constant and posts the full report in
+  the chat. The separate "Check usage" button is removed; the line is the
+  only control.
+
+How each part works, from the spike results ("Automatic usage"):
+
+- **One sender.** `Conversation::check_usage(&self)` stays the only
+  `Outgoing` maker besides `Composer::submit`, and its text is the constant
+  `/usage`. The launch path, `take_launch_usage`, calls it and builds
+  nothing itself.
+- **One launch.** `take_launch_usage` is armed only by the
+  `Starting → Ready` transition and is cleared by the next call. So it fires
+  once per conversation, never after a mode reset or a refusal, and never
+  while an approval waits. There is no launch for OpenCode, and none when
+  `usage-on-launch = false` in `$XDG_CONFIG_HOME/vexos-ai/panel.conf`. That
+  file is read only, like `notifications.conf`.
+- **Routing.**
+  - The hidden turn's reply goes only to the parser. Neither it nor its
+    user line enters the transcript.
+  - A clicked or typed `/usage` is an ordinary turn, shown in full, and its
+    reply also refreshes the line.
+  - No other turn's reply is parsed.
+- **Input lock.** The hidden turn locks the input with a visible note for at
+  most 15 seconds. After that the input opens, the turn keeps running, and
+  the line keeps saying "loading". Cancel works throughout.
+
+### The parser, and what it depends on
+
+`five_hour(reply)` reads only the **first** line that starts with
+`5-hour limit` (after removing `**`). It must be exactly
+`5-hour limit — <N>% · Resets <text>`, where:
+
+- `N` is a whole number from 0 to 100, ASCII digits only;
+- `<text>` is trimmed, then U+202F and U+00A0 (and only those) become an
+  ASCII space, one for one. After that it must be at most 40 characters
+  and contain only ASCII letters, digits, spaces, commas, colons and
+  periods.
+
+Anything else gives `None`, shown as "unknown". It never guesses, converts
+time zones or computes anything. The figure is display text only: it is
+never sent, logged or stored, and nothing about modes, agents or approvals
+reads it.
+
+It depends on the wording of `claude-agent-acp`'s `usage-markdown.ts`. The
+adapter builds that from
+`query.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET()`, an SDK
+call Anthropic marks experimental. If that call fails, the adapter forwards
+Claude Code's own text, and the line says "unknown". An adapter or SDK
+update can change the wording at any time; the result is "unknown", never a
+wrong figure.
+
+**No-break spaces: fixed (user-approved).** The adapter formats the reset
+time with Node's `Intl.DateTimeFormat`. Since ICU 72 (Node 20 and later),
+that puts U+202F (narrow no-break space) before "AM"/"PM", and some formats
+use U+00A0. Both now become an ASCII space before validation, one for one,
+with nothing collapsed. The 40-character cap applies after the mapping. No
+other character is mapped. Thin, em and ideographic spaces, zero-width
+characters, `+`, `-`, lookalikes, control characters and markup are still
+rejected. The label always shows the ASCII space.
+
+**Still open: `GMT+N` zones.** Outside US time zones,
+`timeZoneName: "short"` gives names like `GMT+2` or `GMT-3`. The rule still
+rejects `+` and `-`, so those users see "unknown". Allowing them is a
+separate decision, not taken.
+
+**Not verified live:** the real reset text on screen. The fix rests on the
+documented ICU behaviour and on the adapter's source. Nobody has seen the
+raw reply bytes or the line on screen.
+
+### Still out of scope
+
+Weekly limits, cost, tokens, bars, and any other figure from `/usage`. The
+`Event::Usage` context line stays separate and unapproved.
