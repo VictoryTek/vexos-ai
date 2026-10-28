@@ -1079,7 +1079,8 @@ written outside the repo except `/nix/store` and the build tools' caches.
    draft goes **into the input box, not sent**. A note above the input says it
    is an unsent draft. If no session exists, the agent-choice page says a draft
    is waiting, and the draft is held until the session is ready. **No session
-   is started from a notification.**
+   is started from a notification.** (Superseded 2026-10-28: see "Agent from settings"; opening the panel
+   starts a session, and the draft stays unsent.)
 5. The user reads it, edits it if they like, and presses Send (or Enter, as
    before), or leaves it.
 
@@ -2141,3 +2142,203 @@ recommendations. It said the scan should also cover `skills/` Markdown, and
 that the spike login check should accept only a Claude.ai login, not an API
 key. Both were fixed and re-reviewed: PASS. Its third recommendation, that the
 new test is untracked, needs a `git add` by the user.
+
+
+## Agent from settings
+
+2026-10-28. The panel no longer asks which agent to use. It starts the saved
+one. No change to `nix/policy.nix`, `docs/contract.md`, CI, the extension,
+`crates/vexos-ai-core`, `nix/module.nix` or `nix/panel.nix`. Nothing was written
+outside the repo except `/nix/store` and the build tools' caches (kept under
+`target/`). No new source file: Nix flakes ignore untracked files, so everything
+went into existing ones.
+
+### 1. Where the choice lives (step 1, read only)
+
+- File: `$XDG_CONFIG_HOME/vexos/ai/agent`, by default `~/.config/vexos/ai/agent`
+  (`bin/vexos-ai.sh:19-21`). The contract names it in "Files" (`docs/contract.md:120`:
+  `claude` or `opencode`) and in `status --json` (`:97`: `agent` is `null` until
+  chosen, or if the file holds something else).
+- The CLI reads the first line (`read_first_line`, `bin/vexos-ai.sh:81-83`).
+  `pick` accepts exactly `claude|opencode` and writes it with a newline
+  (`:97-123`). `status` reports anything else as `null` (`:162-164`). Unset: the
+  terminal launcher asks (`:131-135`).
+- The panel needs nothing the contract does not cover, so there was no reason to
+  stop. It reads the file directly with the same rule. The panel's fallback
+  differs from the CLI's on purpose: unset or invalid means Claude, and the
+  header says which agent runs.
+
+### 2. What changed
+
+- `crates/vexos-ai-viewmodel/src/conversation.rs`: `AGENT_FILE`, `parse_agent`
+  (first line, exactly `claude` or `opencode`; no trim, no case folding),
+  `saved_agent(path)` (a regular file only, at most 64 bytes, read-only, falls
+  back to Claude; it returns the `Agent` enum only, so the stored text never
+  reaches a command line: `Session::spawn` uses the fixed `Agent::command`).
+  `starting_note` (the text above the input while starting, with a sentence for a
+  waiting draft). Launch timing: `window_requested`, `spawn_requested`,
+  `launch_summary`, on `std::time::Instant`.
+- `crates/vexos-ai-panel/src/main.rs`: the choice page, its two buttons, the
+  stack and the "draft is waiting" label are gone. `window()` takes the time,
+  builds the window and calls `start(saved_agent(...))`, so every way of opening
+  it (activate, toggle, a notification click) starts the saved agent. The
+  caller presents the window at once; the session starts on the tokio runtime;
+  the input stays off until `can_send()`. The header tooltip shows the timing
+  summary and is its only consumer.
+- `notify.rs`: its module comment only. `scan_tests.rs`: see section 4.
+- `crates/vexos-ai-viewmodel/Cargo.toml`: a dev-dependency on `tokio`
+  (`io-util`, `macros`, `rt`, `time`) for the fake-agent timing test. `Cargo.lock`
+  gains one line (`"tokio"` in the view-model's list); no new crate.
+- Docs: spec section 4.3; the old "no session is started from a notification"
+  rule (in "Notifications" step 4 above and in `notifications_spec.md`) is marked
+  superseded.
+
+Switching the agent happens in VexPortal (or `vexos-ai pick`). It takes effect
+the next time the panel window opens; an open or hidden window keeps its agent.
+The panel never writes the choice and has no switcher.
+
+### 3. Notification drafts
+
+Opening the panel now starts a session, also when a notification click opens it.
+Starting is not sending. The draft is held while the session starts, lands in the
+input unsent behind the banner, and only the Send button sends it (Enter does
+not, until the user edits it). This replaces "never start a session from a
+notification"; "nothing is sent automatically" is unchanged and tested.
+
+### 4. Tests
+
+View-model 163, panel 11, core 3 + 43.
+
+- Choice parsing: both values, with and without a newline; the first line only;
+  unknown, wrong case, spaces, `\r`, NUL, ESC, tab, empty, a lone newline, bytes
+  that are not UTF-8 (`parse_agent`).
+- `saved_agent` on real files: missing (and still missing afterwards), empty,
+  unknown, `\r\n`, a directory, 1 MiB of junk (Claude), 1 MiB whose first line is
+  `opencode` (OpenCode), a long line with no break (Claude), and a FIFO (does not
+  block; it fails if `mkfifo` fails, unless `VEXOS_ALLOW_NO_FIFO` is set, which
+  I set for runs on `/mnt/c`, where it skips).
+- The stored value never reaches a command: hostile values still give one of the
+  two fixed `Agent::command()` values, with none of the text in it.
+- Reading changes nothing: same content and modified time.
+- An OpenCode session from the file hides the usage button and gets no launch
+  `/usage`.
+- Starting keeps the input off, with the note (and the draft sentence).
+- A draft stays unsent through a start (`composer.rs`, three tests): with the
+  launch `/usage` off; with it on and the draft first offered after the hidden
+  turn is sent; and in the panel's own order (the draft is placed, then the
+  hidden `/usage` locks the input; Send and Enter get nothing out while it is
+  locked, and afterwards only the Send button sends it). The hand-out is always
+  the constant `/usage`, the draft lands `Pending`, Enter does nothing.
+- Launch times are recorded once and only when ready.
+- Source scans (`scan_tests.rs`): the panel and the view-model's shipped code
+  contain no file write or create; `AGENT_FILE` is used in one place; the panel
+  names neither agent (no switcher); `start` touches no composer, input, prompt or
+  usage call; `Session::spawn(` appears once; `launch_summary()` has one
+  consumer; no print or log macro in `main.rs` or `conversation.rs`. The old
+  notification scan was renamed `notification_code_never_sends_or_touches_a_session`
+  (same words, still includes `session`, `.start(` and `Session`).
+
+**Mutation checks** (18 mutants, on a copy of the tree under `target/mut-tree`,
+never the repo files; the baselines passed first): all 18 caught in the end.
+Parser trims; fallback to OpenCode; no regular-file check (caught by the scan;
+the FIFO test skips on `/mnt/c`); an unbounded read; input enabled while
+starting; no starting note; spawn time re-recorded; summary shown before ready;
+usage visible for OpenCode; Enter sends a pending draft; a draft placed while
+starting; the panel writes a file; the panel names an agent; `start` submits the
+composer; `start` checks usage; a second reader of the choice; timing printed;
+the file created when missing.
+
+Two misses on the way, both mine:
+
+- "Creates the file when missing" was first placed after the early return for a
+  missing file, so it could never run (an invalid mutant). Moved before the
+  check, it is caught by the missing-file test.
+- "Timing is printed" survived: the scan used `shipped()`, which cuts a file at
+  its first `#[cfg(test)]`, and `main.rs` has one at the top (`mod scan_tests`),
+  so it had scanned almost nothing. It now scans all of `main.rs`; the mutant is
+  caught. (A word in that list, `log::`, matched `AlertDialog::`; it was narrowed
+  to the log macros.) The reviewer confirmed no other scan has this problem.
+- One harness problem: re-using a build cache across copies made a baseline fail,
+  because the copy kept old file times. Fixed by touching the files after the copy.
+
+### 5. Measurement (headless; nothing optimised)
+
+`launch_times_against_a_fake_agent` runs the core against an in-memory fake ACP
+agent (handshake, mode pin) and prints the summary. Five runs, Claude:
+
+| Run | Ready, after the window was requested | Agent start requested at |
+|---|---|---|
+| 1 | 0.03 s | 0.00 s |
+| 2 | 0.04 s | 0.01 s |
+| 3 | 0.04 s | 0.01 s |
+| 4 | 0.03 s | 0.01 s |
+| 5 | 0.04 s | 0.01 s |
+
+This is the cost of the panel's own code and the handshake with an instant agent.
+**What this does not measure:** the real `claude-agent-acp` or `opencode acp`
+process starting and answering the handshake (the part that is likely to
+dominate), the real GTK window being built and mapped, D-Bus activation of a
+panel that is not running, and a cold `/nix/store`. These numbers say nothing
+about how long a user waits.
+
+If launch turns out slow, to try (not implemented):
+
+- Keep the panel process running hidden from login (the watchers already keep the
+  app alive) and show it on request.
+- Start the agent in the background before the window is asked for, with a session
+  that sends nothing; or only warm the agent process.
+- Treat closing the window as hiding it, so the session survives.
+- Time the agent's start on its own first, to see where the time goes.
+- Build the widgets after the spawn is issued.
+
+### 6. Review
+
+First run: an API error before it read anything; run again. Second run: it checked
+the scope, the read and parse edge cases, re-entrancy, dead code and the scans,
+and returned NEEDS_REFINEMENT with one CRITICAL (this section was missing) and
+three recommendations: the FIFO test passed by skipping (now it fails unless
+`VEXOS_ALLOW_NO_FIFO` is set); the draft test did not cover the launch `/usage`
+(added); `notify.rs` and the view-model's `Cargo.toml` had CRLF line endings (set
+back to LF). One remark outside this change: if the saved agent's binary is
+missing, a held draft stays held with no note once the session has failed. That
+was already true before.
+
+Third run, on the fixes: PASS, no findings except one recommendation: the
+launch-usage test ran its steps in a different order from the panel. A fourth
+test in the panel's order was added (`a_placed_draft_survives_the_launch_usage_lock`).
+Fourth run, on that test: **PASS, nothing to fix.** The final code was reviewed
+by the independent `reviewer` subagent, and the last run passed. The earlier
+mutation harness fixes (section 4) were found by my own checks, not the review.
+
+### 7. Checks run
+
+Rust 1.95.0 (`nix develop`, nixpkgs `nixos-26.05`; CI pins 1.95.0). Nix 2.34.1
+in WSL Ubuntu on `/mnt/c/Projects/vexos-ai`; caches under `target/`. Exit codes, on
+the final code (`VEXOS_ALLOW_NO_FIFO=1` for the cargo runs, see section 4):
+
+- `cargo build --all-targets` 0; `cargo test` 0 (core 3 + 43, panel 11,
+  view-model 163); `cargo clippy --all-targets -- -D warnings` 0;
+  `cargo fmt --all --check` 0.
+- `scripts/preflight.sh` 0. It runs `nix build`, then
+  `checks.x86_64-linux.{policy,contract,core,panel,module,extension}` one by one,
+  the module `nix eval`, and rustfmt. Inputs of `policy`, `contract`, `module`
+  and `extension` did not change, so they may have come from the store; `core`
+  and `panel` were rebuilt. The FIFO test ran and passed in the `core` check's
+  sandbox (not skipped).
+- Not run: `nix flake check` (forbidden), the panel, any agent, any notification,
+  any install or rebuild. The Stop hook skips on native Windows (no `nix`), so
+  preflight was run by hand in WSL.
+
+### 8. Not tested
+
+- **The window on screen**: that it appears at once, the look of the "Starting"
+  note and the header, and the tooltip.
+- **The real start time** with the real agents (see section 5).
+- **A choice changed while the panel is open**: by design the open window keeps
+  its agent; this was not exercised, and the next opening was only tested through
+  `saved_agent`, not through a real close and reopen.
+- **A real notification click** that starts a session (D-Bus activation of a panel
+  that is not running).
+- **The FIFO test under plain `cargo test` on `/mnt/c`**: it is skipped there; it
+  ran only in the Nix sandbox.
+- `nix flake check`, by the rules; any real agent; any install or rebuild.

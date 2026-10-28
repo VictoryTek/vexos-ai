@@ -807,6 +807,7 @@ version = "0.1.0"
 dependencies = [
  "pulldown-cmark",
  "serde_json",
+ "tokio",
  "vexos-ai-core",
 ]
 

@@ -71,7 +71,7 @@ fn body(name: &str) -> String {
 }
 
 #[test]
-fn notification_code_never_sends_or_starts_a_session() {
+fn notification_code_never_sends_or_touches_a_session() {
     for file in [code(NOTIFY), code(REBUILD)] {
         for word in [
             "send_prompt",
@@ -304,5 +304,122 @@ fn prompts_go_out_only_through_the_composer() {
             !f.contains("submit") && !f.contains("send_prompt") && !f.contains("prompt("),
             "{f}"
         );
+    }
+}
+
+/// Words that write, create, move or delete a file.
+const FILE_WRITES: [&str; 10] = [
+    "fs::write",
+    "File::create",
+    "OpenOptions",
+    "create_dir",
+    "remove_file",
+    "remove_dir",
+    "fs::rename",
+    "fs::copy",
+    "set_permissions",
+    "write_all",
+];
+
+#[test]
+fn the_panel_cannot_write_or_switch_the_agent_choice() {
+    // No file is written from the panel or the view-model's shipped code.
+    for (name, file) in [
+        ("main.rs", MAIN),
+        ("notify.rs", NOTIFY),
+        ("rebuild.rs", REBUILD),
+    ] {
+        let code = code(file);
+        for word in FILE_WRITES {
+            assert!(!code.contains(word), "{word:?} in panel {name}");
+        }
+    }
+    for (name, file) in VIEWMODEL {
+        let code = shipped(file);
+        for word in FILE_WRITES {
+            assert!(!code.contains(word), "{word:?} in view-model {name}");
+        }
+    }
+    // The choice is read in one place, through the view-model's reader.
+    let main = code(MAIN);
+    assert_eq!(main.matches("AGENT_FILE").count(), 2); // the import and one use
+    assert!(main.contains("saved_agent(&glib::user_config_dir().join(AGENT_FILE))"));
+    assert_eq!(main.matches("saved_agent(").count(), 1);
+    // No switcher, and no agent named by the panel: it only passes on what
+    // the reader returned.
+    assert!(!main.contains("Agent::Claude") && !main.contains("Agent::OpenCode"));
+    assert!(!main.contains("Choose an agent") && !main.contains("Start a session"));
+    assert!(!main.contains("gtk::Stack"));
+    assert_eq!(main.matches("fn start(").count(), 1);
+    assert_eq!(main.matches(".start(").count(), 1);
+    // The reader opens read-only, and reads a bounded part.
+    let (_, conversation) = VIEWMODEL[2];
+    let reader = vm_body(conversation, "saved_agent");
+    assert!(reader.contains("File::open(path)"));
+    assert!(reader.contains(".take(MAX_CHOICE_BYTES)"));
+    assert!(reader.contains("is_file()"));
+}
+
+#[test]
+fn a_started_session_sends_no_text() {
+    // Starting a session only spawns the agent; nothing in `start` or in the
+    // window's opening touches the input, the composer or a prompt.
+    let start = body("start");
+    for word in [
+        "composer",
+        "submit",
+        "send_prompt",
+        "input",
+        "check_usage",
+        "take_launch_usage",
+        ".prompt(",
+        "Outgoing",
+    ] {
+        assert!(!start.contains(word), "{word:?} in start");
+    }
+    let main = code(MAIN);
+    assert_eq!(main.matches("Session::spawn(").count(), 1);
+    let from = main.find("fn window(").expect("window");
+    let open = &main[from..from
+        + main[from..]
+            .find(
+                "
+}
+",
+            )
+            .expect("window end")];
+    for word in ["submit", "send_prompt", "composer", ".prompt("] {
+        assert!(!open.contains(word), "{word:?} in window");
+    }
+    // The note about a waiting draft only reads whether one is waiting.
+    assert!(code(MAIN).contains("c.starting_note(self.composer.borrow().waiting())"));
+}
+
+#[test]
+fn launch_timing_is_display_only() {
+    let main = code(MAIN);
+    assert_eq!(main.matches("launch_summary()").count(), 1);
+    assert!(main.contains("self.title.set_tooltip_text(c.launch_summary().as_deref());"));
+    let (_, conversation) = VIEWMODEL[2];
+    // main.rs has a `#[cfg(test)]` near its top, so `shipped` would cut it
+    // short: scan all of its code.
+    for (name, code) in [
+        ("main.rs", code(MAIN)),
+        ("conversation.rs", shipped(conversation)),
+    ] {
+        // Not a bare "log::", which is inside "AlertDialog::".
+        for word in [
+            "println!",
+            "eprintln!",
+            "dbg!",
+            "log::info",
+            "log::debug",
+            "log::warn",
+            "log::error",
+            "tracing::",
+            "glib::g_",
+        ] {
+            assert!(!code.contains(word), "{word:?} in {name}");
+        }
     }
 }

@@ -79,8 +79,7 @@ while one is running. `Conversation` holds no rebuild state.
 
 `adw::ApplicationWindow`, app-id `io.github.victorytek.VexosAssistant`, plain
 and centred. Header: title, subtitle "<agent> · <mode>", Cancel, "Run just
-rebuild". First page: agent choice (Claude / OpenCode); once chosen it is gone.
-Then: message list, approval cards, input. The core runs on a tokio runtime;
+rebuild". No agent-choice page (see 4.3). The window shows the message list, approval cards, input. The core runs on a tokio runtime;
 events are read on the GLib main loop (`Events::recv` needs no reactor).
 Closing the window calls `close()`, then drops the session inside the runtime.
 
@@ -88,6 +87,31 @@ Rebuild: confirmation `adw::AlertDialog`, then a separate window with a
 `vte4::Terminal`, `spawn_async(argv, "/etc/nixos", SEARCH_PATH)`. On
 `child-exited` the input is disabled and the exit status shown. That window
 can't be closed while the command runs.
+
+### 4.3 Agent from settings (2026-10-28)
+
+Supersedes the agent-choice page of 4.2.
+
+- At startup the panel reads the saved choice, `$XDG_CONFIG_HOME/vexos/ai/agent`
+  (the file `vexos-ai pick` writes, `docs/contract.md` "Files"), and starts that
+  agent. The window is shown at once; the agent starts in the background and the
+  header says "<agent> · starting…". The input stays off until the session is
+  ready.
+- Read with a fixed path, never through a shell, at most 64 bytes, regular file
+  only. The first line must be exactly `claude` or `opencode`. Anything else, an
+  empty or unreadable file or none at all means Claude, and the header names the
+  agent that runs. The value only selects one of two fixed launch configurations
+  (`Agent::command`); no command is built from it.
+- The panel never writes the choice and has no switcher. Switching happens in
+  VexPortal (or `vexos-ai pick`) and takes effect the next time the panel window
+  opens: an open or hidden window keeps its agent.
+- **Notification drafts.** Opening the panel now starts a session, also when a
+  notification click opens it. Starting a session is not sending. The draft is
+  held while the session starts, lands in the input unsent behind the banner, and
+  only the Send button sends it. This replaces the earlier rule "never start a
+  session from a notification"; the rule that nothing is sent automatically stays.
+- Launch timing (window requested, agent start requested, session ready) is
+  taken on a monotonic clock, shown only as the header's tooltip, never logged.
 
 ## 5. Dependencies (versions resolved together in a scratch project)
 

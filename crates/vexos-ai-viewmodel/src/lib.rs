@@ -23,6 +23,9 @@
 //!   sent once when the session becomes ready (hidden: its reply goes only
 //!   to the usage parser), and on a click on the usage line (shown, reply in
 //!   the transcript). Nothing else sends it.
+//! - The agent is the saved choice (`vexos-ai pick`, VexPortal), read-only: the
+//!   two known values, else Claude ([`saved_agent`]). There is no switcher;
+//!   starting a session sends nothing. The launch timing is display text only.
 //! - The usage line shows the 5-hour limit read by a strict parser from a
 //!   `/usage` reply, or "unknown". It is display text only: never sent,
 //!   logged or stored, and nothing else depends on it.
@@ -39,8 +42,9 @@ mod usage;
 
 pub use composer::{Composer, Draft, Offer, Outgoing, Placement, Via};
 pub use conversation::{
-    Answer, ApprovalCard, ClickError, Conversation, Decider, Item, NO_REPLY, NOT_SENT, Sent, State,
-    ToolCard, USAGE_COMMAND, USAGE_NOT_SENT, agent_label, choice_label, mode_label,
+    AGENT_FILE, Answer, ApprovalCard, ClickError, Conversation, Decider, Item, NO_REPLY, NOT_SENT,
+    Sent, State, ToolCard, USAGE_COMMAND, USAGE_NOT_SENT, agent_label, choice_label, mode_label,
+    parse_agent, saved_agent,
 };
 pub use diagnose::{
     BEGIN, Crash, END, Excerpt, INSTRUCTION, Log, Missing, Subject, UnitName, core_file,

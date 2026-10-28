@@ -89,7 +89,7 @@ rebuild trigger is on by default.
   is kept until the next run, so its buffer can be read at click time.
 - Composer becomes a multi-line `TextView` (Enter sends as before,
   Shift+Enter newline). A placed draft does not take focus.
-- On the agent-choice page a line says a draft is waiting.
+- On the agent-choice page a line says a draft is waiting. (Superseded 2026-10-28: there is no choice page; the note shows while the session starts.)
 
 ## 5. Tests (headless)
 

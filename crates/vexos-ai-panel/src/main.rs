@@ -17,9 +17,9 @@ use adw::prelude::*;
 use gtk::{gdk, gio, glib};
 use vexos_ai_core::{Agent, Config, Decision, Error, Session};
 use vexos_ai_viewmodel::{
-    Answer, ApprovalCard, Composer, Conversation, DiffLine, Item, Offer, Outgoing,
+    AGENT_FILE, Answer, ApprovalCard, Composer, Conversation, DiffLine, Item, Offer, Outgoing,
     PANEL_SETTINGS_FILE, PanelSettings, Placement, Proposal, Rebuild, Sent, State, USAGE_LOCK, Via,
-    agent_label, markdown, mode_label,
+    agent_label, markdown, mode_label, saved_agent,
 };
 
 const APP_ID: &str = "io.github.victorytek.VexosAssistant";
@@ -96,6 +96,7 @@ fn window(app: &adw::Application, slot: &Slot) -> Rc<Ui> {
     if let Some(ui) = slot.borrow().as_ref() {
         return ui.clone();
     }
+    let requested = Instant::now();
     let ui = Ui::build(app);
     // Runs after the session's own close handler.
     ui.window.connect_close_request({
@@ -106,13 +107,18 @@ fn window(app: &adw::Application, slot: &Slot) -> Rc<Ui> {
         }
     });
     *slot.borrow_mut() = Some(ui.clone());
+    // Every way of opening the window starts the saved agent. Read-only; the
+    // panel never writes the choice and has no switcher.
+    ui.start(
+        saved_agent(&glib::user_config_dir().join(AGENT_FILE)),
+        requested,
+    );
     ui
 }
 
 struct Ui {
     window: adw::ApplicationWindow,
     title: adw::WindowTitle,
-    stack: gtk::Stack,
     list: gtk::Box,
     scroller: gtk::ScrolledWindow,
     rows: RefCell<Vec<gtk::Widget>>,
@@ -138,15 +144,16 @@ struct Ui {
     /// Set while the input is filled from `composer`, so the buffer's own
     /// change signals are not taken for the user's edits.
     syncing: Cell<bool>,
-    /// On the agent-choice page: a draft is waiting.
-    waiting: gtk::Label,
+    /// Above the input while the session starts: its text is the
+    /// view-model's `starting_note`.
+    starting_note: gtk::Label,
     /// Above the input while it holds a draft: review, Send, or Discard.
     banner: adw::Banner,
 }
 
 impl Ui {
     fn build(app: &adw::Application) -> Rc<Ui> {
-        let title = adw::WindowTitle::new("VexOS Assistant", "Choose an agent");
+        let title = adw::WindowTitle::new("VexOS Assistant", "starting…");
         let cancel = gtk::Button::builder()
             .icon_name("process-stop-symbolic")
             .tooltip_text("Cancel the current turn")
@@ -156,32 +163,6 @@ impl Ui {
         let header = adw::HeaderBar::builder().title_widget(&title).build();
         header.pack_start(&cancel);
         header.pack_end(&rebuild_button);
-
-        // The agent is chosen once, here; there is no way back to this page.
-        let claude = gtk::Button::with_label(agent_label(Agent::Claude));
-        let opencode = gtk::Button::with_label(agent_label(Agent::OpenCode));
-        let choices = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-        choices.set_halign(gtk::Align::Center);
-        for button in [&claude, &opencode] {
-            button.add_css_class("pill");
-            button.add_css_class("suggested-action");
-            choices.append(button);
-        }
-        let waiting = gtk::Label::builder()
-            .label("A draft from a notification is waiting. It goes into the input once the session is ready; nothing is sent until you press Send.")
-            .wrap(true)
-            .justify(gtk::Justification::Center)
-            .visible(false)
-            .build();
-        waiting.add_css_class("dim-label");
-        let start_body = gtk::Box::new(gtk::Orientation::Vertical, 18);
-        start_body.append(&choices);
-        start_body.append(&waiting);
-        let start = adw::StatusPage::builder()
-            .title("Start a session")
-            .description("Choose the agent for this session. It works in /etc/nixos and asks before it changes anything.")
-            .child(&start_body)
-            .build();
 
         let list = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
@@ -242,9 +223,16 @@ impl Ui {
             .build();
         lock_note.add_css_class("dim-label");
         lock_note.add_css_class("caption");
+        let starting_note = gtk::Label::builder()
+            .wrap(true)
+            .justify(gtk::Justification::Center)
+            .visible(false)
+            .build();
+        starting_note.add_css_class("dim-label");
         let chat = gtk::Box::new(gtk::Orientation::Vertical, 0);
         chat.append(&scroller);
         chat.append(&banner);
+        chat.append(&starting_note);
         chat.append(&lock_note);
         chat.append(&composer);
 
@@ -259,13 +247,10 @@ impl Ui {
         usage.add_css_class("flat");
         usage.add_css_class("caption");
 
-        let stack = gtk::Stack::new();
-        stack.add_named(&start, Some("start"));
-        stack.add_named(&chat, Some("chat"));
         let content = adw::ToolbarView::new();
         content.add_top_bar(&header);
         content.add_top_bar(&usage);
-        content.set_content(Some(&stack));
+        content.set_content(Some(&chat));
 
         let window = adw::ApplicationWindow::builder()
             .application(app)
@@ -281,7 +266,6 @@ impl Ui {
         let ui = Rc::new(Ui {
             window,
             title,
-            stack,
             list,
             scroller,
             rows: RefCell::new(Vec::new()),
@@ -298,14 +282,10 @@ impl Ui {
             rebuild_view: RefCell::new(None),
             composer: RefCell::new(Composer::default()),
             syncing: Cell::new(false),
-            waiting,
+            starting_note,
             banner,
         });
 
-        for (button, agent) in [(&claude, Agent::Claude), (&opencode, Agent::OpenCode)] {
-            let ui = ui.clone();
-            button.connect_clicked(move |_| ui.start(agent));
-        }
         ui.send.connect_clicked({
             let ui = ui.clone();
             move |_| ui.submit(Via::SendButton)
@@ -397,13 +377,16 @@ impl Ui {
         ui
     }
 
-    fn start(self: &Rc<Self>, agent: Agent) {
+    /// Starts the session in the background; the window is already up.
+    fn start(self: &Rc<Self>, agent: Agent, requested: Instant) {
         if self.conversation.borrow().is_some() {
             return;
         }
-        *self.conversation.borrow_mut() =
-            Some(Conversation::new(agent).usage_on_launch(panel_settings().usage_on_launch));
-        self.stack.set_visible_child_name("chat");
+        let mut conversation = Conversation::new(agent)
+            .usage_on_launch(panel_settings().usage_on_launch)
+            .window_requested(requested);
+        conversation.spawn_requested(Instant::now());
+        *self.conversation.borrow_mut() = Some(conversation);
         self.refresh();
 
         let starting = runtime().spawn(Session::spawn(agent, Config::new(WORKDIR)));
@@ -623,8 +606,6 @@ impl Ui {
             Rebuild::Idle | Rebuild::Finished(_)
         ));
         let conversation = self.conversation.borrow();
-        self.waiting
-            .set_visible(conversation.is_none() && self.composer.borrow().waiting());
         let Some(c) = conversation.as_ref() else {
             return;
         };
@@ -649,6 +630,10 @@ impl Ui {
         self.input.set_sensitive(c.can_send());
         self.send.set_sensitive(c.can_send());
         self.lock_note.set_visible(c.usage_locked());
+        let note = c.starting_note(self.composer.borrow().waiting());
+        self.starting_note.set_label(note.as_deref().unwrap_or(""));
+        self.starting_note.set_visible(note.is_some());
+        self.title.set_tooltip_text(c.launch_summary().as_deref());
         self.cancel.set_sensitive(c.turn_running());
         self.show_usage(c);
     }

@@ -5,7 +5,8 @@
 //! text. Clicking it opens the window and collects read-only (fixed argv,
 //! no shell, by the app and never the agent), then holds a draft for the
 //! input. Nothing here sends anything to the agent: the user reviews the
-//! draft and presses Send, or doesn't. No session is started from here.
+//! draft and presses Send, or doesn't. Opening the window starts the saved
+//! agent's session, as any opening does; starting sends nothing.
 
 use std::cell::RefCell;
 use std::ffi::OsStr;

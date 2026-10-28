@@ -399,4 +399,89 @@ mod tests {
         c.restore("refused".into());
         assert_eq!(c.text(), "refused\n\ntyped meanwhile");
     }
+
+    /// Opening the panel starts a session, and starting is not sending: the
+    /// draft waits through the start, lands unsent, and Enter does not send it.
+    #[test]
+    fn a_draft_stays_unsent_through_a_session_start() {
+        use crate::Conversation;
+        use vexos_ai_core::{Agent, Event};
+        let mut c = Composer::default();
+        c.hold(DRAFT.into());
+        let mut conversation = Conversation::new(Agent::Claude).usage_on_launch(false);
+        // Starting: the draft is held, not placed, and nothing is made.
+        assert_eq!(c.offer(conversation.can_send()), Offer::Nothing);
+        assert!(c.waiting());
+        assert!(conversation.starting_note(c.waiting()).is_some());
+        conversation.started();
+        conversation.apply(Event::Mode("default".into()));
+        assert!(conversation.take_launch_usage().is_none());
+        assert_eq!(c.offer(conversation.can_send()), Offer::Placed);
+        assert_eq!(c.draft(), Some(Draft::Pending));
+        assert!(c.banner());
+        assert_eq!(c.text(), DRAFT);
+        // Only the Send button sends it.
+        assert_eq!(c.submit(Via::EnterKey, conversation.can_send()), None);
+        assert_eq!(c.text(), DRAFT);
+        assert!(c.banner());
+    }
+
+    /// The panel's own order: `with_conversation` takes the launch `/usage`
+    /// and redraws (which places the draft, as the input is still open), then
+    /// sends it, and the hidden turn locks the input. The draft stays unsent.
+    #[test]
+    fn a_placed_draft_survives_the_launch_usage_lock() {
+        use crate::{Conversation, Sent};
+        use vexos_ai_core::{Agent, Event};
+        let mut c = Composer::default();
+        c.hold(DRAFT.into());
+        let mut conversation = Conversation::new(Agent::Claude);
+        conversation.started();
+        conversation.apply(Event::Mode("default".into()));
+        let out = conversation.take_launch_usage().expect("launch usage");
+        assert_eq!(c.offer(conversation.can_send()), Offer::Placed);
+        assert_eq!(conversation.send(&out), Some(Sent::Hidden));
+        assert!(!conversation.can_send());
+        assert_eq!(c.draft(), Some(Draft::Pending));
+        assert!(c.banner());
+        assert_eq!(c.text(), DRAFT);
+        // Locked: neither Send nor Enter gets a message out.
+        assert_eq!(c.submit(Via::SendButton, conversation.can_send()), None);
+        assert_eq!(c.submit(Via::EnterKey, conversation.can_send()), None);
+        assert_eq!(c.text(), DRAFT);
+        assert!(c.banner());
+        // Once the lock is over, only the Send button sends it.
+        conversation.usage_ended(Ok("end_turn".into()));
+        assert_eq!(c.submit(Via::EnterKey, conversation.can_send()), None);
+        let sent = c.submit(Via::SendButton, conversation.can_send());
+        assert_eq!(sent.map(Outgoing::into_text).as_deref(), Some(DRAFT));
+    }
+
+    /// The same with the launch `/usage` on (the default): what is handed out
+    /// at ready is the constant, never the draft, and the draft survives it.
+    #[test]
+    fn the_launch_usage_does_not_touch_a_waiting_draft() {
+        use crate::{Conversation, USAGE_COMMAND};
+        use vexos_ai_core::{Agent, Event};
+        let mut c = Composer::default();
+        c.hold(DRAFT.into());
+        let mut conversation = Conversation::new(Agent::Claude);
+        conversation.started();
+        conversation.apply(Event::Mode("default".into()));
+        let out = conversation.take_launch_usage().expect("launch usage");
+        assert_eq!(out.text(), USAGE_COMMAND);
+        assert_ne!(out.text(), DRAFT);
+        // Sent as the hidden turn, it holds the input; the draft waits.
+        assert_eq!(conversation.send(&out), Some(crate::Sent::Hidden));
+        assert!(c.waiting());
+        assert_eq!(c.text(), "");
+        assert_eq!(c.offer(conversation.can_send()), Offer::Nothing);
+        assert!(c.waiting() && !c.banner());
+        // When the turn ends, the draft lands unsent, behind the banner.
+        conversation.usage_ended(Ok("end_turn".into()));
+        assert_eq!(c.offer(conversation.can_send()), Offer::Placed);
+        assert_eq!(c.draft(), Some(Draft::Pending));
+        assert_eq!(c.text(), DRAFT);
+        assert_eq!(c.submit(Via::EnterKey, conversation.can_send()), None);
+    }
 }

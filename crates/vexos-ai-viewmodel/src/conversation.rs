@@ -2,6 +2,9 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::fs::File;
+use std::io::Read;
+use std::path::Path;
 
 use vexos_ai_core::{Agent, Decision, Error, Event, PermissionRequest, Session, ToolCall};
 
@@ -29,6 +32,44 @@ pub fn agent_label(agent: Agent) -> &'static str {
         Agent::Claude => "Claude",
         Agent::OpenCode => "OpenCode",
     }
+}
+
+/// The saved agent choice, relative to the user config directory. The same
+/// file `vexos-ai pick` writes and `status --json` reports (docs/contract.md).
+pub const AGENT_FILE: &str = "vexos/ai/agent";
+
+/// Longest part of the choice file that is read.
+const MAX_CHOICE_BYTES: u64 = 64;
+
+/// The agent a choice file names: its first line, exactly `claude` or
+/// `opencode`. No trimming and no case folding, as in the CLI.
+pub fn parse_agent(bytes: &[u8]) -> Option<Agent> {
+    let line = bytes.split(|&b| b == b'\n').next().unwrap_or_default();
+    match line {
+        b"claude" => Some(Agent::Claude),
+        b"opencode" => Some(Agent::OpenCode),
+        _ => None,
+    }
+}
+
+/// The saved agent, read-only. A missing, unreadable, unknown or empty choice
+/// is Claude. It returns the enum only: the stored text never reaches a
+/// command line, it just selects one of the two fixed launch configurations.
+pub fn saved_agent(path: &Path) -> Agent {
+    let read = || -> Option<Agent> {
+        // A FIFO or device could block the window's start.
+        if !std::fs::metadata(path).ok()?.is_file() {
+            return None;
+        }
+        let mut bytes = Vec::new();
+        File::open(path)
+            .ok()?
+            .take(MAX_CHOICE_BYTES)
+            .read_to_end(&mut bytes)
+            .ok()?;
+        parse_agent(&bytes)
+    };
+    read().unwrap_or(Agent::Claude)
 }
 
 pub fn choice_label(decision: Decision) -> &'static str {
@@ -170,6 +211,11 @@ pub struct Conversation {
     hidden_reply: String,
     /// The last usage result; `None` before any.
     usage: Option<Shown>,
+    /// Launch timing on a monotonic clock. Display only: never sent, logged
+    /// or stored.
+    requested: Option<Instant>,
+    spawn: Option<Instant>,
+    ready: Option<Instant>,
 }
 
 /// What [`Conversation::send`] did with a message.
@@ -222,7 +268,53 @@ impl Conversation {
             hidden_route: false,
             hidden_reply: String::new(),
             usage: None,
+            requested: None,
+            spawn: None,
+            ready: None,
         }
+    }
+
+    /// When the window was requested, for the launch timing.
+    pub fn window_requested(mut self, at: Instant) -> Self {
+        self.requested = Some(at);
+        self
+    }
+
+    /// The agent's start was requested. Only the first call counts.
+    pub fn spawn_requested(&mut self, at: Instant) {
+        self.spawn.get_or_insert(at);
+    }
+
+    /// How long the start took, once the session is ready. Display only.
+    pub fn launch_summary(&self) -> Option<String> {
+        let (requested, ready) = (self.requested?, self.ready?);
+        let secs = |at: Instant| at.saturating_duration_since(requested).as_secs_f64();
+        let spawn = self
+            .spawn
+            .map(|at| format!(" (agent start requested at {:.2} s)", secs(at)))
+            .unwrap_or_default();
+        Some(format!(
+            "Ready {:.2} s after the window was requested{spawn}",
+            secs(ready)
+        ))
+    }
+
+    /// The note above the input while the session starts, and the input is
+    /// off. Starting a session sends nothing; a waiting draft stays unsent.
+    pub fn starting_note(&self, draft_waiting: bool) -> Option<String> {
+        if self.state != State::Starting {
+            return None;
+        }
+        let mut note = format!(
+            "Starting {}… The input opens when the session is ready.",
+            agent_label(self.agent)
+        );
+        if draft_waiting {
+            note.push_str(
+                " A draft from a notification is waiting; nothing is sent until you click Send.",
+            );
+        }
+        Some(note)
     }
 
     /// The panel's `usage-on-launch` setting (on by default).
@@ -373,6 +465,7 @@ impl Conversation {
     fn open(&mut self) {
         if self.state == State::Starting && self.started && self.mode.is_some() {
             self.state = State::Ready;
+            self.ready.get_or_insert_with(Instant::now);
             if self.offers_usage_check() && self.usage_on_launch {
                 self.launch_due = true;
             }
@@ -1744,5 +1837,254 @@ mod tests {
     fn the_agent_is_never_called_claude_code() {
         assert_eq!(agent_label(Agent::Claude), "Claude");
         assert_eq!(agent_label(Agent::OpenCode), "OpenCode");
+    }
+
+    // The agent from settings --------------------------------------------------
+
+    use serde_json::Value;
+    use std::path::PathBuf;
+
+    fn fixture_dir() -> PathBuf {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/agent-choice-tests");
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn fixture(name: &str, bytes: &[u8]) -> PathBuf {
+        let path = fixture_dir().join(name);
+        let _ = std::fs::remove_file(&path);
+        std::fs::write(&path, bytes).unwrap();
+        path
+    }
+
+    #[test]
+    fn the_choice_is_exactly_one_of_two_values() {
+        assert_eq!(parse_agent(b"claude"), Some(Agent::Claude));
+        assert_eq!(parse_agent(b"claude\n"), Some(Agent::Claude));
+        assert_eq!(parse_agent(b"opencode"), Some(Agent::OpenCode));
+        assert_eq!(parse_agent(b"opencode\n"), Some(Agent::OpenCode));
+        // The first line only, as `head -n 1`.
+        assert_eq!(parse_agent(b"opencode\nclaude"), Some(Agent::OpenCode));
+        assert_eq!(parse_agent(b"claude\nrm -rf"), Some(Agent::Claude));
+        for bad in [
+            &b"Claude"[..],
+            b"CLAUDE",
+            b"codex",
+            b" claude",
+            b"claude ",
+            b"claude\r",
+            b"claude\r\n",
+            b"claude\0",
+            b"\x1bclaude",
+            b"opencode\t",
+            b"open code",
+            b"",
+            b"\n",
+            b"\nclaude",
+            b"\xff\xfe",
+        ] {
+            assert_eq!(parse_agent(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn a_missing_empty_unknown_or_unreadable_choice_is_claude() {
+        let missing = fixture_dir().join("missing-choice");
+        let _ = std::fs::remove_file(&missing);
+        assert_eq!(saved_agent(&missing), Agent::Claude);
+        assert!(!missing.exists(), "reading never creates the file");
+        assert_eq!(saved_agent(&fixture("empty", b"")), Agent::Claude);
+        assert_eq!(saved_agent(&fixture("unknown", b"codex\n")), Agent::Claude);
+        assert_eq!(
+            saved_agent(&fixture("control", b"opencode\r\n")),
+            Agent::Claude
+        );
+        assert_eq!(saved_agent(&fixture_dir()), Agent::Claude, "a directory");
+        assert_eq!(saved_agent(&fixture("claude", b"claude\n")), Agent::Claude);
+        assert_eq!(
+            saved_agent(&fixture("opencode", b"opencode\n")),
+            Agent::OpenCode
+        );
+    }
+
+    #[test]
+    fn a_huge_choice_file_is_read_in_part_and_judged_by_its_first_line() {
+        let mut junk = vec![b'x'; 1 << 20];
+        assert_eq!(saved_agent(&fixture("huge-junk", &junk)), Agent::Claude);
+        let mut open = b"opencode\n".to_vec();
+        open.append(&mut junk);
+        assert_eq!(
+            saved_agent(&fixture("huge-opencode", &open)),
+            Agent::OpenCode
+        );
+        // No line break within the limit: not a value.
+        let long = [b"opencode".as_slice(), &[b' '; 100]].concat();
+        assert_eq!(saved_agent(&fixture("long-line", &long)), Agent::Claude);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_in_place_of_the_choice_does_not_block() {
+        let path = fixture_dir().join("fifo");
+        let _ = std::fs::remove_file(&path);
+        // A Windows drive under WSL cannot hold a FIFO: set
+        // VEXOS_ALLOW_NO_FIFO=1 there. Anywhere else a failure fails the test,
+        // so the Nix sandbox cannot pass it without running it.
+        let made = std::process::Command::new("mkfifo")
+            .arg(&path)
+            .status()
+            .is_ok_and(|s| s.success());
+        if !made && std::env::var_os("VEXOS_ALLOW_NO_FIFO").is_some() {
+            eprintln!("skipped: no FIFO on this filesystem");
+            return;
+        }
+        assert!(made, "mkfifo failed");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let probe = path.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(saved_agent(&probe));
+        });
+        let got = rx.recv_timeout(std::time::Duration::from_secs(5));
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(got, Ok(Agent::Claude));
+    }
+
+    #[test]
+    fn the_stored_value_never_reaches_a_command() {
+        let known = [Agent::Claude.command(), Agent::OpenCode.command()];
+        for hostile in [
+            "opencode --yolo",
+            "claude; rm -rf ~",
+            "$(id)",
+            "claude\nopencode --yolo",
+            "--dangerously-skip-permissions",
+        ] {
+            let agent = saved_agent(&fixture("hostile", hostile.as_bytes()));
+            let command = agent.command();
+            assert!(known.contains(&command), "{hostile}");
+            let line = format!("{} {:?} {:?}", command.program, command.args, command.env);
+            for word in ["rm -rf", "$(id)", "yolo", "dangerously"] {
+                assert!(!line.contains(word), "{hostile}: {line}");
+            }
+        }
+    }
+
+    #[test]
+    fn reading_the_choice_changes_nothing() {
+        let path = fixture("readonly", b"opencode\n");
+        let before = std::fs::metadata(&path).unwrap().modified().unwrap();
+        for _ in 0..3 {
+            saved_agent(&path);
+        }
+        assert_eq!(std::fs::read(&path).unwrap(), b"opencode\n");
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().modified().unwrap(),
+            before
+        );
+    }
+
+    #[test]
+    fn an_opencode_session_from_the_file_hides_the_usage_button() {
+        let agent = saved_agent(&fixture("opencode-session", b"opencode\n"));
+        assert_eq!(agent, Agent::OpenCode);
+        let mut c = Conversation::new(agent);
+        assert!(!c.usage_button(Instant::now()).visible);
+        c.started();
+        c.apply(Event::Mode("build".into()));
+        assert!(!c.usage_button(Instant::now()).visible);
+        assert!(c.take_launch_usage().is_none());
+    }
+
+    #[test]
+    fn starting_keeps_the_input_off_and_says_so() {
+        let mut c = Conversation::new(Agent::Claude);
+        assert!(!c.can_send());
+        assert!(!c.usage_button(Instant::now()).enabled);
+        let note = c.starting_note(false).unwrap();
+        assert!(note.contains("Starting Claude"));
+        assert!(!note.contains("draft"));
+        assert!(
+            c.starting_note(true)
+                .unwrap()
+                .contains("nothing is sent until you click Send")
+        );
+        // The session started, but no mode is confirmed yet: still off.
+        c.started();
+        assert!(!c.can_send());
+        assert!(c.starting_note(false).is_some());
+        c.apply(Event::Mode("default".into()));
+        assert!(c.can_send());
+        assert_eq!(c.starting_note(true), None);
+        let open = Conversation::new(Agent::OpenCode)
+            .starting_note(false)
+            .unwrap();
+        assert!(open.contains("Starting OpenCode"));
+    }
+
+    #[test]
+    fn launch_times_are_recorded_once_and_only_when_ready() {
+        let t0 = Instant::now();
+        let mut c = Conversation::new(Agent::Claude).window_requested(t0);
+        c.spawn_requested(t0 + std::time::Duration::from_millis(10));
+        c.spawn_requested(t0 + std::time::Duration::from_secs(9));
+        assert_eq!(c.launch_summary(), None);
+        c.started();
+        assert_eq!(c.launch_summary(), None);
+        c.apply(Event::Mode("default".into()));
+        let first = c.launch_summary().unwrap();
+        assert!(first.contains("agent start requested at 0.01 s"), "{first}");
+        c.apply(Event::Mode("plan".into()));
+        assert_eq!(c.launch_summary().unwrap(), first);
+        assert_eq!(Conversation::new(Agent::Claude).launch_summary(), None);
+    }
+
+    /// Timing against a fake agent on an in-memory pipe, as the core's tests
+    /// drive one. Run with `--nocapture` to see the numbers.
+    #[tokio::test]
+    async fn launch_times_against_a_fake_agent() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        let requested = Instant::now();
+        let mut c = Conversation::new(Agent::Claude).window_requested(requested);
+        let (core, agent_end) = tokio::io::duplex(1 << 16);
+        let (r, w) = tokio::io::split(core);
+        c.spawn_requested(Instant::now());
+        let config = vexos_ai_core::Config::new(std::env::temp_dir().join("vexos-ai-test"));
+        let start = tokio::spawn(Session::connect(Agent::Claude, config, r, w));
+        let (r, mut w) = tokio::io::split(agent_end);
+        let mut lines = BufReader::new(r).lines();
+        let mut answers = [
+            (
+                "initialize",
+                json!({ "protocolVersion": 1, "agentCapabilities": {} }),
+            ),
+            (
+                "session/new",
+                json!({ "sessionId": "s1", "modes": { "currentModeId": "default",
+                    "availableModes": [{ "id": "default" }, { "id": "plan" }] } }),
+            ),
+            ("session/set_mode", json!({})),
+        ]
+        .into_iter();
+        let handshake = async {
+            for (method, result) in answers.by_ref() {
+                let line = lines.next_line().await.unwrap().unwrap();
+                let msg: Value = serde_json::from_str(&line).unwrap();
+                assert_eq!(msg["method"], method);
+                let out = json!({ "jsonrpc": "2.0", "id": msg["id"], "result": result });
+                w.write_all(format!("{out}\n").as_bytes()).await.unwrap();
+            }
+        };
+        let (_, started) = tokio::join!(handshake, start);
+        let (_session, mut events) = started.unwrap().unwrap();
+        c.started();
+        while c.state() == &State::Starting {
+            let event = events.recv().await.expect("a mode event");
+            c.apply(event);
+        }
+        println!(
+            "launch against the fake agent: {}",
+            c.launch_summary().expect("ready")
+        );
+        assert!(c.can_send());
     }
 }
