@@ -2054,3 +2054,90 @@ FAIL: one bats assertion would have failed every run (`*"session"*` matches
 promised notifications and switching. All three were fixed, and the unused
 `util-linux` input was removed as it suggested. The fixes were **not**
 re-reviewed.
+
+## Account removal
+
+The Claude accounts feature is removed (2026-10-27). The user has one account,
+autoswitch had done nothing since the usage probe went, and `account_auth_json`
+was the last shipped read of Claude's login file. Contract:
+`docs/contract.md` ("Commands", "`status --json`", "Files", "Credentials and
+the network").
+
+**Removed**
+
+- `bin/vexos-ai.sh`: the `account` commands (`list`, `add`, `use`, `remove`,
+  `rename`, `mode`), the `panel` command (the zenity accounts window with its
+  "Use selected", "Add account", "Remove account" and "Toggle autoswitch"
+  buttons), `account_auth_json` (the read of `.credentials.json` for
+  `signedIn` and `plan`), the pointer lookup in `launch` (it set
+  `CLAUDE_CONFIG_DIR` for a non-main account), and the helpers only they used:
+  `active_account`, `account_home`, `list_accounts`, the label validators,
+  `require_account`, `valid_percent`, `threshold`, `switch_mode`,
+  `sessions_in_use` (and the `VEXOS_AI_PROC` override), `account_in_use`,
+  `ask_text`, `human_fd`, `now_s`, `die_busy`, and the `CACHE_DIR`,
+  `ACCOUNTS_DIR`, `ACCOUNT_FILE`, `MODE_FILE` and `THRESHOLD_FILE` paths.
+  `account` and `panel` now exit 2 with one line on stderr. `theme_sync`,
+  which was shared, stays, but writes only `~/.claude` (it used to loop over
+  every account).
+- `nix/package.nix`: the "Accounts" desktop action.
+- `spike/`: `subagent/run-sub.sh` loses its "user" scope, which bound the real
+  `~/.claude/.credentials.json` into a sandbox, and `sandbox.sh` loses the
+  `SPIKE_BIND` hook that only that route used. `usage/run.sh` asks
+  `claude auth status` for a Claude.ai login, so it no longer names the file.
+- Tests and fixtures for the removed code only: the old `account.bats` cases,
+  the credentials-derived `status.bats` cases (`signedIn`, `plan`, expiry,
+  `inUse`), `fake_session` and the fake `/proc`, and the stub `claude`'s
+  `auth login`.
+
+**Contract changes** (with the Bats suite):
+
+- the account commands and `panel` exit 2;
+- `status --json` stays schema 1 with the same top-level keys, but `accounts`
+  is always `[]`, `activeAccount` always `"main"` and `switching` always
+  manual/95. **`signedIn` and `plan` are lost** (with `inUse` and `usage`);
+- exit 5 is reserved and no longer returned;
+- the account files are no longer part of the contract.
+
+The new `credentials.bats` fails if any script or module (not the docs) names
+`.credentials.json`. `checks.contract` gets the source tree as `VEXOS_AI_SRC`.
+
+**Behaviour change.** The launcher always starts Claude with its default
+config (`~/.claude`). A user who had picked another account with
+`account use` now gets Claude's own sign-in there instead. If `~/.claude` has
+never been signed in, Claude asks them to log in.
+
+**Left on users' machines** (nothing deletes or moves them):
+`~/.local/share/vexos/ai/claude-accounts/<label>/` (each a full Claude config
+home, sign-in included), `~/.config/vexos/ai/claude-account`, `mode` and
+`threshold`. Old account directories also stop getting theme updates. A user
+who wants an old sign-in gone deletes its directory by hand.
+
+**What may still depend on it outside this repo** (not checked here; not
+guessed):
+
+- vexos-nix: the `just ai-account-*` recipes and any other justfile or module
+  text that calls `vexos-ai account …` or `vexos-ai panel`.
+- VexPortal (through those recipes, or `status --json`): anything that shows
+  accounts, `signedIn`, `plan` or the switching settings, or reads
+  `claude-account` directly.
+- A keybind, menu or desktop entry outside this repo that runs
+  `vexos-ai panel`.
+
+**Checks.** On this Linux machine, with Nix: `bash -n` on every changed
+script; `nix build` (shellcheck at build time); `scripts/preflight.sh` (package,
+`checks.policy`, `contract`, `core`, `panel`, `module`, `extension`, module eval,
+rustfmt): exit 0. `checks.contract` ran 62 tests: a git flake sees only tracked
+files, so the new, untracked `credentials.bats` is not in it until it is added.
+By hand, the whole suite (63 tests, `credentials.bats` included) passed with
+bats 1.12 against the Nix-built script, on a `PATH` of Nix store tools only.
+Before that, a by-hand run with the host `PATH` started the real `claude`
+binary under the fake test `HOME` in the "not installed" test. It was killed;
+`docs/contract.md` now says `claude` and `opencode` must not be on `PATH` by
+hand. A run that planted a mention in a copy of the tree, to show that the new
+scan fails, was denied by the permission layer and did not run.
+
+**Review.** An independent `reviewer` subagent returned PASS with three
+recommendations. It said the scan should also cover `skills/` Markdown, and
+that the spike login check should accept only a Claude.ai login, not an API
+key. Both were fixed and re-reviewed: PASS. Its third recommendation, that the
+new test is untracked, needs a `git add` by the user.

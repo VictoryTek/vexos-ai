@@ -1,6 +1,6 @@
-# vexos-ai — launcher, picker, Claude accounts, theme sync and
-# "diagnose with AI" helpers for the VexOS AI assistant. Installed by
-# nix/module.nix (programs.vexos-ai.enable); see bin/vexos-ai.sh for the commands.
+# vexos-ai — launcher, picker, theme sync and "diagnose with AI" helpers
+# for the VexOS AI assistant. Installed by nix/module.nix
+# (programs.vexos-ai.enable); see bin/vexos-ai.sh for the commands.
 #
 # claude-code and opencode themselves are NOT runtime inputs: the module
 # installs them system-wide so they can also be run directly, and vexos-ai
@@ -35,7 +35,6 @@ let
     categories = [ "System" "Utility" ];
     keywords = [ "AI" "Claude" "OpenCode" "assistant" "help" "diagnose" ];
     actions = {
-      panel = { name = "Accounts"; exec = "vexos-ai panel"; };
       diagnose = { name = "Diagnose a problem"; exec = "vexos-ai diagnose"; };
       pick = { name = "Change AI tool"; exec = "vexos-ai pick"; };
     };

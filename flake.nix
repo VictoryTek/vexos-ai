@@ -96,6 +96,9 @@
           nativeBuildInputs = with pkgs; [ bats jq coreutils findutils gnugrep util-linux ];
         } ''
           export VEXOS_AI_BIN=${script}/bin/vexos-ai
+          # The source tree, for the scan that no script or module names
+          # Claude's login file (tests/contract/credentials.bats).
+          export VEXOS_AI_SRC=${self}
           cp -r ${./tests/contract} contract
           chmod -R u+w contract
           chmod +x contract/stubs/*

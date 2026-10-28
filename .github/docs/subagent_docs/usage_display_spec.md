@@ -331,7 +331,7 @@ endpoint, and the panel's own `/usage` line (the launch-time 5-hour line,
 |---|---|---|
 | `bin/vexos-ai.sh:30` | `USAGE_ENDPOINT=https://api.anthropic.com/api/oauth/usage` | removed |
 | `bin/vexos-ai.sh:535-554` | read `accessToken` from `.credentials.json`, sent it through `curl` with `anthropic-beta: oauth-2025-04-20` | removed, with the `usage` and `usage-check` commands, the cache and probe-state writers, and `curl` from the package's runtime inputs |
-| `bin/vexos-ai.sh:452-470` | read `refreshToken`/`accessToken`/`expiresAt`/`rateLimitTier` presence from the credentials for `signedIn` and `plan` | **kept** (`account_auth_json`): `status --json` and the account list report `signedIn` and `plan`. It emits no token, but it is still a read of the credentials file, and it is a separate decision |
+| `bin/vexos-ai.sh:452-470` | read `refreshToken`/`accessToken`/`expiresAt`/`rateLimitTier` presence from the credentials for `signedIn` and `plan` | kept at first (`account_auth_json`), then **removed** with the accounts feature (2026-10-27): `status --json` now reports `accounts: []`, so `signedIn` and `plan` are gone. Nothing in the repo opens the credentials file |
 | `nix/module.nix:165-178` | a systemd user service and timer ran `vexos-ai usage-check` | removed. They were never options, so no option was removed and no `mkRemovedOptionModule` is needed |
 | `docs/contract.md` "Usage probing", `tests/contract/usage.bats` | the public contract and its tests for the above | rewritten as "Credentials and the network"; `usage.bats` now asserts the probe is gone |
 
@@ -340,8 +340,12 @@ command); `status --json` keeps schema 1 and `accounts[].usage` is always
 `null`; `status --refresh` is accepted and ignored; `account list`, `status` in
 text and the zenity panel show no usage. The usage cache that released VexPortal
 reads is no longer written, so an old file is frozen at its last reading.
-`account mode` still stores `mode` and `threshold`, but they only steered the
-removed warning and auto-switch and now have no effect.
+`account mode` still stored `mode` and `threshold` then, but they only steered
+the removed warning and auto-switch. **Later the same day the accounts feature
+was removed too** (the `account` commands, `mode`, the zenity panel and its
+"Toggle autoswitch" button, and `account_auth_json`, the last read of the
+credentials file): see "Account removal" in `assistant_panel_spike_results.md`
+and `docs/contract.md`.
 
 Earlier specs also planned on this data and are out of date: `assistant_panel_spec.md`
 section 5.5 (tile subtitle "<agent> · <N>% used", account rows with session and

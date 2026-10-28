@@ -3,8 +3,9 @@
 # Opens the user's chosen coding agent (Claude Code or OpenCode) in a terminal,
 # working in /etc/nixos, with the VexOS skills (files/ai/skills) installed in
 # ~/.claude/skills — both agents read that directory. Also owns the pieces
-# around it: first-run picker, multiple Claude accounts, theme sync, and
-# "diagnose with AI" for crashes, failed units and failed rebuilds.
+# around it: first-run picker, theme sync, and "diagnose with AI" for crashes,
+# failed units and failed rebuilds. Claude always runs with its default
+# sign-in (~/.claude); the multiple-accounts feature is removed.
 #
 # Agents always start in their default, asking permission mode. Applying a
 # change (nixos-rebuild switch/boot, just rebuild) is denied to them by the
@@ -17,20 +18,14 @@
 VERSION=1.0.0
 CONF_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/vexos/ai"
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/vexos/ai"
-CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/vexos/ai"
-ACCOUNTS_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/vexos/ai/claude-accounts"
 AGENT_FILE="$CONF_DIR/agent"
-ACCOUNT_FILE="$CONF_DIR/claude-account"
-MODE_FILE="$CONF_DIR/mode"
-THRESHOLD_FILE="$CONF_DIR/threshold"
 MUTE_DIR="$CONF_DIR/crash-ignore"
 CAPTURE_OFF_FILE="$CONF_DIR/crash-capture-off"
 WORKDIR=/etc/nixos
 TITLE="VexOS Assistant"
 
-# Overridable so the contract tests can run against a fake /proc and fake
-# system profiles. Nothing else reads these.
-PROC_DIR="${VEXOS_AI_PROC:-/proc}"
+# Overridable so the contract tests can run against fake system profiles.
+# Nothing else reads these.
 CURRENT_SYSTEM="${VEXOS_AI_CURRENT_SYSTEM:-/run/current-system}"
 BOOTED_SYSTEM="${VEXOS_AI_BOOTED_SYSTEM:-/run/booted-system}"
 
@@ -41,7 +36,7 @@ JSON=""
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 # Exit codes (docs/contract.md): 1 failure · 2 usage · 3 not found ·
-# 4 needs interaction · 5 busy.
+# 4 needs interaction (5, busy, is reserved and no longer used).
 fail() {
   local code=$1
   shift
@@ -52,16 +47,11 @@ die() { fail 1 "$@"; }
 die_usage() { fail 2 "$@"; }
 die_missing() { fail 3 "$@"; }
 die_needs_input() { fail 4 "$@"; }
-die_busy() { fail 5 "$@"; }
 
 # The one human line a mutating command prints; silent under --json, where
 # finish() prints the new status document instead.
 say() { [[ -n $JSON ]] || printf '%s\n' "$*"; }
 finish() { [[ -z $JSON ]] || status_json; }
-
-# Where a conversation with the user goes: stdout, unless that is reserved for
-# the --json document.
-human_fd() { if [[ -n $JSON ]]; then echo 2; else echo 1; fi; }
 
 have_gui() { [[ -n ${WAYLAND_DISPLAY:-}${DISPLAY:-} ]]; }
 
@@ -88,65 +78,9 @@ ensure_terminal() {
   in_new_terminal "$@"
 }
 
-# A free-text answer, from the terminal or a dialog.
-ask_text() {
-  local answer=""
-  if in_terminal; then
-    read -r -p "$1 " answer
-  else
-    answer=$(zenity --entry --title="$TITLE" --text="$1") || return 1
-  fi
-  printf '%s\n' "$answer"
-}
-
-now_s() { date +%s; }
-
 read_first_line() { [[ -f $1 ]] && head -n 1 "$1"; }
 
 default_agent() { read_first_line "$AGENT_FILE" || true; }
-
-active_account() {
-  local a
-  a=$(read_first_line "$ACCOUNT_FILE" || true)
-  if [[ -n $a && $a != main && -d $ACCOUNTS_DIR/$a ]]; then echo "$a"; else echo main; fi
-}
-
-# Claude's own default home stays implicit for the main account: Claude ties
-# ~/.claude.json to it, so CLAUDE_CONFIG_DIR is only ever set for the others.
-account_home() {
-  if [[ $1 == main ]]; then echo "$HOME/.claude"; else echo "$ACCOUNTS_DIR/$1"; fi
-}
-
-list_accounts() {
-  echo main
-  if [[ -d $ACCOUNTS_DIR ]]; then
-    find "$ACCOUNTS_DIR" -mindepth 1 -maxdepth 1 -type d ! -name main -printf '%f\n' | sort
-  fi
-}
-
-valid_label() { [[ $1 =~ ^[A-Za-z0-9_-]{1,32}$ && $1 != main ]]; }
-# "next" is what `account use` takes to mean the following account.
-valid_new_label() { valid_label "$1" && [[ $1 != next ]]; }
-
-# An account that must already exist: main, or a label with a directory.
-require_account() {
-  [[ $1 == main ]] && return 0
-  valid_label "$1" || die_usage "not a valid account label: '$1'"
-  [[ -d $ACCOUNTS_DIR/$1 ]] || die_missing "no account named '$1'"
-}
-
-# A whole percentage 1-100. The 10# keeps "089" from being read as octal.
-valid_percent() { [[ $1 =~ ^[0-9]{1,3}$ ]] && ((10#$1 >= 1 && 10#$1 <= 100)); }
-
-threshold() {
-  local t
-  t=$(read_first_line "$THRESHOLD_FILE" || true)
-  if valid_percent "$t"; then echo $((10#$t)); else echo 95; fi
-}
-
-switch_mode() {
-  if [[ $(read_first_line "$MODE_FILE" || true) == auto ]]; then echo auto; else echo manual; fi
-}
 
 list_muted() {
   if [[ -d $MUTE_DIR ]]; then
@@ -155,29 +89,6 @@ list_muted() {
 }
 
 capture_state() { if [[ -e $CAPTURE_OFF_FILE ]]; then echo off; else echo on; fi; }
-
-# Labels of the accounts a running Claude Code session is using, one per line.
-# A session's account is its CLAUDE_CONFIG_DIR; none means main. Only our own
-# processes are readable, which is the point: they are the user's sessions.
-sessions_in_use() {
-  local p comm dir
-  for p in "$PROC_DIR"/[0-9]*; do
-    comm=$(head -n 1 "$p/comm" 2>/dev/null) || continue
-    case "$comm" in
-    claude | .claude-wrapped) ;;
-    node | bun) tr '\0' ' ' <"$p/cmdline" 2>/dev/null | grep -q claude || continue ;;
-    *) continue ;;
-    esac
-    dir=$(tr '\0' '\n' <"$p/environ" 2>/dev/null | grep -a '^CLAUDE_CONFIG_DIR=' | head -n 1 | cut -d= -f2- || true)
-    if [[ -z $dir || $dir == "$HOME/.claude" ]]; then
-      echo main
-    elif [[ $dir == "$ACCOUNTS_DIR"/* ]]; then
-      echo "${dir#"$ACCOUNTS_DIR"/}"
-    fi
-  done
-}
-
-account_in_use() { sessions_in_use | grep -qx "$1"; }
 
 # ── Picker ───────────────────────────────────────────────────────────────────
 
@@ -216,7 +127,7 @@ agent_title() { if [[ $1 == claude ]]; then echo "Claude Code"; else echo "OpenC
 # ── Launch ───────────────────────────────────────────────────────────────────
 
 launch() {
-  local prompt=${1:-} agent acct targs=()
+  local prompt=${1:-} agent targs=()
   agent=$(default_agent)
   if [[ -z $agent ]]; then
     pick_agent || exit 1
@@ -231,11 +142,6 @@ launch() {
   case "$agent" in
   claude)
     command -v claude >/dev/null || die_missing "claude is not installed"
-    acct=$(active_account)
-    if [[ $acct != main ]]; then
-      CLAUDE_CONFIG_DIR=$(account_home "$acct")
-      export CLAUDE_CONFIG_DIR
-    fi
     if [[ -n $prompt ]]; then exec claude "$prompt"; else exec claude; fi
     ;;
   opencode)
@@ -246,176 +152,35 @@ launch() {
   esac
 }
 
-# ── Accounts (Claude) ────────────────────────────────────────────────────────
-
-account_add() {
-  local label=${1:-} home fd
-  if [[ -z $label ]]; then
-    interactive_ok || die_needs_input "no account name given (use: vexos-ai account add <label>)"
-    label=$(ask_text "Name for the new Claude account (e.g. work):") || die_needs_input "no account name given"
-  fi
-  valid_new_label "$label" || die_usage "account label must be 1-32 letters, digits, - or _ (and not 'main' or 'next')"
-  home=$(account_home "$label")
-  [[ ! -e $home ]] || die_usage "account '$label' already exists"
-  command -v claude >/dev/null || die_missing "claude is not installed"
-  ensure_terminal account add "$label"
-
-  mkdir -p "$home"
-  chmod 700 "$home"
-  mkdir -p "$HOME/.claude/skills"
-  ln -sfn "$HOME/.claude/skills" "$home/skills"
-  theme_sync >/dev/null 2>&1 || true
-
-  # The browser sign-in is a conversation with the user: under --json stdout is
-  # reserved for the status document, so it goes to stderr.
-  fd=$(human_fd)
-  {
-    echo "Signing in a new Claude account: $label"
-    echo "Tip: if your browser is already signed in to another Claude account,"
-    echo "open the sign-in link in a private window."
-    echo
-  } >&"$fd"
-  if CLAUDE_CONFIG_DIR="$home" claude auth login >&"$fd"; then
-    say ""
-    say "Added '$label'. Switch to it with: vexos-ai account use $label"
-    finish
-  else
-    rm -rf "${home:?}"
-    die "sign-in did not finish; nothing was added"
-  fi
-}
-
-account_use() {
-  local target=${1:-next} current accounts i
-  current=$(active_account)
-  mapfile -t accounts < <(list_accounts)
-  if [[ $target == next ]]; then
-    target=${accounts[0]}
-    for i in "${!accounts[@]}"; do
-      if [[ ${accounts[$i]} == "$current" ]]; then
-        target=${accounts[$(((i + 1) % ${#accounts[@]}))]}
-      fi
-    done
-  fi
-  require_account "$target"
-  mkdir -p "$CONF_DIR"
-  printf '%s\n' "$target" >"$ACCOUNT_FILE"
-  say "New Claude sessions now use '$target'. Running sessions keep their account."
-}
-
-account_remove() {
-  local label=${1:-}
-  [[ -n $label ]] || die_usage "usage: vexos-ai account remove <label>"
-  [[ $label != main ]] || die_usage "'main' is Claude's own default sign-in and cannot be removed"
-  require_account "$label"
-  ! account_in_use "$label" || die_busy "a running Claude session is using '$label'; close it first"
-  rm -rf "${ACCOUNTS_DIR:?}/${label:?}"
-  if [[ $(read_first_line "$ACCOUNT_FILE" || true) == "$label" ]]; then rm -f "${ACCOUNT_FILE:?}"; fi
-  # Files that older versions kept per account for the usage readings.
-  rm -f "${CACHE_DIR:?}/usage-$label.json" "${STATE_DIR:?}/warned-$label" \
-    "${STATE_DIR:?}/probe-$label.json" "${STATE_DIR:?}/probe-$label.lock"
-  say "Removed '$label'."
-}
-
-account_rename() {
-  local old=${1:-} new=${2:-}
-  [[ -n $old && -n $new ]] || die_usage "usage: vexos-ai account rename <label> <new>"
-  [[ $old != main ]] || die_usage "'main' is Claude's own default sign-in and cannot be renamed"
-  require_account "$old"
-  valid_new_label "$new" || die_usage "new label must be 1-32 letters, digits, - or _ (and not 'main' or 'next')"
-  [[ ! -e $ACCOUNTS_DIR/$new ]] || die_usage "account '$new' already exists"
-  ! account_in_use "$old" || die_busy "a running Claude session is using '$old'; close it first"
-  mv "$ACCOUNTS_DIR/$old" "$ACCOUNTS_DIR/$new"
-  if [[ $(read_first_line "$ACCOUNT_FILE" || true) == "$old" ]]; then printf '%s\n' "$new" >"$ACCOUNT_FILE"; fi
-  say "Renamed '$old' to '$new'."
-}
-
-account_mode() {
-  local mode=${1:-} t=${2:-}
-  if [[ -n $mode ]]; then
-    [[ $mode == manual || $mode == auto ]] || die_usage "mode must be manual or auto"
-  fi
-  if [[ -n $t ]]; then valid_percent "$t" || die_usage "threshold must be a whole number from 1 to 100"; fi
-  if [[ -n $mode ]]; then
-    mkdir -p "$CONF_DIR"
-    printf '%s\n' "$mode" >"$MODE_FILE"
-  fi
-  if [[ -n $t ]]; then
-    mkdir -p "$CONF_DIR"
-    printf '%s\n' "$((10#$t))" >"$THRESHOLD_FILE"
-  fi
-  say "Switching: $(switch_mode) at $(threshold)%. Saved, but it has no effect now: nothing reads usage."
-}
-
-account_list() {
-  local a active mark
-  if [[ -n $JSON ]]; then status_json; return; fi
-  active=$(active_account)
-  while read -r a; do
-    mark=" "
-    [[ $a == "$active" ]] && mark="*"
-    printf '%s %s\n' "$mark" "$a"
-  done < <(list_accounts)
-}
-
-# ── Sign-in state ────────────────────────────────────────────────────────────
-# What the credentials say, never the tokens: whether the account is signed in
-# and its plan label ("Max 5x"). An expired *access* token is routine (Claude
-# Code refreshes it when it starts), so only a missing refresh token counts as
-# signed out.
-account_auth_json() {
-  local creds
-  creds="$(account_home "$1")/.credentials.json"
-  jq -c --argjson nowms "$(($(now_s) * 1000))" '
-    (.claudeAiOauth // {}) as $o
-    | (($o.subscriptionType // "") | ascii_downcase) as $t
-    | first((($o.rateLimitTier // "") | capture("(?<n>[0-9]+)x$")? | .n + "x"), null) as $tier
-    | { signedIn: ((($o.refreshToken // "") != "") or ((($o.accessToken // "") != "") and (($o.expiresAt // 0) > $nowms))),
-        plan: (if $t == "" then null else ([($t[0:1] | ascii_upcase) + $t[1:], $tier] | map(select(. != null)) | join(" ")) end) }
-  ' "$creds" 2>/dev/null || echo '{"signedIn":false,"plan":null}'
-}
-
 # ── Status ───────────────────────────────────────────────────────────────────
 
 # The status document, schema 1 (docs/contract.md). Additive keys never bump
-# the schema; consumers ignore keys they do not know.
+# the schema; consumers ignore keys they do not know. The account keys are
+# kept with fixed values so schema 1 consumers keep parsing: the accounts
+# feature is removed and Claude always uses its default sign-in.
 status_json() {
-  local a active in_use agent reboot=false rows=()
-  active=$(active_account)
-  in_use=$(sessions_in_use || true)
+  local agent reboot=false
   agent=$(default_agent)
   [[ $agent == claude || $agent == opencode ]] || agent=""
   if [[ -e $CURRENT_SYSTEM/sw/bin/vexos-ai && ! -e $BOOTED_SYSTEM/sw/bin/vexos-ai ]]; then reboot=true; fi
 
-  while read -r a; do
-    rows+=("$(jq -nc --arg label "$a" --arg active "$active" --arg in_use "$in_use" \
-      --argjson auth "$(account_auth_json "$a")" '
-      { label: $label, active: ($label == $active), signedIn: $auth.signedIn, plan: $auth.plan,
-        inUse: (($in_use | split("\n")) | index($label) != null), usage: null }')")
-  done < <(list_accounts)
-
   # -M: jq colours its output on a terminal, and this runs in VexPortal's VTE.
-  printf '%s\n' "${rows[@]}" | jq -scM \
+  jq -ncM \
     --arg version "$VERSION" --argjson reboot "$reboot" --arg agent "$agent" \
-    --arg workdir "$WORKDIR" --arg active "$active" --arg mode "$(switch_mode)" \
-    --argjson threshold "$(threshold)" --arg capture "$(capture_state)" \
+    --arg workdir "$WORKDIR" --arg capture "$(capture_state)" \
     --argjson muted "$(list_muted | jq -Rnc '[inputs]')" '
     { schema: 1, version: $version, installed: true, needsReboot: $reboot,
       agent: (if $agent == "" then null else $agent end), workdir: $workdir,
-      accounts: ., activeAccount: $active,
-      switching: { mode: $mode, threshold: $threshold },
+      accounts: [], activeAccount: "main",
+      switching: { mode: "manual", threshold: 95 },
       crash: { capture: ($capture == "on"), muted: $muted } }'
 }
 
 status_text() {
   status_json | jq -r '
     "Assistant:  \(.agent // "not chosen")",
-    "Account:    \(.activeAccount) (for new sessions)",
-    "Switching:  \(.switching.mode) at \(.switching.threshold)%",
     "Crashes:    capture \(if .crash.capture then "on" else "off" end)\(if (.crash.muted | length) > 0 then ", muted: \(.crash.muted | join(", "))" else "" end)",
-    (if .needsReboot then "Reboot:     needed to start the background services" else empty end),
-    "Accounts:",
-    (.accounts[] | "  \(if .active then "*" else " " end) \(.label)\(if .plan then " (\(.plan))" else "" end)\(if .signedIn then "" else "  not signed in" end)\(if .inUse then "  in use" else "" end)")'
+    (if .needsReboot then "Reboot:     needed to start the background services" else empty end)'
 }
 
 status_cmd() {
@@ -431,58 +196,10 @@ status_cmd() {
   if [[ -n $JSON ]]; then status_json; else status_text; fi
 }
 
-# ── Panel (point-and-click) ──────────────────────────────────────────────────
-
-panel() {
-  local rows=() a active mark agent out rc label
-  have_gui || { account_list; return; }
-  while true; do
-    rows=()
-    active=$(active_account)
-    agent=$(default_agent)
-    while read -r a; do
-      mark=""
-      [[ $a == "$active" ]] && mark="●"
-      rows+=("$mark" "$a")
-    done < <(list_accounts)
-
-    rc=0
-    out=$(zenity --list --title="$TITLE" --width=680 --height=380 \
-      --text="Assistant: ${agent:-not chosen}   ·   Autoswitch: $(switch_mode) at $(threshold)% (inactive: nothing reads usage)\nClaude accounts (● = used by new sessions):" \
-      --column="" --column="Account" \
-      --print-column=2 --ok-label="Use selected" --cancel-label="Close" \
-      --extra-button="Open assistant" --extra-button="Add account" \
-      --extra-button="Remove account" --extra-button="Change AI tool" \
-      --extra-button="Toggle autoswitch" \
-      "${rows[@]}") || rc=$?
-
-    # A failing command (a dead label, a busy account) must not close the panel.
-    case "$rc:$out" in
-    0:) ;;
-    0:*) (account_use "$out") >/dev/null || true ;;
-    1:"Open assistant") launch; return ;;
-    1:"Add account")
-      label=$(zenity --entry --title="$TITLE" --text="Name for the new Claude account (e.g. work):") || continue
-      xdg-terminal-exec vexos-ai account add "$label" &
-      return ;;
-    1:"Remove account")
-      # Extra buttons do not report the selected row, so ask which one.
-      label=$(list_accounts | grep -vx main | zenity --list --title="$TITLE" \
-        --text="Remove which Claude account? Its sign-in is deleted from this machine." \
-        --column="Account" --width=360 --height=300) || continue
-      if [[ -n $label ]]; then (account_remove "$label") >/dev/null || true; fi ;;
-    1:"Change AI tool") pick_agent || true ;;
-    1:"Toggle autoswitch")
-      if [[ $(switch_mode) == auto ]]; then account_mode manual >/dev/null; else account_mode auto >/dev/null; fi ;;
-    *) return ;;
-    esac
-  done
-}
-
 # ── Theme sync ───────────────────────────────────────────────────────────────
 # VexOS themes are GNOME's light/dark scheme plus the role's accent colour
 # (modules/gnome-*.nix). Claude Code gets a matching custom theme, which it
-# hot-reloads from <home>/themes/. A theme the user picked themselves is left
+# hot-reloads from ~/.claude/themes/. A theme the user picked themselves is left
 # alone; only an unset theme or our own is (re)pointed at "custom:vexos".
 # OpenCode follows the terminal palette ("theme": "system", modules/ai.nix).
 
@@ -495,31 +212,28 @@ accent_hex() {
 }
 
 theme_sync() {
-  local scheme accent base hex a home settings tmp tui
+  local scheme accent base hex home="$HOME/.claude" settings tmp tui
   scheme=$(gsettings get org.gnome.desktop.interface color-scheme 2>/dev/null || echo "'prefer-dark'")
   accent=$(gsettings get org.gnome.desktop.interface accent-color 2>/dev/null || echo "'blue'")
   accent=${accent//\'/}
   case "$scheme" in *prefer-light* | *default*) base=light ;; *) base=dark ;; esac
   hex=$(accent_hex "$accent")
 
-  while read -r a; do
-    home=$(account_home "$a")
-    mkdir -p "$home/themes"
-    jq -n --arg base "$base" --arg hex "$hex" '{
-      name: "VexOS", base: $base,
-      overrides: { claude: $hex, promptBorder: $hex, briefLabelClaude: $hex, rate_limit_fill: $hex }
-    }' >"$home/themes/vexos.json.tmp" && mv "$home/themes/vexos.json.tmp" "$home/themes/vexos.json"
+  mkdir -p "$home/themes"
+  jq -n --arg base "$base" --arg hex "$hex" '{
+    name: "VexOS", base: $base,
+    overrides: { claude: $hex, promptBorder: $hex, briefLabelClaude: $hex, rate_limit_fill: $hex }
+  }' >"$home/themes/vexos.json.tmp" && mv "$home/themes/vexos.json.tmp" "$home/themes/vexos.json"
 
-    settings="$home/settings.json"
-    if [[ -f $settings ]]; then
-      if jq -e '(.theme // "") == "" or .theme == "custom:vexos"' "$settings" >/dev/null 2>&1; then
-        tmp=$(mktemp "$settings.XXXXXX")
-        jq '.theme = "custom:vexos"' "$settings" >"$tmp" && mv "$tmp" "$settings"
-      fi
-    else
-      echo '{ "theme": "custom:vexos" }' >"$settings"
+  settings="$home/settings.json"
+  if [[ -f $settings ]]; then
+    if jq -e '(.theme // "") == "" or .theme == "custom:vexos"' "$settings" >/dev/null 2>&1; then
+      tmp=$(mktemp "$settings.XXXXXX")
+      jq '.theme = "custom:vexos"' "$settings" >"$tmp" && mv "$tmp" "$settings"
     fi
-  done < <(list_accounts)
+  else
+    echo '{ "theme": "custom:vexos" }' >"$settings"
+  fi
 
   # OpenCode keeps its theme in tui.json; "system" follows the terminal
   # palette, so it tracks light/dark on its own. Only written when absent.
@@ -703,23 +417,16 @@ Usage: vexos-ai [--non-interactive] [--json] [command]
   prompt <text…>            the same, words joined
   pick [claude|opencode]    choose the assistant (no argument: ask)
   status [--json] [--refresh]   state; --refresh is accepted and ignored
-  panel                     accounts window
   diagnose [unit|rebuild]   collect logs (or reproduce a failed rebuild) and ask what is wrong
   crash <pid> [comm exe sig]  diagnose a core dump (see: coredumpctl list)
   crash-mute [name [on|off]]  mute / unmute / list crash notifications
   crash-mute --off <name>   unmute
   crash-capture [on|off]    watch for crashes at all (no argument: show)
-  account list              Claude accounts
-  account add <label>       sign in an extra Claude account (opens a browser)
-  account use <label|next>  account for new sessions
-  account remove <label>
-  account rename <label> <new>
-  account mode [manual|auto] [threshold]   saved, but unused: nothing reads usage now
   theme                     sync Claude Code's theme with the desktop
 
 With the arguments a command needs it never asks anything. --non-interactive
 (or VEXOS_AI_NONINTERACTIVE=1) forbids asking: missing input exits 4.
-Exit codes: 0 ok, 1 failed, 2 bad usage, 3 not found, 4 needs interaction, 5 busy.
+Exit codes: 0 ok, 1 failed, 2 bad usage, 3 not found, 4 needs interaction.
 Full contract: docs/contract.md
 EOF
 }
@@ -761,7 +468,6 @@ pick)
   finish
   ;;
 status) status_cmd "$@" ;;
-panel) panel ;;
 diagnose) diagnose "${1:-}" ;;
 crash) crash "$@" ;;
 crash-mute) crash_mute "$@" ;;
@@ -770,34 +476,9 @@ crash-capture)
   crash_capture "${1:-}"
   ;;
 crash-watch) crash_watch ;;
-account)
-  sub=${1:-list}
-  [[ $# -gt 0 ]] && shift
-  case "$sub" in
-  list) account_list ;;
-  add) account_add "${1:-}" ;;
-  use)
-    [[ $# -le 1 ]] || die_usage "usage: vexos-ai account use <label|next>"
-    account_use "${1:-next}"
-    finish
-    ;;
-  remove)
-    [[ $# -le 1 ]] || die_usage "usage: vexos-ai account remove <label>"
-    account_remove "${1:-}"
-    finish
-    ;;
-  rename)
-    [[ $# -le 2 ]] || die_usage "usage: vexos-ai account rename <label> <new>"
-    account_rename "${1:-}" "${2:-}"
-    finish
-    ;;
-  mode)
-    [[ $# -le 2 ]] || die_usage "usage: vexos-ai account mode [manual|auto] [threshold]"
-    account_mode "${1:-}" "${2:-}"
-    finish
-    ;;
-  *) usage >&2; exit 2 ;;
-  esac
+# Removed: Claude always uses its default sign-in. Callers get a clear exit 2.
+account | panel)
+  die_usage "'$cmd' was removed: there are no Claude accounts to manage; Claude uses its default sign-in (~/.claude)"
   ;;
 theme) theme_sync ;;
 theme-watch) theme_watch ;;

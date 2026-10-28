@@ -4,7 +4,7 @@
 load helpers
 setup() { common_setup; }
 
-@test "a fresh machine: schema 1, defaults, main only" {
+@test "a fresh machine: schema 1, defaults, no accounts" {
   run vexos status --json
   [ "$status" -eq 0 ]
   jqe '.schema == 1'
@@ -16,73 +16,49 @@ setup() { common_setup; }
   jqe '.activeAccount == "main"'
   jqe '.switching == {mode: "manual", threshold: 95}'
   jqe '.crash == {capture: true, muted: []}'
-  jqe '.accounts | length == 1'
-  jqe '.accounts[0] | .label == "main" and .active == true and .inUse == false and .signedIn == false and .plan == null and .usage == null'
+  jqe '.accounts == []'
 }
 
-@test "status reflects the saved settings, accounts and mutes" {
-  make_account work
+@test "the top-level keys are unchanged from schema 1" {
+  run vexos status --json
+  jqe 'keys == (["schema", "version", "installed", "needsReboot", "agent", "workdir",
+    "accounts", "activeAccount", "switching", "crash"] | sort)'
+}
+
+@test "status reflects the saved agent and mutes" {
   set_file "$CONF/agent" opencode
-  set_file "$CONF/claude-account" work
-  set_file "$CONF/mode" auto
-  set_file "$CONF/threshold" 80
   mkdir -p "$CONF/crash-ignore"
   touch "$CONF/crash-ignore/firefox" "$CONF/crash-ignore/steam"
   touch "$CONF/crash-capture-off"
   run vexos status --json
   [ "$status" -eq 0 ]
-  jqe '.agent == "opencode" and .activeAccount == "work"'
-  jqe '.switching == {mode: "auto", threshold: 80}'
+  jqe '.agent == "opencode"'
   jqe '.crash == {capture: false, muted: ["firefox", "steam"]}'
-  jqe '[.accounts[].label] == ["main", "work"]'
-  jqe '(.accounts[] | select(.label == "work") | .active) and (.accounts[] | select(.label == "main") | .active | not)'
 }
 
-@test "a garbage agent file is null, a missing active account falls back to main" {
+@test "a garbage agent file is null" {
   set_file "$CONF/agent" emacs
-  set_file "$CONF/claude-account" ghost
   run vexos status --json
-  jqe '.agent == null and .activeAccount == "main"'
+  jqe '.agent == null'
 }
 
-@test "signed-in state and plan come from the credentials" {
-  write_creds main
-  run vexos status --json
-  [ "$status" -eq 0 ]
-  jqe '.accounts[0].signedIn == true and .accounts[0].plan == "Max 5x"'
-}
-
-@test "usage is null for every account, even with a reading left by an older version" {
+@test "what older versions left is ignored: no accounts, main, manual at 95" {
   make_account work
+  set_file "$CONF/claude-account" work
+  set_file "$CONF/mode" auto
+  set_file "$CONF/threshold" 80
+  write_creds main
+  write_creds work
   write_legacy_usage main
   write_legacy_usage work
   run vexos status --json
   [ "$status" -eq 0 ]
-  jqe '[.accounts[].usage] == [null, null]'
+  # signedIn and plan went with the accounts list: nothing reads the login file.
+  jqe '.accounts == [] and .activeAccount == "main"'
+  jqe '.switching == {mode: "manual", threshold: 95}'
   run vexos status
   [ "$status" -eq 0 ]
-  [[ $output != *"weekly"* && $output != *"usage"* && $output != *"session "[0-9]* ]]
-}
-
-@test "an expired access token is routine: still signed in; no refresh token is not" {
-  write_creds main -600
-  run vexos status --json
-  jqe '.accounts[0].signedIn == true'
-  mkdir -p "$HOME/.claude"
-  jq -n '{claudeAiOauth: {accessToken: "x", expiresAt: 1000}}' >"$HOME/.claude/.credentials.json"
-  run vexos status --json
-  jqe '.accounts[0].signedIn == false'
-}
-
-@test "inUse is true for the account a running session uses" {
-  make_account work
-  fake_session 100
-  fake_session 101 "$DATA/work"
-  run vexos status --json
-  jqe '(.accounts[] | select(.label == "main") | .inUse) and (.accounts[] | select(.label == "work") | .inUse)'
-  rm -r "$VEXOS_AI_PROC/100"
-  run vexos status --json
-  jqe '(.accounts[] | select(.label == "main") | .inUse | not) and (.accounts[] | select(.label == "work") | .inUse)'
+  [[ $output != *"work"* && $output != *"Max 5x"* && $output != *"usage"* && $output != *"weekly"* ]]
 }
 
 @test "needsReboot: in the running system's profile but not the booted one's" {
@@ -135,7 +111,8 @@ setup() { common_setup; }
   run vexos status
   [ "$status" -eq 0 ]
   [[ $output == *"Assistant:  claude"* ]]
-  [[ $output == *"main (Max 5x)"* ]]
+  [[ $output == *"Crashes:    capture on"* ]]
+  [[ $output != *"Account"* && $output != *"Switching"* && $output != *"Max 5x"* ]]
 }
 
 @test "status rejects unknown arguments with exit 2" {

@@ -51,17 +51,16 @@ setup() { common_setup; }
   grep -qx 'arg=hello there' "$STUB_LOG/opencode.log"
 }
 
-@test "a non-main active account is used through CLAUDE_CONFIG_DIR, main is not" {
+@test "claude runs with its default config, even with an old account pointer left" {
   skip_without_pty
   install_agents
   make_account work
   set_file "$CONF/agent" claude
   set_file "$CONF/claude-account" work
   run_tty
-  grep -qx "config=$DATA/work" "$STUB_LOG/claude.log"
-  set_file "$CONF/claude-account" main
-  run_tty
-  [ "$(grep -c '^config=$' "$STUB_LOG/claude.log")" -eq 1 ]
+  [ "$status" -eq 0 ]
+  [ "$(grep -c '^config=' "$STUB_LOG/claude.log")" -eq 1 ]
+  grep -qx 'config=' "$STUB_LOG/claude.log"
 }
 
 @test "off a terminal the assistant opens one, with the prompt as argv" {
@@ -130,25 +129,27 @@ setup() { common_setup; }
 }
 
 @test "errors are one line on stderr, prefixed vexos-ai:, and nothing on stdout" {
-  run --separate-stderr vexos account use ghost
-  [ "$status" -eq 3 ]
+  run --separate-stderr vexos pick emacs
+  [ "$status" -eq 2 ]
   [ -z "$output" ]
-  [ "$stderr" = "vexos-ai: no account named 'ghost'" ]
+  [ "$stderr" = "vexos-ai: unknown assistant 'emacs' (use claude or opencode)" ]
 }
 
-@test "the six VexPortal recipes never open a dialog or a terminal, with a TTY and a display" {
+@test "the VexPortal recipes never open a dialog or a terminal, with a TTY and a display" {
   skip_without_pty
   install_agents
   make_account work
   export WAYLAND_DISPLAY=wayland-0
   run_tty pick claude && [ "$status" -eq 0 ]
-  run_tty account use work && [ "$status" -eq 0 ]
-  run_tty account mode auto 90 && [ "$status" -eq 0 ]
-  run_tty account mode manual "" && [ "$status" -eq 0 ]
   run_tty crash-mute firefox "" && [ "$status" -eq 0 ]
   run_tty crash-mute firefox off && [ "$status" -eq 0 ]
   run_tty crash-mute "" "" && [ "$status" -eq 0 ]
-  run_tty account remove work && [ "$status" -eq 0 ]
-  run_tty account add other && [ "$status" -eq 0 ]
+  # The account recipes' commands are removed: they fail, and still open nothing.
+  run_tty account use work && [ "$status" -eq 2 ]
+  run_tty account mode auto 90 && [ "$status" -eq 2 ]
+  run_tty account mode manual "" && [ "$status" -eq 2 ]
+  run_tty account remove work && [ "$status" -eq 2 ]
+  run_tty account add other && [ "$status" -eq 2 ]
   nothing_opened
+  [ -d "$DATA/work" ]
 }

@@ -12,36 +12,32 @@ replaces it (Phase 2): `tests/contract/*.bats` runs unchanged against both.
   (VexPortal's VTE has both).
 - **Asking is a fallback**, and only for missing argv. It needs a terminal or a
   display. `--non-interactive` (or `VEXOS_AI_NONINTERACTIVE=1`) forbids it:
-  missing input then exits 4. Only `pick` (with no agent) and `account add` (with
-  no label) can ask.
+  missing input then exits 4. Only `pick` (with no agent) can ask.
 - **Empty trailing arguments are missing arguments.** `just` passes `""` for a
-  recipe parameter that was left unset, so `vexos-ai pick ""`,
-  `crash-mute "" ""` and `account mode auto ""` mean `pick`, `crash-mute`
-  (list) and `account mode auto`.
-- **Interactive by nature**, so they need a terminal: `account add` (browser
-  sign-in through `claude auth login`) and launching the assistant (bare
-  `vexos-ai`, `--prompt`, `prompt`, `diagnose`, `crash`). Without a terminal they
-  open one (`xdg-terminal-exec`) when there is a display, and exit 4 under
-  `--non-interactive` or with no display.
+  recipe parameter that was left unset, so `vexos-ai pick ""` and
+  `crash-mute "" ""` mean `pick` and `crash-mute` (list).
+- **Interactive by nature**, so they need a terminal: launching the assistant
+  (bare `vexos-ai`, `--prompt`, `prompt`, `diagnose`, `crash`). Without a
+  terminal they open one (`xdg-terminal-exec`) when there is a display, and
+  exit 4 under `--non-interactive` or with no display.
 - **Global flags** `--non-interactive` and `--json` may come before or after the
   command. After `prompt` or `--prompt`, everything is the prompt's text.
 - **Output.** A human gets one line on stdout. Errors are one line on stderr,
   prefixed `vexos-ai:`, and leave stdout empty. With `--json`, a mutating command
   prints the new `status` document (and nothing else) on stdout, so a caller can
-  refresh in one call. `account add --json` sends the sign-in chatter to stderr.
-  `status`, `account list` and `crash-mute` (no name) with `--json` print the
-  document too.
+  refresh in one call. `status` and `crash-mute` (no name) with `--json` print
+  the document too.
 
 ## Exit codes
 
 | Code | Meaning | Examples |
 |---|---|---|
 | 0 | ok | |
-| 1 | runtime failure | sign-in did not finish; corrupt `agent` file |
-| 2 | usage error: bad argv or value | unknown agent, bad label, threshold 0 or 101, taken name, unknown command, `remove main` |
-| 3 | not found | no such account; `claude` or `opencode` not installed |
-| 4 | needs interaction, and none is allowed | `pick` with no agent and `--non-interactive`, or with no terminal or display; `account add` off a terminal under `--non-interactive` |
-| 5 | busy | `account remove` or `rename` while a running Claude Code session uses the account |
+| 1 | runtime failure | corrupt `agent` file |
+| 2 | usage error: bad argv or value | unknown agent, unknown command, a removed command (`account …`, `panel`, `usage`) |
+| 3 | not found | `claude` or `opencode` not installed |
+| 4 | needs interaction, and none is allowed | `pick` with no agent and `--non-interactive`, or with no terminal or display |
+| 5 | busy | reserved: nothing returns it now. It was `account remove` or `rename` while a session used the account |
 
 ## Commands
 
@@ -51,12 +47,6 @@ vexos-ai --prompt "<text>"                … with a task
 vexos-ai prompt <text…>                   same, words joined with spaces
 vexos-ai pick [claude|opencode]           set the agent; no argument → ask
 vexos-ai status [--json] [--refresh]      state; --refresh is accepted and ignored
-vexos-ai account list
-vexos-ai account add <label>              interactive sign-in (terminal)
-vexos-ai account use <label|next>         main, a label, or the next account
-vexos-ai account remove <label>           not main; exit 5 while in use
-vexos-ai account rename <label> <new>     not main; exit 5 while in use
-vexos-ai account mode [manual|auto] [pct] pct 1-100; no argument → report
 vexos-ai crash-mute                       list
 vexos-ai crash-mute <prog> [on|off]       default on
 vexos-ai crash-mute --off <prog>          same as '<prog> off'
@@ -64,7 +54,7 @@ vexos-ai crash-capture [on|off]           no argument → print "on" or "off"
 vexos-ai crash <pid> [comm exe sig]       diagnose a core dump
 vexos-ai diagnose [unit|rebuild]
 vexos-ai theme
-internal: panel, crash-watch, theme-watch, welcome
+internal: crash-watch, theme-watch, welcome
 ```
 
 Notes:
@@ -72,11 +62,14 @@ Notes:
 - **Removed:** `vexos-ai usage [account]` and the internal `usage-check` (and its
   `vexos-ai-usage` user timer) are gone. They are unknown commands now: exit 2,
   usage on stderr. See "Credentials and the network".
-- `account use` with no target means `next`. `next` cycles `main`, then the
-  labels in name order, then `main`.
-- Labels are 1-32 of `A-Za-z0-9_-`. `main` and `next` are reserved. `account use`
-  and the others take only a label, never a path.
-- `account mode` validates both values before it writes either.
+- **Removed:** the Claude accounts feature. `vexos-ai account` with any
+  subcommand or none (`list`, `add`, `use`, `remove`, `rename`, `mode`) and the
+  internal `panel` (the zenity accounts window, with its "Toggle autoswitch"
+  button and the "Accounts" desktop action) exit 2 with one line on stderr,
+  `vexos-ai: '<command>' was removed: …`, and nothing on stdout, also under
+  `--json`. They never ask, open a terminal or touch a file. Claude always runs
+  with its default sign-in (`~/.claude`; `CLAUDE_CONFIG_DIR` is never set). Sign
+  in or switch accounts inside Claude Code itself (`/login`).
 - `crash-capture off` creates a flag file and stops the watcher; `on` removes it
   and starts the watcher. If `systemctl --user` cannot reach a session, the
   setting is still saved and a warning goes to stderr (exit 0).
@@ -92,16 +85,7 @@ Notes:
   "needsReboot": false,
   "agent": "claude",
   "workdir": "/etc/nixos",
-  "accounts": [
-    {
-      "label": "main",
-      "active": true,
-      "signedIn": true,
-      "plan": "Max 5x",
-      "inUse": false,
-      "usage": null
-    }
-  ],
+  "accounts": [],
   "activeAccount": "main",
   "switching": { "mode": "manual", "threshold": 95 },
   "crash": { "capture": true, "muted": ["firefox"] }
@@ -111,16 +95,15 @@ Notes:
 - `schema` is an integer. It changes only on a breaking change. Additive keys do
   not bump it, so **consumers must ignore unknown keys**.
 - `agent` is `null` until one is chosen (or if the file holds something else).
-- `usage` is **always `null`**. Earlier versions filled it from a usage probe,
-  which is removed (see "Credentials and the network"). The key stays so that
-  schema 1 consumers, which already handle `null`, keep parsing. Do not rely on
-  it: it may be dropped in a later schema.
-- `signedIn` is false only when the account has no refresh token (or an expired
-  access token and nothing to renew it). An expired *access* token is routine:
-  `signedIn` stays true.
-- `plan` comes from the account's credentials ("Max 5x", "Pro"), or is `null`.
-- `inUse`: a running Claude Code process of this user has the account as its
-  `CLAUDE_CONFIG_DIR` (none set means `main`).
+- The account keys are kept with **fixed values** so that schema 1 consumers
+  keep parsing: `accounts` is always `[]`, `activeAccount` is always `"main"`,
+  and `switching` is always `{ "mode": "manual", "threshold": 95 }`, whatever
+  files older versions left. Do not rely on them: they may be dropped in a
+  later schema.
+- **Lost:** the per-account fields went with the list. A consumer that read
+  `signedIn`, `plan`, `inUse` or `usage` from `accounts[]` finds no entry, so
+  it gets nothing (`null` in jq). Nothing reports whether Claude is signed in
+  or on which plan; Claude Code's own `/status` does.
 - `needsReboot`: `sw/bin/vexos-ai` is in `/run/current-system` but not in
   `/run/booted-system` (the user services start at login).
 - `installed` is always true when the CLI runs.
@@ -135,18 +118,23 @@ reads the files below directly and keeps working.
 | Path | Format |
 |---|---|
 | `$XDG_CONFIG_HOME/vexos/ai/agent` | `claude` or `opencode` |
-| `…/claude-account`, `…/mode`, `…/threshold` | first line |
 | `…/crash-ignore/<prog>` | empty file per muted program |
 | `…/crash-capture-off` | flag file. The crash-watch unit has `ConditionPathExists=!%h/.config/vexos/ai/crash-capture-off` (systemd cannot see an `XDG_CONFIG_HOME` override) |
-| `$XDG_DATA_HOME/vexos/ai/claude-accounts/<label>/` | Claude config home |
+
+Versions with the accounts feature also wrote `…/claude-account` (the pointer
+to the account for new sessions), `…/mode`, `…/threshold` and one Claude config
+home per extra account, `$XDG_DATA_HOME/vexos/ai/claude-accounts/<label>/`.
+**Nothing reads, writes, moves or deletes them now.** They stay on disk as
+harmless leftovers, sign-in included; a user who wants an old account's
+sign-in gone deletes its directory by hand. A caller that reads the pointer
+directly must stop trusting it: the launcher no longer follows it.
 
 Versions before the usage probe was removed also wrote
 `$XDG_CACHE_HOME/vexos/ai/usage-<label>.json` and
 `$XDG_STATE_HOME/vexos/ai/{probe-<label>.json,probe-<label>.lock,warned-<label>}`.
 **Nothing writes or reads them now.** An old `usage-<label>.json` is frozen at
 its last reading and no longer updates, so a caller that reads it directly (the
-released VexPortal did) must stop trusting it. `account remove` deletes the
-ones of the account it removes; any others are harmless leftovers.
+released VexPortal did) must stop trusting it. They are harmless leftovers.
 
 ## Credentials and the network
 
@@ -156,17 +144,13 @@ ones of the account it removes; any others are harmless leftovers.
   Anthropic's undocumented OAuth usage endpoint) is removed. A caller that wants
   usage asks the agent itself: the assistant panel shows the 5-hour line that
   Claude Code's own `/usage` reports.
-- **What it still reads.** `status` reads each account's `.credentials.json` for
-  `signedIn` and `plan` only: whether a refresh token exists, whether the access
-  token has not expired, and the subscription and rate-limit tier labels. A
-  token is never printed, logged, sent anywhere or written to any file; a test
-  greps every output and every file under `HOME` for it.
-- **What it never does.** It does not copy credentials. `account add` has Claude
-  sign in to the new account's own config directory (`claude auth login`),
-  `account rename` moves that directory and `account remove` deletes it.
-- **Switching mode and threshold.** `account mode` still stores `mode` and
-  `threshold` (and `status` still reports them as `switching`), but they have no
-  effect: they only ever steered the removed usage warning and auto-switch.
+- **No credentials.** Nothing in this repo opens Claude's login file
+  (`.credentials.json`): not the CLI, the module, the panel or the spike
+  scripts. `credentials.bats` fails if any script or module names it. The
+  CLI does not read, copy, move or delete credentials, and never runs a
+  sign-in. A token is never printed, logged, sent anywhere or written to any
+  file; a test plants one and greps every output and every file under `HOME`
+  for it.
 
 ## What the safety policy covers, and what it does not
 
@@ -207,17 +191,22 @@ they edit or run commands. That is a guardrail. What to know:
 ## Testing it
 
 `tests/contract/*.bats` is the executable form of this document: black-box, a
-fake `HOME`, a fake `/proc` and system profiles, and stub `claude`, `opencode`,
+fake `HOME`, fake system profiles, and stub `claude`, `opencode`,
 `curl`, `systemctl`, `zenity`, `xdg-terminal-exec`, `notify-send` and `gsettings`
 first on `PATH`. The stubs log their calls, so "never opens a dialog" is an
 assertion; the `curl` stub is a tripwire that fails and logs if anything calls
-it. Terminal cases run under `script(1)` for a real pty. It runs as
-`checks.<system>.contract`; by hand:
+it. Terminal cases run under `script(1)` for a real pty. `credentials.bats`
+also scans the source tree (`VEXOS_AI_SRC`, by default this checkout). It runs
+as `checks.<system>.contract`; by hand:
 
 ```sh
 nix develop -c env VEXOS_AI_BIN=<path to a vexos-ai built without zenity,
   libnotify, xdg-terminal-exec in its runtime inputs> bats tests/contract
 ```
+
+By hand, `claude` and `opencode` must not be on `PATH`: the tests install their
+stubs only where they want an agent, and a test that expects "not installed"
+would otherwise start the real one.
 
 (`packages.<system>.default.passthru.mkScript [ … ]` builds that variant. The
 packaged `vexos-ai` puts its own `zenity`, `libnotify` and `xdg-terminal-exec`

@@ -114,9 +114,11 @@ else
   say "opencode-usage: NOT RUN, opencode on PATH is '$oc_version', not 1.19.0"
 fi
 
-# 1-6. Claude: needs a throwaway login in the scratch config dir. Only the
-# file's presence is checked; it is never read.
-if [[ ! -s $CLAUDE_CONFIG_DIR/.credentials.json ]]; then
+# 1-6. Claude: needs a throwaway Claude.ai login in the scratch config dir.
+# Claude itself reports it (exit 1 when not signed in; an API key in the
+# environment would also count, hence the authMethod check); this script
+# never opens the login file.
+if ! claude auth status 2>/dev/null | jq -e '.authMethod == "claude.ai"' >/dev/null 2>&1; then
   say "claude: NOT RUN, no Claude login in $CLAUDE_CONFIG_DIR."
   say "  Sign in once, through Anthropic's own flow, into that throwaway dir:"
   say "    HOME=$HOME CLAUDE_CONFIG_DIR=$CLAUDE_CONFIG_DIR claude auth login"

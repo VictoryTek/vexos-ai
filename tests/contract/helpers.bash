@@ -9,7 +9,8 @@
 #
 # VEXOS_AI_BIN is the vexos-ai to test: the contract check passes the Nix-built
 # script; by hand, `VEXOS_AI_BIN=$(nix build --print-out-paths)/bin/vexos-ai`.
-# Rust Phase 2 runs this same suite against the new binary.
+# Rust Phase 2 runs this same suite against the new binary. VEXOS_AI_SRC is the
+# source tree that credentials.bats scans (default: this checkout).
 
 bats_require_minimum_version 1.5.0
 
@@ -39,11 +40,9 @@ common_setup() {
   mv "$bin/claude" "$bin/opencode" "$BATS_TEST_TMPDIR/agents/"
   export PATH="$bin:$PATH"
 
-  # A fake /proc and fake system profiles; the script reads them from these.
-  export VEXOS_AI_PROC="$BATS_TEST_TMPDIR/proc"
+  # Fake system profiles; the script reads them from these.
   export VEXOS_AI_CURRENT_SYSTEM="$BATS_TEST_TMPDIR/current-system"
   export VEXOS_AI_BOOTED_SYSTEM="$BATS_TEST_TMPDIR/booted-system"
-  mkdir -p "$VEXOS_AI_PROC"
 }
 
 install_agents() {
@@ -80,6 +79,8 @@ nothing_opened() { never_called zenity.log && never_called terminal.log; }
 
 # State ------------------------------------------------------------------------
 
+# An extra account's config dir, as versions with the (removed) account
+# commands left it. Nothing reads or touches it now.
 make_account() {
   local label
   for label in "$@"; do mkdir -p "$DATA/$label"; done
@@ -87,7 +88,9 @@ make_account() {
 
 set_file() { mkdir -p "$(dirname "$1")"; printf '%s\n' "$2" >"$1"; }
 
-# Sign-in files for an account (main by default). Expiry is seconds from now.
+# A fake Claude login file, Claude's own (main, the default) or an old extra
+# account's, holding the TOKEN and REFRESH tripwires. Nothing may read it.
+# Expiry is seconds from now.
 write_creds() { # [label] [expires-in-seconds]
   local label=${1:-main} exp=${2:-3600} dir
   if [[ $label == main ]]; then dir="$HOME/.claude"; else dir="$DATA/$label"; fi
@@ -114,14 +117,3 @@ write_legacy_usage() { # label
 # Files under HOME, other than Claude's own credentials, that hold a token.
 # Bats does not fail a test on a bare `! cmd`, so tests assert this is empty.
 token_leaks() { grep -rlE "$TOKEN|$REFRESH" "$HOME" | grep -v '/\.credentials\.json$' || true; }
-
-# A running Claude session, in the fake /proc. Empty config means the default.
-fake_session() { # pid [config-dir]
-  mkdir -p "$VEXOS_AI_PROC/$1"
-  printf 'claude\n' >"$VEXOS_AI_PROC/$1/comm"
-  if [[ -n ${2:-} ]]; then
-    printf 'CLAUDE_CONFIG_DIR=%s\0HOME=%s\0' "$2" "$HOME" >"$VEXOS_AI_PROC/$1/environ"
-  else
-    printf 'HOME=%s\0' "$HOME" >"$VEXOS_AI_PROC/$1/environ"
-  fi
-}

@@ -8,8 +8,7 @@
 #
 # What it installs:
 #   - claude-code + opencode (packages are options; vexos-nix passes unstable)
-#   - vexos-ai: launcher, first-run picker, Claude accounts, theme sync,
-#     "diagnose with AI"
+#   - vexos-ai: launcher, first-run picker, theme sync, "diagnose with AI"
 #   - the VexOS skills at /etc/vexos/ai/skills, linked into ~/.claude/skills
 #     (Claude Code and OpenCode read it) and ~/.agents/skills (the generic spot)
 #   - system-wide (managed) agent policy: never apply (switch/boot/rebuild

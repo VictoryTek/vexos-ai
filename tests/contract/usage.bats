@@ -29,7 +29,7 @@ setup() { common_setup; }
   [[ $output != *"their usage"* ]]
 }
 
-@test "no command calls curl, prints a token or writes one, whatever the account holds" {
+@test "no command calls curl, prints a token or writes one, whatever the login files hold" {
   make_account work
   write_creds main
   write_creds work
@@ -37,8 +37,7 @@ setup() { common_setup; }
   set_file "$CONF/agent" claude
   local out="" args
   for args in "status" "status --json" "status --refresh" "status --json --refresh" \
-    "account list" "account list --json" "account mode" "account mode auto 90" \
-    "account use work" "account use main" "panel"; do
+    "crash-mute" "crash-mute --json" "crash-capture" "pick claude --json"; do
     run vexos $args
     [ "$status" -eq 0 ]
     out+="$output"

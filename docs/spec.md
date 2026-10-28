@@ -124,6 +124,19 @@ any feature work (Phase 0).
 > `.github/docs/subagent_docs/usage_display_spec.md`. The live contract is
 > `docs/contract.md`.
 
+> **Superseded: the accounts feature was removed** (2026-10-27). Claude always
+> runs with its default sign-in, and nothing in this repo reads the login file.
+> Everything below about accounts is history, not the contract: the "Accounts"
+> row of the gap table, `account add|use|list|remove|rename|mode`, `account
+> add` as an interactive exception, exit 3 "no such account" and exit 5 busy
+> (now reserved), the `panel` command, `signedIn`, `plan` and `inUse` in the
+> status document (`accounts` is now always `[]`, `activeAccount` always
+> `"main"`, `switching` fixed at manual/95), the `claude-account`, `mode`,
+> `threshold` and `claude-accounts/<label>/` files (left on disk, unread), and
+> the later plans built on them (`app.switch-account`, "Accounts & usage",
+> account rows and auto-switch in §3, the Rust CLI's account logic and state in
+> §4 and §5). The removed commands exit 2.
+
 ### 2.1 Rules
 
 - **Non-interactive by arguments.** Every mutating command takes its input as
