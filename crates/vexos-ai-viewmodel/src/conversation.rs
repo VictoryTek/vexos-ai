@@ -98,6 +98,13 @@ pub enum State {
     Ended(String),
 }
 
+/// What the empty conversation page says. Display only.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Empty {
+    Starting(&'static str),
+    Ready(&'static str),
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Item {
     User(String),
@@ -338,6 +345,21 @@ impl Conversation {
 
     pub fn items(&self) -> &[Item] {
         &self.items
+    }
+
+    /// The page shown instead of the list while there are no items: which
+    /// agent is starting, or is ready. `None` once anything is in the
+    /// conversation, and once the session has ended.
+    pub fn empty_state(&self) -> Option<Empty> {
+        if !self.items.is_empty() {
+            return None;
+        }
+        let agent = agent_label(self.agent);
+        match self.state {
+            State::Starting => Some(Empty::Starting(agent)),
+            State::Ready | State::Busy => Some(Empty::Ready(agent)),
+            State::Ended(_) => None,
+        }
     }
 
     /// A message can be sent: ready, and not locked by the launch `/usage`.
@@ -887,6 +909,43 @@ mod tests {
             Item::Approval(card) => card,
             other => panic!("not a card: {other:?}"),
         }
+    }
+
+    #[test]
+    fn the_empty_page_names_the_agent_and_goes_with_the_first_item() {
+        let mut c = Conversation::new(Agent::OpenCode);
+        assert_eq!(c.empty_state(), Some(Empty::Starting("OpenCode")));
+        c.started();
+        assert_eq!(c.empty_state(), Some(Empty::Starting("OpenCode")));
+        c.apply(Event::Mode("build".into()));
+        assert_eq!(c.empty_state(), Some(Empty::Ready("OpenCode")));
+        assert_eq!(
+            Conversation::new(Agent::Claude).empty_state(),
+            Some(Empty::Starting("Claude"))
+        );
+        c.apply(Event::AgentText("hi".into()));
+        assert_eq!(c.empty_state(), None);
+    }
+
+    #[test]
+    fn the_empty_page_is_gone_once_the_session_closed_even_with_no_items() {
+        let mut c = ready();
+        assert!(c.items().is_empty() && c.empty_state().is_some());
+        c.close(&Recorder::default());
+        assert!(matches!(c.state(), State::Ended(_)));
+        assert!(c.items().is_empty());
+        assert_eq!(c.empty_state(), None);
+    }
+
+    #[test]
+    fn the_empty_page_is_gone_after_a_failure_or_a_notice() {
+        let mut c = Conversation::new(Agent::Claude);
+        c.failed("no agent");
+        assert_eq!(c.empty_state(), None);
+        let mut c = ready();
+        assert!(c.empty_state().is_some());
+        c.apply(request(1, &BOTH));
+        assert_eq!(c.empty_state(), None);
     }
 
     // Fed by the core's events -----------------------------------------------

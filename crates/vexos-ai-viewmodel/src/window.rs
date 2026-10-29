@@ -48,6 +48,24 @@ pub struct WindowLook {
     pub docked: bool,
     pub icon: &'static str,
     pub tooltip: &'static str,
+    /// Title buttons: only Close while docked (a drawer is neither minimised
+    /// nor maximised). Floating gets the system's normal set back.
+    pub close_only: bool,
+}
+
+/// The system's decoration layout reduced to its Close button, on the side
+/// where the system puts it. Only the exact token `close` is looked for, and
+/// the result is one of three fixed strings: nothing from the setting is
+/// carried over.
+pub fn docked_layout(system: &str) -> &'static str {
+    let (start, end) = system.split_once(':').unwrap_or((system, ""));
+    let has = |side: &str| side.split(',').any(|t| t == "close");
+    let (start_close, end_close) = (has(start), has(end));
+    match (start_close, end_close) {
+        (true, _) => "close:",
+        (false, true) => ":close",
+        (false, false) => ":",
+    }
 }
 
 /// The toggle shows only with the extension running and the schema found;
@@ -68,6 +86,7 @@ pub fn window_look(extension_running: bool, schema_found: bool, mode: WindowMode
         } else {
             "Dock under the top bar"
         },
+        close_only: docked,
     }
 }
 
@@ -109,6 +128,40 @@ mod tests {
     fn toggle_switches_both_ways() {
         assert_eq!(WindowMode::Docked.toggled(), WindowMode::Floating);
         assert_eq!(WindowMode::Floating.toggled(), WindowMode::Docked);
+    }
+
+    #[test]
+    fn docked_layout_keeps_only_close_on_its_side() {
+        for (system, want) in [
+            ("appmenu:minimize,maximize,close", ":close"),
+            ("close,minimize:", "close:"),
+            ("icon,close:minimize,maximize", "close:"),
+            ("appmenu:minimize,maximize", ":"),
+            ("", ":"),
+            (":", ":"),
+            ("close", "close:"),
+            ("::close", ":"),
+            ("closed,xclose:Close", ":"),
+            ("minimize,maximize:close,close", ":close"),
+        ] {
+            assert_eq!(docked_layout(system), want, "{system:?}");
+        }
+        for junk in ["\u{1b}[31m:close\n", "a:b:close", &"x,".repeat(100_000)] {
+            let out = docked_layout(junk);
+            assert!([":close", "close:", ":"].contains(&out), "{junk:?}");
+        }
+    }
+
+    #[test]
+    fn only_a_docked_window_loses_minimise_and_maximise() {
+        for mode in [WindowMode::Docked, WindowMode::Floating] {
+            for (running, schema) in [(false, false), (true, false), (false, true), (true, true)] {
+                let look = window_look(running, schema, mode);
+                assert_eq!(look.close_only, look.docked, "{running} {schema}");
+            }
+        }
+        assert!(window_look(true, true, WindowMode::Docked).close_only);
+        assert!(!window_look(true, true, WindowMode::Floating).close_only);
     }
 
     #[test]

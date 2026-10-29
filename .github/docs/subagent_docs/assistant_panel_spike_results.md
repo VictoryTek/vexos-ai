@@ -2573,3 +2573,247 @@ see the untracked new files, and the scope rule forbids `git add`. The same
 script passes on the `path:` copy. `nix flake check` was not run (forbidden).
 No eslint (the repo has no config). The live-session checks listed under "Not
 tested" did not run.
+
+## Panel polish 2
+
+2026-10-28. A calmer, more modern look for the panel, docked and floating, light
+and dark, with no change to what it does. Done under a scope rule: nothing
+written outside the repo (except `/nix/store`), no live-session run, no git
+writes, and no change to `nix/policy.nix`, `docs/contract.md`, CI,
+`crates/vexos-ai-core`, the extension, `markdown.rs` or any safety behaviour of
+the view-model (pinned modes, options filter, send gate, deny by default).
+Tier 3, with a plan approved first.
+
+### Design note (step 0)
+
+**"Looks good" here is judged from headless screenshots of a nested GNOME Shell,
+not from a real screen.** The words below describe what I chose and why; the
+screenshots section says what I saw.
+
+- **Spacing:** steps of 4, 8, 12, 16 and 24 px. The list has 16 px side margins
+  and 12 px between items; cards have 12 px / 16 px inner padding; the input row
+  has 16 px margins.
+- **Type:** only libadwaita classes (`heading`, `caption`, `numeric`,
+  `monospace`, `title-3`) and text-tag scales (headings 1.15, bold 700). No px
+  font sizes anywhere, so large text scales.
+- **Messages:** the user's message is a soft right-aligned bubble (14 % accent
+  tint, normal weight, at most 60 characters wide). The agent's reply has no
+  bubble and fills the width. They differ by shape and side, not by loud colour.
+- **Approval cards:** a card with a quiet 1 px accent border, a bold "Approve:
+  <title>", and the command or diff in a tinted code box. Approve is the
+  accented button. **Deny is a plain button, not red:** denying is the safe
+  answer. The two have the same width and sit at the right. There is no close or
+  dismiss control. Options and wording are unchanged.
+- **Usage line:** flat, `caption` + `numeric`, in the quiet text colour, full
+  strength on hover or focus.
+- **Input row:** a rounded card whose outline turns accent while it has focus;
+  Send stays the accented button, aligned to the bottom.
+- **Code and tables (markdown renderer unchanged):** only the tags' looks changed.
+  Code and table runs are monospace on a tint of the window's own foreground
+  colour (7 % light, 12 % dark), so the tint follows light, dark and high
+  contrast.
+- **Diff colours:** green and red come from `adw::rgba_to_standalone` applied to
+  libadwaita's own success and destructive colours for the current style, so the
+  contrast fits light and dark. Hunk lines use the foreground at 65 %. They are
+  recoloured when the style changes.
+- **Header:** unchanged title and subtitle. **Docked: Close only.** Minimise and
+  maximise make no sense for a drawer; Close stays because it really ends the
+  session (and denies what is pending). **Floating: the system's normal set.**
+  This is done in the app, with no extension change.
+- Accent colour, light or dark and high contrast come only from libadwaita
+  variables (`--accent-bg-color`, `--window-fg-color`) and `StyleManager`. No
+  palette is hard-coded in the sheet (a test forbids `#`, `rgb(`, `hsl(`).
+
+**Deviations from the plan, and why:**
+
+- Secondary text uses a new `vexos-quiet` class (75 % of the foreground), not
+  libadwaita's `dimmed` (55 %). I measured `dimmed` at about 3.2:1 on the light
+  window, below 4.5:1; the new class gives 5.65:1 light and 9.5:1 dark, and
+  full strength in high contrast.
+- The starting note stays above the input, outside the Stack. The plan moved it
+  onto the empty page; the reviewer found that would hide it (and the
+  draft-waiting line) as soon as any item existed while still starting. The
+  empty page shows only a spinner while starting.
+
+### What changed
+
+- `crates/vexos-ai-panel/src/style.css` (new): the whole stylesheet, fixed class
+  names, no `@import`, `url(` or hex colours.
+- `crates/vexos-ai-panel/src/style.rs` (new): `STYLESHEET = include_str!`, the
+  one place a `CssProvider` is made and loaded, the binding of GTK's contrast
+  setting to that provider, and `TagColors`.
+- `main.rs`: loads the sheet; the classes; the user bubble; reply and diff tag
+  colours from `TagColors`; the approval layout; a `StyleManager` handler that
+  redraws rows (no scroll) on dark or high-contrast change; the docked and
+  floating title buttons; a `gtk::Stack` with a 150 ms crossfade between the empty
+  page and the list; a 150 ms `Revealer` for the "Checking usage" note.
+- `window.rs`: `docked_layout` (returns one of three fixed `&'static str`) and
+  `WindowLook::close_only`. `conversation.rs`: `Empty` and `empty_state()`,
+  display only. `lib.rs`: exports.
+- `scan_tests.rs`: new scans (below), and one assertion changed: the old
+  `!main.contains("gtk::Stack")` (there to stop an agent-choice page) became
+  "no `StackSwitcher`/`DropDown`/`ViewSwitcher`/`ComboRow`/toggles, exactly one
+  `gtk::Stack::builder()`, exactly two `add_named(`, pages only `"empty"` and
+  `"list"`". The "Choose an agent" and `Agent::` checks are unchanged.
+
+### Tests
+
+- View-model **172** (167 before): `docked_layout` (10 cases plus junk and a
+  200 000-token string), `close_only` for every mode and extension state,
+  `empty_state` (starting, ready, after an item, after a failure, after a close
+  with no items).
+- Panel **21** plus **1 ignored** (18 before): every class the code adds is in
+  the sheet or on a fixed libadwaita list; every `vexos-*` class in the sheet is
+  used; class names are literals; the sheet has no import, url or template and no
+  hard-coded colour; `TagColors` follows the foreground and the style; scans that
+  `CssProvider`/`load_from_`/`.add_provider(` appear only in `style.rs`, once,
+  loading `STYLESHEET`; no `set_markup`, `use_markup`, `from_markup`, `markup(` or
+  `StatusPage`; the title buttons come only from `docked_layout` or `None`; the
+  contrast setting is bound before the load; the starting note is outside the
+  Stack.
+- **The ignored test** (`style::tests::the_stylesheet_parses_without_errors`)
+  loads the sheet in real GTK 4.22.4 and fails on any parsing error. It needs a
+  display, so I ran it with `--ignored` against the nested headless shell only
+  (everything else pointed at `target/devkit`). It passed on the final CSS and
+  code. It does **not** prove a rule is honoured: see the review below.
+- **Mutation checks:** 28 mutations on a copy (`target/mut-polish`), **28 of 28
+  caught** on the final code. Layout keeping minimise, wrong side, ignoring a
+  start-side close, `close_only` never or always set; the empty page staying
+  after items, missing while starting, shown after the session ended, naming the
+  wrong state; a renamed, missing or unused class; CSS built with `format!`, from
+  a variable, from data, markup in main; the dark flag ignored; a wrong tint; a
+  wrong hunk colour; the layout from system text; floating not restored; an
+  import and a hex colour in the sheet; a second Stack page, a `ViewSwitcher`, a
+  `StackSwitcher`; the starting note back on the empty page; the contrast binding
+  broken. Two mutations survived at first and each got a real test: the empty
+  page after a close (an empty conversation can end through `close()`), and the
+  hunk colour (the test only checked one channel).
+
+### Screenshots (step 3)
+
+Nested headless GNOME Shell 50.5 (1280x800), isolated as in "Docked window":
+private bus, `env -i`, everything under `target/devkit/`. A **fake ACP agent**
+(`target/devkit/fakebin/claude-agent-acp`, a Python script; no real agent, no
+credentials) answered `/usage` and asked for two permissions. Input came from
+virtual devices inside the nested shell; they must be kept alive on `globalThis`,
+or the clients get nothing. Typed prompts never reached the panel, so the
+conversation shot comes from the usage line's own click (a visible `/usage` turn),
+not from typing. Images are in `target/devkit/shots-polish/` (not committed):
+
+- `empty-{docked,floating}-{dark,light}.png`: "Claude is ready / Ask about this
+  system."
+- `starting-*` (and `final-starting-docked-dark.png`, the current layout):
+  spinner, "Starting Claude… The input opens when the session is ready." above the
+  input, "Usage: loading".
+- `conv-*`: the `/usage` bubble, then a reply with a heading, bold, italic, inline
+  code, a code block and a table, and the usage line "5-hour 25% · resets …".
+- `appr-*`: a Bash card and an Edit (diff) card pending, with "Checking usage…"
+  and "Usage: loading".
+- `hc-appr-docked-light.png`: the same with libadwaita's high-contrast override
+  (`ADW_DEBUG_HIGH_CONTRAST=1` on the nested service line only).
+- Older files in that folder (`01-` to `06-`, `exp-red*`, `usage-loading-*`) are
+  earlier attempts; several are mislabelled or taken before a fix. `empty-`,
+  `conv-`, `appr-`, `starting-` were taken before the starting note moved and the
+  contrast binding was added; neither changes those states in normal contrast.
+
+**What I saw:** the docked window sits flush under the top bar with square top
+corners, rounded bottom corners and only the Close button (plus the restore
+toggle); floating has all four corners rounded and all three buttons. Docked
+light and dark both read calmly. The user bubble is a pale accent tint on the
+right; the agent's text is plain. The approval cards are clearly cards, the
+command and diff are readable (green and red follow the style: deep tones on
+light, pastel tones on dark), Approve is accented and Deny is plain, equal width.
+The usage line is quiet but readable. Measured contrast from pixels (PNG decoded
+by a small script): notes and usage 5.65:1 light, 9.48:1 dark, 12.22:1 in
+high contrast; card titles 12.5:1.
+
+**Found from the screenshots and fixed:** the disabled "Usage: loading" line was
+about 1.4:1 on light. libadwaita dims disabled widgets (and the label inside) with
+a CSS `filter` as well as opacity; my first two fixes only touched opacity. Found
+by setting the colour to solid red and seeing it still pale. The sheet now resets
+`filter` and `opacity` for that state.
+
+**What I would still change:**
+
+- The code-block tint is a per-line text background, so it is ragged at the line
+  ends and not a solid block. A real block needs a container widget, which the
+  renderer's inert text-run model does not give. The table's rule line is also
+  ragged.
+- At 520 px tall (docked) a diff card is cut by scrolling; a taller minimum
+  would help.
+- The extra blank line at the bottom of the diff box.
+- The round placeholder at the start of the header comes from the system's
+  `icon:` decoration layout; it looks odd and is not mine to remove.
+- The header's "Run just rebuild" button is the heaviest element on screen; I
+  left it alone, as it is a deliberate control.
+
+**States not captured:** the OpenCode agent; a real conversation with typed
+prompts; a long scrolling transcript; the narrow (480 sp) usage label; the
+"waiting draft" banner; a refused or failed message; keyboard focus rings in
+motion; the 150 ms transitions (screenshots are static).
+
+### Review
+
+Independent reviewer (`reviewer` subagent), given the approved plan and the files.
+
+- **Round 1: PASS**, no CRITICAL. Three RECOMMENDED, all fixed: high contrast got
+  weaker with the fixed 75 % (added a `prefers-contrast` rule); the no-switcher
+  scan was weaker (strengthened); the starting note could vanish early (moved
+  back out of the Stack).
+- **Round 2: NEEDS CHANGES, one CRITICAL.** The `prefers-contrast` rule could never
+  match: GTK passes the contrast setting only to its own theme providers, not to
+  one the app makes, and a media query that does not match still parses without
+  error. Fixed by binding `gtk-interface-contrast` to the provider's
+  `prefers-contrast`, with a scan test for it, and **checked on a real render**:
+  notes went from 5.65:1 to 12.22:1 with the high-contrast override. Also a
+  mutation for the binding.
+- **Round 3: PASS**, no findings, on the final code. It confirmed the binding
+  stays alive (the builder's result can be dropped; the binding lives with the
+  source and target).
+- The reviewer's note that the ignored parse test had not been run was about its
+  own run; I had run it against the nested shell (four times, last on the final
+  code).
+
+### Checks run
+
+Exit 0 for each, on the final code. **rustc 1.95.0** (the devShell's; CI pins
+1.95.0).
+
+- In the devShell, on the repo: `cargo build --all-targets`, `cargo test` (core
+  3 + 43, panel 21 + 1 ignored, view-model 172), `cargo clippy --all-targets -- -D
+  warnings`, `cargo fmt --all --check`. The ignored parse test, against the
+  nested shell only.
+- `scripts/preflight.sh path:target/tree-polish` (a copy of the working tree):
+  `nix build`, `checks.x86_64-linux.{policy,contract,core,panel,module,extension}`,
+  the module `nix eval`, and rustfmt.
+
+**What did not run:**
+
+- `scripts/preflight.sh` on the git tree (the Stop hook's form). It fails with
+  "file not found for module `style`" because `style.rs` and `style.css` are
+  untracked, and the scope rule forbids `git add`. It passes on the `path:` copy.
+  It will pass once the two files are staged.
+- `nix flake check` (forbidden), and any nix check on the git tree.
+- A first build command with `rm -rf target/tree` was refused by the harness; I
+  stopped and asked, and then used a fresh `target/tree-polish` with no `rm`.
+- One `pkill -f` pattern matched my own tool shell and ended it; it touched no
+  other process. The nested shell and panel were stopped with the harness's
+  `stop.sh` at the end, and none is left running.
+
+### Not tested
+
+- **A real screen:** nothing ran in the user's session. Everything above is from
+  one 1280x800 headless virtual monitor.
+- **HiDPI, multi-monitor, large text**, and the docked sizes on big screens.
+- **High contrast on a real system:** only the debug override, in light, docked,
+  with the approval cards. Not dark, not floating, not the system setting itself.
+- **Accent colours** other than the default blue.
+- **Keyboard use** in a real session (Tab order, focus rings on the cards and the
+  usage line); the input outline and the buttons' focus were seen only in static
+  frames. Screen-reader names.
+- **A real agent** (Claude or OpenCode) and real `/usage` text.
+- **The 150 ms transitions** (crossfade, slide), and the redraw on a live theme
+  switch with an open approval card: seen to work in screenshots, never timed.
+- **A double-click on the title or Super+Up** can still maximise a docked window.
+  `gtk-decoration-layout` is read when the look is applied, so moving the title
+  buttons while docked takes effect at the next mode toggle. Cosmetic.

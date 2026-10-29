@@ -9,6 +9,7 @@
 const NOTIFY: &str = include_str!("notify.rs");
 const REBUILD: &str = include_str!("rebuild.rs");
 const MAIN: &str = include_str!("main.rs");
+const STYLE: &str = include_str!("style.rs");
 
 /// The view-model's sources, where an `Outgoing` can be made.
 const VIEWMODEL: [(&str, &str); 11] = [
@@ -353,7 +354,22 @@ fn the_panel_cannot_write_or_switch_the_agent_choice() {
     // the reader returned.
     assert!(!main.contains("Agent::Claude") && !main.contains("Agent::OpenCode"));
     assert!(!main.contains("Choose an agent") && !main.contains("Start a session"));
-    assert!(!main.contains("gtk::Stack"));
+    // The conversation page uses a Stack (empty page or list); a switcher
+    // between agents would be a StackSwitcher or a dropdown.
+    assert!(!main.contains("StackSwitcher") && !main.contains("DropDown"));
+    // The one Stack is the conversation page: exactly the pages "empty" and
+    // "list", never a page per agent.
+    assert_eq!(main.matches("gtk::Stack::builder()").count(), 1);
+    assert_eq!(main.matches("add_named(").count(), 2);
+    assert_eq!(main.matches("Some(\"empty\")").count(), 1);
+    assert_eq!(main.matches("Some(\"list\")").count(), 1);
+    // The starting note (and the waiting-draft line in it) sits above the
+    // input, outside the Stack, so a pending card in the list never hides it.
+    assert_eq!(main.matches("chat.append(&starting_note);").count(), 1);
+    assert!(!main.contains("empty.append(&starting_note)"));
+    for word in ["ViewSwitcher", "ComboRow", "ToggleGroup", "ToggleButton"] {
+        assert!(!main.contains(word), "{word}");
+    }
     assert_eq!(main.matches("fn start(").count(), 1);
     assert_eq!(main.matches(".start(").count(), 1);
     // The reader opens read-only, and reads a bounded part.
@@ -446,4 +462,82 @@ fn the_window_mode_is_written_only_as_one_of_its_two_fixed_strings() {
     let window = code(include_str!("../../vexos-ai-viewmodel/src/window.rs"));
     let shipped = window.split("#[cfg(test)]").next().unwrap();
     assert!(!shipped.contains("String"), "the mode carries no text");
+}
+
+#[test]
+fn css_is_loaded_once_from_the_bundled_sheet_and_never_from_text() {
+    let style = code(STYLE);
+    let shipped = style.split("#[cfg(test)]").next().unwrap();
+    assert_eq!(shipped.matches("CssProvider::new()").count(), 1);
+    assert_eq!(shipped.matches("load_from_").count(), 1);
+    assert!(shipped.contains("css.load_from_string(STYLESHEET);"));
+    assert!(shipped.contains("pub const STYLESHEET: &str = include_str!(\"style.css\");"));
+    assert_eq!(shipped.matches(".add_provider(").count(), 0);
+    // The sheet's high-contrast rule needs the provider bound to GTK's setting.
+    assert!(
+        shipped.contains(".bind_property(\"gtk-interface-contrast\", &css, \"prefers-contrast\")")
+    );
+    assert!(
+        shipped.find(".bind_property(").unwrap() < shipped.find("css.load_from_string").unwrap()
+    );
+    assert_eq!(
+        shipped
+            .matches("style_context_add_provider_for_display")
+            .count(),
+        1
+    );
+    // No other file makes a provider, loads a sheet, or builds markup.
+    for (name, file) in [
+        ("main.rs", code(MAIN)),
+        ("notify.rs", code(NOTIFY)),
+        ("rebuild.rs", code(REBUILD)),
+    ] {
+        for word in [
+            "CssProvider",
+            "load_from_",
+            ".add_provider(",
+            "style_context_add_provider",
+            "set_markup",
+            "use_markup",
+            "from_markup",
+            "markup(",
+            "StatusPage",
+        ] {
+            assert!(!file.contains(word), "{word:?} in {name}");
+        }
+    }
+    // The one place the sheet is loaded is the startup hook.
+    assert_eq!(code(MAIN).matches("style::load(").count(), 1);
+}
+
+#[test]
+fn the_title_buttons_come_only_from_the_fixed_layouts() {
+    let main = code(MAIN);
+    assert_eq!(main.matches("set_decoration_layout(").count(), 2);
+    assert!(main.contains("set_decoration_layout(Some(docked_layout(&system)))"));
+    assert!(main.contains("set_decoration_layout(None)"));
+    // Docked only, and floating goes back to the system's set.
+    let look = main
+        .find("if look.close_only {")
+        .expect("close_only branch");
+    let rest = &main[look..];
+    assert!(rest.find("docked_layout(").unwrap() < rest.find("} else {").unwrap());
+    assert!(rest.find("set_decoration_layout(None)").unwrap() > rest.find("} else {").unwrap());
+}
+
+#[test]
+fn style_classes_are_fixed_literals_in_every_panel_file() {
+    for (name, file) in [
+        ("main.rs", code(MAIN)),
+        ("notify.rs", code(NOTIFY)),
+        ("rebuild.rs", code(REBUILD)),
+    ] {
+        for call in file.split("add_css_class(").skip(1) {
+            let call = call.trim_start();
+            assert!(
+                call.starts_with('"') || call.starts_with("match decision"),
+                "{name}: add_css_class({call:.40}"
+            );
+        }
+    }
 }
