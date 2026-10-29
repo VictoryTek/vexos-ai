@@ -148,7 +148,7 @@
             ./schemas/gschemas.compiled ./schemas/org.gnome.shell.extensions.vexos-assistant.gschema.xml)
           node --check ${dir}/extension.js
           gsettings --schemadir ${dir}/schemas list-keys org.gnome.shell.extensions.vexos-assistant \
-            | grep -qx toggle-assistant
+            | grep -x toggle-assistant >/dev/null
           touch $out
         '';
 
