@@ -7,6 +7,7 @@ mod notify;
 mod rebuild;
 #[cfg(test)]
 mod scan_tests;
+mod style;
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -15,11 +16,13 @@ use std::time::Instant;
 
 use adw::prelude::*;
 use gtk::{gdk, gio, glib};
+use style::TagColors;
 use vexos_ai_core::{Agent, Config, Decision, Error, Session};
 use vexos_ai_viewmodel::{
-    AGENT_FILE, Answer, ApprovalCard, Composer, Conversation, DiffLine, Item, Offer, Outgoing,
-    PANEL_SETTINGS_FILE, PanelSettings, Placement, Proposal, Rebuild, Sent, State, USAGE_LOCK, Via,
-    agent_label, markdown, mode_label, saved_agent,
+    AGENT_FILE, Answer, ApprovalCard, Composer, Conversation, DiffLine, EXTENSION_BUS_NAME, Empty,
+    Item, Offer, Outgoing, PANEL_SETTINGS_FILE, PanelSettings, Placement, Proposal, Rebuild, Sent,
+    State, USAGE_LOCK, Via, WINDOW_MODE_KEY, WINDOW_SCHEMA, WindowMode, agent_label, docked_layout,
+    markdown, mode_label, saved_agent, window_look,
 };
 
 const APP_ID: &str = "io.github.victorytek.VexosAssistant";
@@ -64,6 +67,11 @@ fn toggle(window: Option<bool>) -> Toggle {
 fn main() -> glib::ExitCode {
     let app = adw::Application::builder().application_id(APP_ID).build();
     let slot = Slot::default();
+    app.connect_startup(|_| {
+        if let Some(display) = gdk::Display::default() {
+            style::load(&display);
+        }
+    });
     // Watchers run only in the primary instance.
     app.connect_startup(notify::start_watchers);
     app.connect_activate({
@@ -118,8 +126,14 @@ fn window(app: &adw::Application, slot: &Slot) -> Rc<Ui> {
 
 struct Ui {
     window: adw::ApplicationWindow,
+    header: adw::HeaderBar,
     title: adw::WindowTitle,
     list: gtk::Box,
+    /// The empty page or the list, with a short crossfade.
+    stack: gtk::Stack,
+    empty_title: gtk::Label,
+    empty_hint: gtk::Label,
+    empty_spinner: adw::Spinner,
     scroller: gtk::ScrolledWindow,
     rows: RefCell<Vec<gtk::Widget>>,
     input: gtk::TextView,
@@ -130,10 +144,17 @@ struct Ui {
     usage: gtk::Button,
     /// The window is narrow: the usage line shows only the percent.
     narrow: Cell<bool>,
-    /// Above the input while the launch `/usage` holds it.
-    lock_note: gtk::Label,
+    /// Above the input while the launch `/usage` holds it (its note slides in).
+    lock_reveal: gtk::Revealer,
     cancel: gtk::Button,
     rebuild_button: gtk::Button,
+    /// Docked or floating, shown only with the Shell extension running. Its
+    /// only action is writing `WindowMode::as_str()` to the shared setting.
+    dock_toggle: gtk::Button,
+    /// The extension's schema, when installed with the panel.
+    mode_settings: Option<gio::Settings>,
+    extension_running: Cell<bool>,
+    watcher: RefCell<Option<Box<dyn FnOnce()>>>,
     conversation: RefCell<Option<Conversation>>,
     session: RefCell<Option<Arc<Session>>>,
     rebuild: RefCell<Rebuild>,
@@ -163,14 +184,24 @@ impl Ui {
         let header = adw::HeaderBar::builder().title_widget(&title).build();
         header.pack_start(&cancel);
         header.pack_end(&rebuild_button);
+        let dock_toggle = gtk::Button::builder()
+            .visible(false)
+            .focus_on_click(false)
+            .build();
+        dock_toggle.add_css_class("flat");
+        header.pack_end(&dock_toggle);
+        // Never `Settings::new`: it aborts when the schema is missing.
+        let mode_settings = gio::SettingsSchemaSource::default()
+            .and_then(|source| source.lookup(WINDOW_SCHEMA, true))
+            .map(|schema| gio::Settings::new_full(&schema, None::<&gio::SettingsBackend>, None));
 
         let list = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
             .spacing(12)
-            .margin_top(12)
-            .margin_bottom(12)
-            .margin_start(12)
-            .margin_end(12)
+            .margin_top(16)
+            .margin_bottom(16)
+            .margin_start(16)
+            .margin_end(16)
             .build();
         let scroller = gtk::ScrolledWindow::builder()
             .hscrollbar_policy(gtk::PolicyType::Never)
@@ -183,10 +214,10 @@ impl Ui {
             .wrap_mode(gtk::WrapMode::WordChar)
             .accepts_tab(false)
             .tooltip_text("Ask about this system… (Enter sends, Shift+Enter for a new line)")
-            .top_margin(6)
-            .bottom_margin(6)
-            .left_margin(6)
-            .right_margin(6)
+            .top_margin(8)
+            .bottom_margin(8)
+            .left_margin(12)
+            .right_margin(12)
             .sensitive(false)
             .build();
         let input_scroller = gtk::ScrolledWindow::builder()
@@ -197,6 +228,7 @@ impl Ui {
             .child(&input)
             .build();
         input_scroller.add_css_class("card");
+        input_scroller.add_css_class("vexos-input");
         // Until the draft is edited, Enter does not send it; the Send button does.
         let banner = adw::Banner::builder()
             .title("Draft from a notification: review it, then click Send")
@@ -208,32 +240,67 @@ impl Ui {
             .sensitive(false)
             .build();
         send.add_css_class("suggested-action");
+        send.set_valign(gtk::Align::End);
         let composer = gtk::Box::builder()
-            .spacing(6)
-            .margin_top(6)
-            .margin_bottom(12)
-            .margin_start(12)
-            .margin_end(12)
+            .spacing(8)
+            .margin_top(8)
+            .margin_bottom(16)
+            .margin_start(16)
+            .margin_end(16)
             .build();
         composer.append(&input_scroller);
         composer.append(&send);
         let lock_note = gtk::Label::builder()
             .label("Checking usage… The input opens when it finishes, or in 15 seconds.")
-            .visible(false)
+            .wrap(true)
             .build();
-        lock_note.add_css_class("dim-label");
+        lock_note.add_css_class("vexos-quiet");
         lock_note.add_css_class("caption");
+        let lock_reveal = gtk::Revealer::builder()
+            .transition_type(gtk::RevealerTransitionType::SlideUp)
+            .transition_duration(150)
+            .child(&lock_note)
+            .build();
+        // The page before the first message: a spinner while the session
+        // starts (the starting note stays above the input, visible whatever
+        // the list shows), then which agent is ready. Plain labels only.
         let starting_note = gtk::Label::builder()
             .wrap(true)
             .justify(gtk::Justification::Center)
             .visible(false)
             .build();
-        starting_note.add_css_class("dim-label");
+        starting_note.add_css_class("vexos-quiet");
+        let empty_spinner = adw::Spinner::builder()
+            .width_request(32)
+            .height_request(32)
+            .build();
+        let empty_title = gtk::Label::builder().wrap(true).build();
+        empty_title.add_css_class("title-3");
+        let empty_hint = gtk::Label::new(Some("Ask about this system."));
+        empty_hint.add_css_class("vexos-quiet");
+        let empty = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(8)
+            .valign(gtk::Align::Center)
+            .halign(gtk::Align::Center)
+            .build();
+        empty.add_css_class("vexos-empty");
+        empty.append(&empty_spinner);
+        empty.append(&empty_title);
+        empty.append(&empty_hint);
+        let stack = gtk::Stack::builder()
+            .transition_type(gtk::StackTransitionType::Crossfade)
+            .transition_duration(150)
+            .vexpand(true)
+            .build();
+        stack.add_named(&empty, Some("empty"));
+        stack.add_named(&scroller, Some("list"));
+        stack.set_visible_child_name("empty");
         let chat = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        chat.append(&scroller);
+        chat.append(&stack);
         chat.append(&banner);
         chat.append(&starting_note);
-        chat.append(&lock_note);
+        chat.append(&lock_reveal);
         chat.append(&composer);
 
         // The usage line: flat, under the header, and the only control that
@@ -246,6 +313,9 @@ impl Ui {
             .build();
         usage.add_css_class("flat");
         usage.add_css_class("caption");
+        usage.add_css_class("numeric");
+        usage.add_css_class("vexos-quiet");
+        usage.add_css_class("vexos-usage");
 
         let content = adw::ToolbarView::new();
         content.add_top_bar(&header);
@@ -265,17 +335,26 @@ impl Ui {
 
         let ui = Rc::new(Ui {
             window,
+            header,
             title,
             list,
+            stack,
+            empty_title,
+            empty_hint,
+            empty_spinner,
             scroller,
             rows: RefCell::new(Vec::new()),
             input,
             send,
             usage,
             narrow: Cell::new(false),
-            lock_note,
+            lock_reveal,
             cancel,
             rebuild_button,
+            dock_toggle,
+            mode_settings,
+            extension_running: Cell::new(false),
+            watcher: RefCell::new(None),
             conversation: RefCell::new(None),
             session: RefCell::new(None),
             rebuild: RefCell::new(Rebuild::default()),
@@ -367,14 +446,134 @@ impl Ui {
             let ui = ui.clone();
             move |_| rebuild::ask(&ui)
         });
+        ui.dock_toggle.connect_clicked({
+            let ui = ui.clone();
+            move |_| ui.toggle_mode()
+        });
+        if let Some(settings) = &ui.mode_settings {
+            settings.connect_changed(Some(WINDOW_MODE_KEY), {
+                let weak = Rc::downgrade(&ui);
+                move |_, _| {
+                    if let Some(ui) = weak.upgrade() {
+                        ui.apply_look();
+                    }
+                }
+            });
+        }
+        // The extension owns this name while it is enabled.
+        let watcher = gio::bus_watch_name(
+            gio::BusType::Session,
+            EXTENSION_BUS_NAME,
+            gio::BusNameWatcherFlags::NONE,
+            {
+                let weak = Rc::downgrade(&ui);
+                move |_, _, _| {
+                    if let Some(ui) = weak.upgrade() {
+                        ui.extension_running.set(true);
+                        ui.apply_look();
+                    }
+                }
+            },
+            {
+                let weak = Rc::downgrade(&ui);
+                move |_, _| {
+                    if let Some(ui) = weak.upgrade() {
+                        ui.extension_running.set(false);
+                        ui.apply_look();
+                    }
+                }
+            },
+        );
+        *ui.watcher.borrow_mut() = Some(Box::new(move || gio::bus_unwatch_name(watcher)));
+        ui.apply_look();
+        // Tag colours (code tint, diff colours) follow the style; the sheet
+        // follows by itself. Redrawn once the new style has taken effect.
+        let style_manager = adw::StyleManager::default();
+        for changed in [
+            style_manager.connect_dark_notify({
+                let weak = Rc::downgrade(&ui);
+                move |_| Ui::restyle_later(&weak)
+            }),
+            style_manager.connect_high_contrast_notify({
+                let weak = Rc::downgrade(&ui);
+                move |_| Ui::restyle_later(&weak)
+            }),
+        ] {
+            let manager = style_manager.clone();
+            let cell = Cell::new(Some(changed));
+            ui.window.connect_destroy(move |_| {
+                if let Some(id) = cell.take() {
+                    manager.disconnect(id);
+                }
+            });
+        }
         ui.window.connect_close_request({
             let ui = ui.clone();
             move |_| {
+                if let Some(unwatch) = ui.watcher.borrow_mut().take() {
+                    unwatch();
+                }
                 ui.close_session();
                 glib::Propagation::Proceed
             }
         });
         ui
+    }
+
+    fn mode(&self) -> WindowMode {
+        self.mode_settings.as_ref().map_or(WindowMode::Docked, |s| {
+            WindowMode::parse(&s.string(WINDOW_MODE_KEY))
+        })
+    }
+
+    /// The header button and the square top corners, from the view-model.
+    fn apply_look(&self) {
+        let look = window_look(
+            self.extension_running.get(),
+            self.mode_settings.is_some(),
+            self.mode(),
+        );
+        self.dock_toggle.set_visible(look.toggle_visible);
+        self.dock_toggle.set_icon_name(look.icon);
+        self.dock_toggle.set_tooltip_text(Some(look.tooltip));
+        self.dock_toggle
+            .update_property(&[gtk::accessible::Property::Label(look.tooltip)]);
+        // Docked: Close only. Floating: the system's own set again.
+        if look.close_only {
+            let system = gtk::Settings::default()
+                .and_then(|settings| settings.gtk_decoration_layout())
+                .map(|layout| layout.to_string())
+                .unwrap_or_default();
+            self.header
+                .set_decoration_layout(Some(docked_layout(&system)));
+        } else {
+            self.header.set_decoration_layout(None);
+        }
+        if look.docked {
+            self.window.add_css_class("vexos-docked");
+        } else {
+            self.window.remove_css_class("vexos-docked");
+        }
+    }
+
+    /// Rebuilds every row (its text tags carry theme colours) after the
+    /// style changed, once the new style is in place. Does not scroll.
+    fn restyle_later(weak: &std::rc::Weak<Ui>) {
+        let weak = weak.clone();
+        glib::idle_add_local_once(move || {
+            if let Some(ui) = weak.upgrade() {
+                let count = ui.rows.borrow().len();
+                for index in 0..count {
+                    ui.replace(index);
+                }
+            }
+        });
+    }
+
+    fn toggle_mode(&self) {
+        if let Some(settings) = &self.mode_settings {
+            let _ = settings.set_string(WINDOW_MODE_KEY, self.mode().toggled().as_str());
+        }
     }
 
     /// Starts the session in the background; the window is already up.
@@ -629,10 +828,21 @@ impl Ui {
             .set_subtitle(&format!("{} · {state}", agent_label(c.agent())));
         self.input.set_sensitive(c.can_send());
         self.send.set_sensitive(c.can_send());
-        self.lock_note.set_visible(c.usage_locked());
+        self.lock_reveal.set_reveal_child(c.usage_locked());
         let note = c.starting_note(self.composer.borrow().waiting());
         self.starting_note.set_label(note.as_deref().unwrap_or(""));
         self.starting_note.set_visible(note.is_some());
+        let empty = c.empty_state();
+        self.stack
+            .set_visible_child_name(if empty.is_some() { "empty" } else { "list" });
+        self.empty_spinner
+            .set_visible(matches!(empty, Some(Empty::Starting(_))));
+        if let Some(Empty::Ready(agent)) = empty {
+            self.empty_title.set_label(&format!("{agent} is ready"));
+        }
+        let ready = matches!(empty, Some(Empty::Ready(_)));
+        self.empty_title.set_visible(ready);
+        self.empty_hint.set_visible(ready);
         self.title.set_tooltip_text(c.launch_summary().as_deref());
         self.cancel.set_sensitive(c.turn_running());
         self.show_usage(c);
@@ -663,6 +873,13 @@ impl Ui {
     }
 
     fn render(self: &Rc<Self>, index: usize) {
+        self.replace(index);
+        let adjustment = self.scroller.vadjustment();
+        glib::idle_add_local_once(move || adjustment.set_value(adjustment.upper()));
+    }
+
+    /// Draws row `index` from the conversation, in place or at the end.
+    fn replace(self: &Rc<Self>, index: usize) {
         let widget = match self.conversation.borrow().as_ref() {
             Some(c) => self.widget(c, &c.items()[index]),
             None => return,
@@ -676,19 +893,18 @@ impl Ui {
             self.list.append(&widget);
             rows.push(widget);
         }
-        let adjustment = self.scroller.vadjustment();
-        glib::idle_add_local_once(move || adjustment.set_value(adjustment.upper()));
     }
 
     fn widget(self: &Rc<Self>, c: &Conversation, item: &Item) -> gtk::Widget {
         match item {
             Item::User(text) => {
                 let label = text_label(text);
-                label.set_xalign(1.0);
-                label.add_css_class("heading");
+                label.set_halign(gtk::Align::End);
+                label.set_max_width_chars(60);
+                label.add_css_class("vexos-user");
                 label.upcast()
             }
-            Item::Agent(text) => reply(text).upcast(),
+            Item::Agent(text) => reply(text, &TagColors::of(&self.window)).upcast(),
             Item::Tool(card) => {
                 let name = card
                     .title
@@ -697,38 +913,39 @@ impl Ui {
                     .unwrap_or(&card.id);
                 let status = c.tool_status(card);
                 let label = text_label(&format!("{name} — {status}"));
-                label.add_css_class("dim-label");
+                label.add_css_class("vexos-quiet");
                 label.add_css_class("caption");
                 label.upcast()
             }
             Item::Notice(text) => {
                 let label = text_label(text);
-                label.add_css_class("dim-label");
+                label.add_css_class("vexos-quiet");
                 label.upcast()
             }
-            Item::Approval(card) => self.approval(card).upcast(),
+            Item::Approval(card) => self.approval(card, &TagColors::of(&self.window)).upcast(),
         }
     }
 
-    fn approval(self: &Rc<Self>, card: &ApprovalCard) -> gtk::Box {
+    fn approval(self: &Rc<Self>, card: &ApprovalCard, colors: &TagColors) -> gtk::Box {
         let frame = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
             .spacing(8)
             .build();
         frame.add_css_class("card");
+        frame.add_css_class("vexos-approval");
         let inner = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
-            .spacing(8)
+            .spacing(12)
             .margin_top(12)
             .margin_bottom(12)
-            .margin_start(12)
-            .margin_end(12)
+            .margin_start(16)
+            .margin_end(16)
             .build();
         frame.append(&inner);
         let heading = text_label(&format!("Approve: {}", card.title));
         heading.add_css_class("heading");
         inner.append(&heading);
-        inner.append(&proposal(&card.proposal));
+        inner.append(&proposal(&card.proposal, colors));
 
         let buttons = card.buttons();
         if buttons.is_empty() {
@@ -741,17 +958,18 @@ impl Ui {
                 Answer::TimedOut => "Timed out, denied.",
             };
             let label = text_label(answer);
-            label.add_css_class("dim-label");
+            label.add_css_class("vexos-quiet");
             inner.append(&label);
         } else {
-            let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+            let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
             row.set_halign(gtk::Align::End);
             for (decision, text) in buttons {
                 let button = gtk::Button::with_label(text);
-                button.add_css_class(match decision {
-                    Decision::ApproveOnce => "suggested-action",
-                    Decision::DenyOnce => "destructive-action",
-                });
+                button.add_css_class("vexos-choice");
+                // Denying is the safe answer: a plain button, not a red one.
+                if decision == Decision::ApproveOnce {
+                    button.add_css_class("suggested-action");
+                }
                 let (ui, request) = (self.clone(), card.request);
                 button.connect_clicked(move |_| ui.click(request, decision));
                 row.append(&button);
@@ -774,17 +992,26 @@ fn text_label(text: &str) -> gtk::Label {
 
 /// An agent reply, formatted. Each run is inserted as literal text with a tag
 /// per style; nothing here is parsed as markup.
-fn reply(text: &str) -> gtk::TextView {
+fn reply(text: &str, colors: &TagColors) -> gtk::TextView {
     let view = gtk::TextView::builder()
         .editable(false)
         .cursor_visible(false)
         .wrap_mode(gtk::WrapMode::WordChar)
+        .left_margin(0)
+        .right_margin(0)
         .build();
+    view.add_css_class("vexos-reply");
     let buffer = view.buffer();
     buffer.create_tag(Some("bold"), &[("weight", &700)]);
     buffer.create_tag(Some("italic"), &[("style", &gtk::pango::Style::Italic)]);
-    buffer.create_tag(Some("code"), &[("family", &"monospace")]);
-    buffer.create_tag(Some("heading"), &[("scale", &1.2)]);
+    buffer.create_tag(
+        Some("code"),
+        &[
+            ("family", &"monospace"),
+            ("background-rgba", &colors.code_background),
+        ],
+    );
+    buffer.create_tag(Some("heading"), &[("scale", &1.15), ("weight", &700)]);
     for run in markdown(text) {
         let style = run.style;
         let tags: Vec<&str> = [
@@ -808,15 +1035,23 @@ fn monospace(text: &str) -> gtk::Label {
     label
 }
 
+/// The tinted box around a command or a change.
+fn code_box(child: &impl IsA<gtk::Widget>) -> gtk::Widget {
+    let frame = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    frame.add_css_class("vexos-code");
+    frame.append(child);
+    frame.upcast()
+}
+
 /// The change or command a card asks about.
-fn proposal(proposal: &Proposal) -> gtk::Widget {
+fn proposal(proposal: &Proposal, colors: &TagColors) -> gtk::Widget {
     match proposal {
-        Proposal::Command(command) => monospace(&format!("$ {command}")).upcast(),
+        Proposal::Command(command) => code_box(&monospace(&format!("$ {command}"))),
         Proposal::Plan(plan) if plan.trim().is_empty() => {
             text_label("The agent sent no plan with this request.").upcast()
         }
         Proposal::Plan(plan) => text_label(plan).upcast(),
-        Proposal::Other(json) => monospace(json).upcast(),
+        Proposal::Other(json) => code_box(&monospace(json)),
         Proposal::Diff { path, lines } => {
             let view = gtk::TextView::builder()
                 .editable(false)
@@ -826,11 +1061,11 @@ fn proposal(proposal: &Proposal) -> gtk::Widget {
                 .build();
             let buffer = view.buffer();
             for (name, color) in [
-                ("added", "#26a269"),
-                ("removed", "#e01b24"),
-                ("hunk", "#77767b"),
+                ("added", &colors.added),
+                ("removed", &colors.removed),
+                ("hunk", &colors.hunk),
             ] {
-                buffer.create_tag(Some(name), &[("foreground", &color)]);
+                buffer.create_tag(Some(name), &[("foreground-rgba", color)]);
             }
             for line in lines {
                 let (tag, text) = match line {
@@ -848,7 +1083,7 @@ fn proposal(proposal: &Proposal) -> gtk::Widget {
             let column = gtk::Box::new(gtk::Orientation::Vertical, 4);
             column.append(&monospace(path));
             column.append(&view);
-            column.upcast()
+            code_box(&column)
         }
     }
 }

@@ -9,8 +9,14 @@
 //
 // Placement follows assistant_panel_spec.md 5.4 (Mutter has returned stale
 // positions after a move, and crashed in move_resize_frame): the window is
-// moved once, when it is shown, and the slide animates the actor's
+// sized and moved once, when it is shown, and the slide animates the actor's
 // translation only, so no position is read back while it runs.
+//
+// The window is "docked" (a drop-down under the top bar, sized by layout.js)
+// or "floating" (left to Mutter), by the `window-mode` setting. The app writes
+// it from its header button; only the strings "docked" and "floating" mean
+// anything here. The extension also owns a D-Bus name while enabled, so the
+// app knows to show that button.
 
 import Clutter from 'gi://Clutter';
 import Gio from 'gi://Gio';
@@ -23,9 +29,14 @@ import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import * as QuickSettings from 'resource:///org/gnome/shell/ui/quickSettings.js';
 
+import {DEFAULT_NORMAL, DOCKED, FLOATING, dockedRect, floatingRect, normalSize, parseMode}
+    from './layout.js';
+
 const APP_ID = 'io.github.victorytek.VexosAssistant';
 const APP_PATH = '/io/github/victorytek/VexosAssistant';
+const EXTENSION_NAME = `${APP_ID}.Extension`;
 const SHORTCUT = 'toggle-assistant';
+const MODE_KEY = 'window-mode';
 const SLIDE_MS = 180;
 
 const AssistantToggle = GObject.registerClass(
@@ -61,6 +72,8 @@ export default class AssistantExtension extends Extension {
         this._windows = new Map();
         // New windows not identified yet: Meta.Window -> handler ids
         this._pending = new Map();
+        // The window's normal size, read once at the first show.
+        this._normal = null;
 
         this._indicator = new AssistantIndicator(() => this._toggle());
         Main.panel.statusArea.quickSettings.addExternalIndicator(this._indicator);
@@ -71,7 +84,11 @@ export default class AssistantExtension extends Extension {
 
         this._createdId = global.display.connect('window-created',
             (_display, window) => this._watch(window));
-        // Already open: follow it for the tile, but leave it where it is.
+        this._modeId = this._settings.connect(`changed::${MODE_KEY}`,
+            () => this._modeChanged());
+        this._nameId = Gio.bus_own_name(Gio.BusType.SESSION, EXTENSION_NAME,
+            Gio.BusNameOwnerFlags.NONE, null, null, null);
+        // Already open: follow it for the tile, and dock it if the mode is docked.
         for (const actor of global.get_window_actors())
             this._track(actor.meta_window, false);
         this._sync();
@@ -79,20 +96,30 @@ export default class AssistantExtension extends Extension {
 
     disable() {
         Main.wm.removeKeybinding(SHORTCUT);
+        if (this._nameId)
+            Gio.bus_unown_name(this._nameId);
+        this._nameId = 0;
+        if (this._modeId)
+            this._settings.disconnect(this._modeId);
+        this._modeId = 0;
         if (this._createdId)
             global.display.disconnect(this._createdId);
         this._createdId = 0;
         for (const window of [...this._pending.keys()])
             this._unwatch(window);
         this._pending = null;
-        for (const window of [...this._windows.keys()])
+        for (const [window, entry] of [...this._windows]) {
+            if (entry.raised)
+                this._apply(window, entry, FLOATING);
             this._untrack(window, true);
+        }
         this._windows = null;
         this._cancellable.cancel();
         this._cancellable = null;
         this._indicator.destroy();
         this._indicator = null;
         this._settings = null;
+        this._normal = null;
     }
 
     // Ask the app to show or hide its window; D-Bus starts it if needed. The
@@ -165,6 +192,20 @@ export default class AssistantExtension extends Extension {
             return null;
         const entry = {ids: [], placed: !place, raised: false};
         this._windows.set(window, entry);
+        // Open when the extension was enabled (also after a screen lock, which
+        // disables it): learn its normal size, and dock it to match the
+        // app's look. One move, no slide.
+        if (!place) {
+            try {
+                if (!window.is_hidden() && !window.is_maximized() && !window.is_fullscreen()) {
+                    this._remember(window);
+                    if (this._mode() === DOCKED)
+                        this._apply(window, entry, DOCKED);
+                }
+            } catch (e) {
+                console.warn(`VexOS Assistant: cannot adopt the window: ${e.message}`);
+            }
+        }
         try {
             entry.ids.push(window.connect('unmanaging', () => this._untrack(window, false)));
             entry.ids.push(window.connect('shown', () => {
@@ -204,8 +245,66 @@ export default class AssistantExtension extends Extension {
         this._sync();
     }
 
-    // Once per window, when it is first shown: one move to the top centre of
-    // its monitor's work area, then a slide down from above the screen edge.
+    _mode() {
+        try {
+            return parseMode(this._settings.get_string(MODE_KEY));
+        } catch {
+            return DOCKED;
+        }
+    }
+
+    // The setting changed while a window is open: one move to the new mode.
+    _modeChanged() {
+        const mode = this._mode();
+        for (const [window, entry] of this._windows) {
+            if (!entry.placed)
+                continue;
+            this._apply(window, entry, mode);
+        }
+    }
+
+    // Shown windows only; a hidden one is placed when it is next shown.
+    _apply(window, entry, mode) {
+        try {
+            if (window.is_hidden() || window.is_maximized() || window.is_fullscreen())
+                return;
+            const actor = window.get_compositor_private();
+            const area = window.get_work_area_for_monitor(window.get_monitor());
+            if (actor) {
+                actor.remove_all_transitions();
+                actor.translation_y = 0;
+            }
+            if (mode === FLOATING) {
+                const r = floatingRect(area, this._normal ?? DEFAULT_NORMAL);
+                window.move_resize_frame(false, r.x, r.y, r.width, r.height);
+                if (entry.raised) {
+                    window.unmake_above();
+                    window.unstick();
+                    entry.raised = false;
+                }
+            } else {
+                const r = dockedRect(area);
+                window.move_resize_frame(false, r.x, r.y, r.width, r.height);
+                window.make_above();
+                window.stick();
+                entry.raised = true;
+            }
+        } catch (e) {
+            console.warn(`VexOS Assistant: cannot change the window mode: ${e.message}`);
+        }
+    }
+
+    // Read once per enable(), before any move by this extension.
+    _remember(window) {
+        if (this._normal)
+            return;
+        const area = window.get_work_area_for_monitor(window.get_monitor());
+        this._normal = normalSize(window.get_frame_rect(), area);
+    }
+
+    // Once per window, when it is first shown: the normal size is remembered
+    // (once per enable), then, if docked, one move and resize to the work
+    // area's top and a slide down from above the screen edge.
     _place(window, entry) {
         if (entry.placed)
             return;
@@ -217,18 +316,20 @@ export default class AssistantExtension extends Extension {
             if (!actor)
                 return;
             // Read once, before the move; never after it.
-            const frame = window.get_frame_rect();
+            this._remember(window);
+            if (this._mode() !== DOCKED)
+                return;
             const monitor = window.get_monitor();
             const area = window.get_work_area_for_monitor(monitor);
             const screen = global.display.get_monitor_geometry(monitor);
-            const x = area.x + Math.round((area.width - frame.width) / 2);
-            window.move_frame(false, x, area.y);
+            const r = dockedRect(area);
+            window.move_resize_frame(false, r.x, r.y, r.width, r.height);
             window.make_above();
             window.stick();
             entry.raised = true;
 
             actor.remove_all_transitions();
-            actor.translation_y = -(frame.height + area.y - screen.y);
+            actor.translation_y = -(r.height + area.y - screen.y);
             actor.ease({
                 translation_y: 0,
                 duration: SLIDE_MS,

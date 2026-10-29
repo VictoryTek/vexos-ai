@@ -1,0 +1,104 @@
+/* The panel's look. Static: bundled into the binary (style.rs), loaded once,
+ * and never built from text at run time. Colours are libadwaita's variables,
+ * so the system accent colour, light or dark, and high contrast all apply.
+ * Spacing steps: 4, 8, 12, 16, 24 px. Type sizes come from libadwaita's own
+ * style classes, never from px values here, so large text scales. */
+
+/* Docked under the top bar by the Shell extension: square top corners, the
+ * bottom ones stay round. */
+window.csd.vexos-docked {
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
+}
+
+/* The user's messages: a soft accent tint on the right. Agent replies have
+ * no bubble, so the two differ by shape and side, not by loud colour. */
+.vexos-user {
+  background-color: color-mix(in srgb, var(--accent-bg-color) 14%, transparent);
+  border-radius: 14px;
+  padding: 8px 14px;
+}
+
+textview.vexos-reply,
+textview.vexos-reply > text {
+  background: none;
+}
+
+/* Approval cards: a card with a quiet accent border. Not an alert, but not
+ * plain text either. */
+.vexos-approval {
+  border: 1px solid color-mix(in srgb, var(--accent-bg-color) 50%, transparent);
+}
+
+/* The command or the change a card asks about. */
+.vexos-code {
+  background-color: color-mix(in srgb, var(--window-fg-color) 7%, transparent);
+  border-radius: 8px;
+  padding: 8px 12px;
+}
+
+.vexos-code textview,
+.vexos-code textview > text {
+  background: none;
+}
+
+/* Approve and Deny: the same width. */
+button.vexos-choice {
+  min-width: 96px;
+}
+
+/* The input: a rounded card whose outline follows the accent while typing. */
+.vexos-input {
+  border-radius: 14px;
+  transition: outline-color 150ms ease-out;
+  outline: 2px solid transparent;
+  outline-offset: -2px;
+}
+
+.vexos-input:focus-within {
+  outline-color: color-mix(in srgb, var(--accent-bg-color) 70%, transparent);
+}
+
+.vexos-input textview,
+.vexos-input textview > text {
+  background: none;
+}
+
+/* Secondary text: notes, tool lines and the usage line. A fixed 75% of the
+ * foreground, which keeps at least 4.5:1 on the light and dark windows, where
+ * libadwaita's .dimmed (55%) does not. */
+.vexos-quiet {
+  color: color-mix(in srgb, var(--window-fg-color) 75%, transparent);
+}
+
+/* High contrast: no dimming at all, as libadwaita's own dimmed text rises to
+ * 90% there. */
+@media (prefers-contrast: more) {
+  .vexos-quiet {
+    color: var(--window-fg-color);
+  }
+}
+
+/* The usage line is quiet until hovered or focused. libadwaita dims a
+ * disabled widget (and the label inside it) with a filter and an opacity,
+ * which would stack on the quiet colour and make "Usage: loading" unreadable,
+ * so both are reset here. */
+button.vexos-usage {
+  transition: color 150ms ease-out;
+}
+
+button.vexos-usage:hover,
+button.vexos-usage:focus-visible {
+  color: var(--window-fg-color);
+}
+
+button.vexos-usage:disabled,
+button.vexos-usage:disabled label {
+  opacity: 1;
+  filter: none;
+}
+
+/* The page shown before the first message. */
+.vexos-empty {
+  padding: 24px;
+}

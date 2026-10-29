@@ -137,6 +137,12 @@ reads the frame rect back immediately (source 10). Toggle goes through the
 app's `toggle` action, so a cold start works through D-Bus activation.
 Everything the extension does is undone in `disable()`.
 
+Update (docked window, `assistant_panel_spike_results.md`): the extension also
+resizes the window to a drop-down (centred, 50 % of the work area wide, 60 %
+high, with minimums and maximums) when the `window-mode` setting is `docked`,
+the default. The app's header button writes `docked` or `floating` to that key,
+and shows only while the extension owns its D-Bus name.
+
 ### 5.5 Tile (per the mockup)
 
 `QuickMenuToggle`: title "Assistant", subtitle "<agent> · <N>% used",

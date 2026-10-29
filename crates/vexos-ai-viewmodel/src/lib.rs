@@ -26,6 +26,10 @@
 //! - The agent is the saved choice (`vexos-ai pick`, VexPortal), read-only: the
 //!   two known values, else Claude ([`saved_agent`]). There is no switcher;
 //!   starting a session sends nothing. The launch timing is display text only.
+//! - The window mode (docked under the top bar, or floating) is one of two
+//!   fixed strings in a GSettings key shared with the Shell extension; any
+//!   other value means docked. The toggle appears only with the extension
+//!   running.
 //! - The usage line shows the 5-hour limit read by a strict parser from a
 //!   `/usage` reply, or "unknown". It is display text only: never sent,
 //!   logged or stored, and nothing else depends on it.
@@ -39,12 +43,13 @@ mod proposal;
 mod rebuild;
 mod redact;
 mod usage;
+mod window;
 
 pub use composer::{Composer, Draft, Offer, Outgoing, Placement, Via};
 pub use conversation::{
-    AGENT_FILE, Answer, ApprovalCard, ClickError, Conversation, Decider, Item, NO_REPLY, NOT_SENT,
-    Sent, State, ToolCard, USAGE_COMMAND, USAGE_NOT_SENT, agent_label, choice_label, mode_label,
-    parse_agent, saved_agent,
+    AGENT_FILE, Answer, ApprovalCard, ClickError, Conversation, Decider, Empty, Item, NO_REPLY,
+    NOT_SENT, Sent, State, ToolCard, USAGE_COMMAND, USAGE_NOT_SENT, agent_label, choice_label,
+    mode_label, parse_agent, saved_agent,
 };
 pub use diagnose::{
     BEGIN, Crash, END, Excerpt, INSTRUCTION, Log, Missing, Subject, UnitName, core_file,
@@ -57,4 +62,8 @@ pub use rebuild::{Rebuild, RebuildCommand, describe_wait_status};
 pub use usage::{
     CLICK_TOOLTIP, Disabled, FiveHour, PANEL_SETTINGS_FILE, PanelSettings, USAGE_LOCK, UsageButton,
     five_hour, freshness, tooltip,
+};
+pub use window::{
+    EXTENSION_BUS_NAME, WINDOW_MODE_KEY, WINDOW_SCHEMA, WindowLook, WindowMode, docked_layout,
+    window_look,
 };
