@@ -2342,3 +2342,234 @@ the final code (`VEXOS_ALLOW_NO_FIFO=1` for the cargo runs, see section 4):
 - **The FIFO test under plain `cargo test` on `/mnt/c`**: it is skipped there; it
   ran only in the Nix sandbox.
 - `nix flake check`, by the rules; any real agent; any install or rebuild.
+
+## Docked window
+
+2026-10-28. The panel can drop down from the top bar like a quake-style
+console, with a header button to switch it to a normal floating window. Done
+under a scope rule: nothing written outside the repo (except `/nix/store`),
+no live-session testing, no git writes, and no change to `nix/policy.nix`,
+`docs/contract.md`, CI or `crates/vexos-ai-core`. The new files are untracked
+(nothing was staged), so the nix checks ran on a copy at `target/tree`.
+
+### Step 0: how others do it
+
+Confirmed from each project's own schema or source, read on 2026-10-28.
+"unconfirmed" means I could not find it in the file I read.
+
+| | Width | Height | Slide | Top margin | Resizable | Monitor | Hides |
+|---|---|---|---|---|---|---|---|
+| Quake ([`WinQuake/screen.c`](https://github.com/id-Software/Quake/blob/master/WinQuake/screen.c)) | full screen | half (`vid.height/2`) | linear, `scr_conspeed` 300 px/s | none | no | n/a | same key |
+| Guake ([`org.guake.gschema.xml`](https://github.com/Guake/guake/blob/master/guake/data/org.guake.gschema.xml)) | `window-width` 100 % | `window-height` 50 % | no animation key in the schema (animation itself unconfirmed) | `window-vertical-displacement` 0 | unconfirmed | `display-n` 0 (meaning of 0 unconfirmed) | key; `window-losefocus` false |
+| Yakuake ([`yakuake.kcfg`](https://github.com/KDE/yakuake/blob/master/app/config/yakuake.kcfg)) | `Width` 90 %, `Position` 50 (centre) | `Height` 50 % | `Frames` 17, "one frame is 10 ms", so about 170 ms; easing unconfirmed | none | unconfirmed | `Screen` 0 (the pointer's screen, per the file) | key; `KeepOpen` true |
+| Tilix quake ([`com.gexperts.Tilix.gschema.xml`](https://github.com/gnunn1/tilix/blob/master/data/gsettings/com.gexperts.Tilix.gschema.xml)) | `quake-width-percent` 100 (10 to 100), `quake-alignment` center | `quake-height-percent` 40 (10 to 100) | none (`quake-disable-animation` is commented out) | none | unconfirmed | `quake-active-monitor` true | key; `quake-hide-lose-focus` false |
+| ddterm ([`org.gnome.shell.extensions.ddterm.gschema.xml`](https://github.com/ddterm/gnome-shell-extension-ddterm/blob/master/schemas/org.gnome.shell.extensions.ddterm.gschema.xml)) | `workarea-size` 1.0, `workarea-alignment` center | `window-size` 0.6 of the work area | `show-animation` and `hide-animation` linear, 0.15 s each | the work area, so under the top bar | `window-resizable` true (README: "dragging the border") | `window-monitor` current | key; `hide-when-focus-lost` true |
+
+Not confirmed: Guake's and Tilix's animation, and whether Guake, Yakuake and
+Tilix let the user resize the drawer.
+
+### What I chose, and why
+
+"Looks best" is a judgement made **without seeing it on a real screen**. I
+only saw it in one 1280x800 headless screenshot, where the minimums decide the
+size, so the large-screen sizes are checked by the size function's tests, not
+by eye.
+
+- **Width: centred, 50 % of the work area, at least 720 and at most 960.**
+  Full width (the terminals' default) makes chat lines far too long on 1080p
+  and ultrawide screens. 960 keeps about 110 characters a line.
+- **Height: 60 % of the work area, at least 520 and at most 1000.** ddterm's
+  0.6. A chat needs more than a console: the header, usage line and composer
+  take about 200 px.
+- Both are capped to the work area, so a tiny screen gets the whole work area
+  and never a window larger than it. The top edge is flush with the work area,
+  so directly under the top bar, with no gap.
+- **Corners:** square on top, rounded at the bottom (libadwaita's own 15 px
+  radius and its normal window shadow). There is no separate title bar: the
+  header bar is the window's own toolbar.
+- **Animation:** the tested 180 ms ease-out slide of the actor's
+  `translation_y`, one move plus a compositor-side slide. Close to Yakuake
+  (170 ms) and ddterm (150 ms). Hiding stays instant: animating it would mean
+  overriding the Shell's unmap effect, as ddterm does.
+- **Monitor:** the one Mutter put the new window on. Multi-monitor: the work
+  area of that monitor, so on a secondary monitor (no top bar) the window is
+  flush with the monitor's top edge. Not tested (one virtual monitor).
+- Sizes are **constants in `layout.js`, not settings**: nobody asked for them,
+  and each setting is more surface to validate.
+
+### The shared value
+
+- A GSettings key `window-mode` (type `s`, `<choices>` `docked` and
+  `floating`, default `docked`) in the extension's existing schema. GSettings
+  itself refuses a write outside the choices (`checks.extension` tries
+  `bogus`). Both sides also validate in code: exactly `"floating"` is
+  floating, **anything else is docked**. It carries no agent text, command or
+  path: the app writes only `WindowMode::as_str()` (a `&'static str`), and the
+  extension never writes.
+- Compared with a file the app writes and the extension watches: that needs a
+  second parser, atomic writes and the extension reading the home directory.
+  A GSettings key needs none of those.
+- **Can the app reach the schema in `share/gnome-shell/extensions/<uuid>/schemas`?
+  No.** The default schema source searches `GSETTINGS_SCHEMA_DIR` and
+  `$XDG_DATA_DIRS/glib-2.0/schemas`; the Shell's `getSettings()` reads the
+  extension's directory itself. What the module would have to add was
+  **nothing**: `nix/panel.nix` installs the same gschema file (one source
+  file) and compiles it; glib's setup hook moves it to
+  `share/gsettings-schemas/<name>`, and `wrapGAppsHook4` puts that on the
+  wrapper's `XDG_DATA_DIRS`. `dconf` is added to `buildInputs` so the wrapper
+  sets `GIO_EXTRA_MODULES`; without it GSettings falls back to a memory
+  backend and writes never reach the Shell. No core change.
+- **How the app detects the extension:** the extension owns the session bus
+  name `io.github.victorytek.VexosAssistant.Extension` between `enable()` and
+  `disable()`; the app follows it with `gio::bus_watch_name`. The bus drops
+  the name if the Shell dies. The toggle is shown only while that name is
+  owned and the schema was found (`Settings::new_full` after a lookup, never
+  `Settings::new`, which aborts on a missing schema). Considered instead:
+  `org.gnome.Shell.Extensions.GetExtensionInfo` (not sender-checked in Shell
+  50.5, `ui/shellDBus.js`), which needs a call, `a{sv}` parsing and a state
+  signal for the same answer.
+- The module never sets `window-mode` (`checks.module` searches every dconf
+  profile and the GSettings overrides for it) and never enables the extension.
+
+### What changed
+
+- `extension/.../layout.js` (new, no imports): `parseMode`, `dockedRect`,
+  `floatingRect` and the constants.
+- `extension/.../extension.js`: owns the bus name, follows `changed::window-mode`.
+  At the first show it reads the window's normal size once (once per
+  `enable()`), then, if docked, one `move_resize_frame` to `dockedRect`, above,
+  sticky, and the slide. A mode change while shown is one `move_resize_frame`
+  from the work area (never from the window's position). `disable()` also
+  restores a docked window to its normal size, unsticks it and releases the name.
+- `crates/vexos-ai-viewmodel/src/window.rs` (new): `WindowMode` (`parse`,
+  `as_str`, `toggled`) and `window_look` (when the toggle shows, the icon,
+  tooltip and whether the top corners are square).
+- `crates/vexos-ai-panel/src/main.rs`: a flat icon button in the header, which
+  does not take focus, so the input keeps it and Enter and Shift+Enter work
+  as before. A click writes `toggled().as_str()`. One `apply_look()` for the
+  button, its tooltip and accessible name, and a `vexos-docked` style class
+  (`border-top-*-radius: 0`).
+- `nix/panel.nix`, `flake.nix` (`checks.extension`, `checks.module`),
+  `tests/extension/layout.test.mjs` (new).
+
+### Tests and mutation checks
+
+- Rust (`window.rs`, 4 tests): both strings, unknown, empty, 1.6 MB, control
+  characters, padded and cased variants; round trip; toggle both ways; the
+  `window_look` truth table. `scan_tests.rs`: `window.rs` is scanned, and
+  `set_string(` appears once, with the key and `.as_str()`.
+- Node (`tests/extension/layout.test.mjs`, 14 tests, run by `checks.extension`
+  on the **built** files): `parseMode` with both strings and 18 bad values;
+  `dockedRect` for a 1280x768 laptop, 1080p, a tall 1080x1888 screen, a
+  3440x1408 ultrawide, a 600x400 work area (below the minimum), a zero area, a
+  monitor with an origin, and a sweep that the rect is always inside the work
+  area; `floatingRect`; source scans: no title, subprocess, file, clipboard,
+  notification or eval use in `extension.js` and `layout.js`, one D-Bus call
+  (`ActivateAction` `toggle`, no parameter), only the two known settings keys,
+  no settings writes, `layout.js` imports nothing.
+- Mutations, on copies under `target/mut-dock/`, 17 of 17 caught: `parseMode`
+  and `parse` defaulting to floating, trimming, ignoring case; `toggled` as
+  identity; `dockedRect` without the minimum, the maximum, the area cap,
+  centring, or with an offset from the top; `floatingRect` not capped;
+  `window_look` ignoring the extension or the schema; a wrong `as_str`; and
+  `get_title` added to `extension.js` (the scan).
+
+### Live test: nested headless GNOME Shell 50.5
+
+The same isolated harness as in "Extension" (`target/devkit/`, headless, a
+private session bus and an empty stand-in system bus, `env -i`, everything
+under `target/`). The user's session was not touched. The panel was D-Bus
+activated from a service file pointing at the new build. No agent is on `PATH`,
+so none started: the panel showed "The agent could not start". Screenshots in
+`target/devkit/shots3/` (not committed).
+
+1. Enabled: the extension owned its bus name (`NameHasOwner` true).
+2. First open: the window was at x 280, y 32, 720x520, above and sticky, with
+   `translation_y` 0 after the slide. That is the design's minimums on a
+   1280x800 screen (work area 1280x768), centred. Screenshot: flush under the
+   top bar, square top corners, rounded bottom corners, and the toggle button
+   (restore icon) in the header.
+3. `window-mode` set to `floating` (with `gsettings` and the dconf module, in
+   the private environment): 760x768 at x 260, y 32 (centred; 768 because the
+   work area is 768 high), above and sticky off. Screenshot: all four corners
+   round, the button's icon changed.
+4. `bogus` was refused by GSettings. `docked` again: back to 720x520 at 280,
+   32, above and sticky.
+5. Disabled while docked: the bus name was released, the window went back to a
+   plain 760x768 window, above and sticky off, translation 0, and the toggle
+   button was gone. Re-enabled (first build): the open window was tracked and not moved. That
+   was wrong after a screen lock, see "Review" below.
+6. No JS errors in the shell log (0 matches), no "VexOS Assistant:" warnings.
+
+A first attempt at step 3 used a `gsettings` without the dconf module, so it
+wrote to a memory backend and nothing changed. That is a test-harness detail,
+not the app (the panel's wrapper includes dconf, and `checks.module` asserts it).
+
+### Review, first round (independent reviewer): refinement needed
+
+- **CRITICAL, fixed.** GNOME Shell disables and re-enables the extension on
+  every screen lock (its metadata has no `session-modes`). `disable()` made an
+  open docked window floating, but `enable()` left it there with no remembered
+  size, while the app saw the name come back and showed the docked look. A click
+  on its button then resized the window to the whole work area. Now `enable()`
+  reads an already-open window's normal size once and, if the mode is docked,
+  docks it with one move (no slide); and floating never falls back to the work
+  area, only to the app's default (760x820). **This changes the earlier
+  "re-enable leaves an open window where it is".**
+- **RECOMMENDED, fixed.** After a lock with the window hidden, GTK's remembered
+  size is the docked size, so floating would have been 960x629. `normalSize`
+  (pure, tested) uses the app's default when the first-show size equals the
+  docked size.
+- **RECOMMENDED, fixed.** The test file's "Run with" comment named a directory,
+  which node 24 rejects.
+- Live re-test: open (720x520 docked), disable (plain 760x768, above off),
+  re-enable (docked again, 720x520, above), set floating (760x768). No JS errors.
+
+### Not tested
+
+- **The header button's click.** There is no pointer input headless, so the
+  `set_string` call was exercised by writing the same key with `gsettings`.
+  The click path itself is covered by the source scan only.
+- **The panel's reaction to the setting changing** (icon, corners) was seen in
+  screenshots after the key changed, but not by pressing the button.
+- **Large screens, HiDPI and multi-monitor** (one 1280x800 virtual monitor):
+  those sizes are checked by the pure function only. A secondary monitor's
+  work area, and which monitor the window opens on, are untested.
+- **Real session**: none of this ran in it. The extension is still enabled by
+  each user (`gnome-extensions enable`); the module never enables it. A
+  keyboard shortcut press, and a real login with an agent, were not exercised.
+- The docked window still shows the minimise and maximise buttons in its
+  header. A maximised docked window is left alone by the extension.
+- Hiding is instant (no slide-up).
+
+### Review, later rounds
+
+- Round 2 (independent reviewer): PASS, with two RECOMMENDED items, both fixed:
+  a stale comment above the `enable()` loop, and a `&& this._normal` guard in
+  `disable()` that could skip restoring a raised window (the floating branch
+  already falls back to the app's default size).
+- Round 3 (independent reviewer, on those two edits and the final code): PASS,
+  no findings. The reviewer could not isolate the two edits with `git diff`
+  (everything is uncommitted), so it confirmed they are present and that the
+  code around them holds.
+
+### Checks run
+
+Exit 0 for each, on the final code. rustc 1.95.0 (the devShell's; CI pins
+1.95.0).
+
+- In the devShell, on the repo: `cargo build --all-targets`, `cargo test`
+  (core 3 + 43, view-model 167, panel 12), `cargo clippy --all-targets -- -D
+  warnings`, `cargo fmt --all --check`. `node --test
+  tests/extension/layout.test.mjs` (15).
+- `scripts/preflight.sh path:target/tree` (a copy of the working tree, since the
+  new files are untracked and nothing was staged): `nix build`,
+  `checks.x86_64-linux.{policy,contract,core,panel,module,extension}`, the module
+  `nix eval`, and rustfmt.
+
+**What did not run:** `scripts/preflight.sh` on the git tree (the Stop hook's
+form). It fails with "file not found for module `window`" because git does not
+see the untracked new files, and the scope rule forbids `git add`. The same
+script passes on the `path:` copy. `nix flake check` was not run (forbidden).
+No eslint (the repo has no config). The live-session checks listed under "Not
+tested" did not run.

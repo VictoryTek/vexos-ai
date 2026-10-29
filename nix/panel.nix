@@ -2,21 +2,28 @@
 # It runs claude-agent-acp or opencode, and `just`, from PATH, like the CLI
 # finds its agents. Not installed by nix/module.nix yet.
 { lib, rustPlatform, pkg-config, wrapGAppsHook4, makeDesktopItem, copyDesktopItems
-, gtk4, libadwaita, vte-gtk4 }:
+, glib, gtk4, libadwaita, vte-gtk4, dconf }:
+
+let
+  # The extension's schema, installed for the panel too: the panel writes its
+  # `window-mode` key, and the Shell extension reads it.
+  schema = ../extension + "/vexos-assistant@victorytek.github.io/schemas/org.gnome.shell.extensions.vexos-assistant.gschema.xml";
+in
 
 rustPlatform.buildRustPackage {
   pname = "vexos-ai-panel";
   version = "0.1.0";
   src = lib.fileset.toSource {
     root = ../.;
-    fileset = lib.fileset.unions [ ../Cargo.toml ../Cargo.lock ../crates ];
+    fileset = lib.fileset.unions [ ../Cargo.toml ../Cargo.lock ../crates schema ];
   };
   cargoLock.lockFile = ../Cargo.lock;
   cargoBuildFlags = [ "-p" "vexos-ai-panel" ];
   cargoTestFlags = [ "-p" "vexos-ai-panel" ];
 
-  nativeBuildInputs = [ pkg-config wrapGAppsHook4 copyDesktopItems ];
-  buildInputs = [ gtk4 libadwaita vte-gtk4 ];
+  nativeBuildInputs = [ pkg-config wrapGAppsHook4 copyDesktopItems glib ];
+  # dconf: the wrapper's GIO modules, so GSettings writes reach the Shell.
+  buildInputs = [ gtk4 libadwaita vte-gtk4 dconf ];
 
   desktopItems = [
     (makeDesktopItem {
@@ -35,6 +42,9 @@ rustPlatform.buildRustPackage {
   # D-Bus activation: the Shell extension calls the `toggle` action by app id,
   # which starts the panel if it is not running.
   postInstall = ''
+    mkdir -p $out/share/glib-2.0/schemas
+    cp ${schema} $out/share/glib-2.0/schemas/org.gnome.shell.extensions.vexos-assistant.gschema.xml
+    glib-compile-schemas --strict $out/share/glib-2.0/schemas
     mkdir -p $out/share/dbus-1/services
     cat > $out/share/dbus-1/services/io.github.victorytek.VexosAssistant.service <<EOF
     [D-BUS Service]

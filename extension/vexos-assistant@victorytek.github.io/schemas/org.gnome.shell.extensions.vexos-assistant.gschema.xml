@@ -8,5 +8,15 @@
       <default><![CDATA[['<Super>F12']]]></default>
       <summary>Show or hide the VexOS Assistant</summary>
     </key>
+    <!-- Shared with the app, which writes it from its header button. Only these
+         two strings are ever stored; both sides treat anything else as docked. -->
+    <key name="window-mode" type="s">
+      <choices>
+        <choice value="docked"/>
+        <choice value="floating"/>
+      </choices>
+      <default>'docked'</default>
+      <summary>Assistant window: docked under the top bar, or floating</summary>
+    </key>
   </schema>
 </schemalist>

@@ -11,7 +11,7 @@ const REBUILD: &str = include_str!("rebuild.rs");
 const MAIN: &str = include_str!("main.rs");
 
 /// The view-model's sources, where an `Outgoing` can be made.
-const VIEWMODEL: [(&str, &str); 10] = [
+const VIEWMODEL: [(&str, &str); 11] = [
     (
         "lib.rs",
         include_str!("../../vexos-ai-viewmodel/src/lib.rs"),
@@ -51,6 +51,10 @@ const VIEWMODEL: [(&str, &str); 10] = [
     (
         "usage.rs",
         include_str!("../../vexos-ai-viewmodel/src/usage.rs"),
+    ),
+    (
+        "window.rs",
+        include_str!("../../vexos-ai-viewmodel/src/window.rs"),
     ),
 ];
 
@@ -422,4 +426,24 @@ fn launch_timing_is_display_only() {
             assert!(!code.contains(word), "{word:?} in {name}");
         }
     }
+}
+
+#[test]
+fn the_window_mode_is_written_only_as_one_of_its_two_fixed_strings() {
+    let main = code(MAIN);
+    assert_eq!(main.matches("set_string(").count(), 1);
+    assert!(main.contains("set_string(WINDOW_MODE_KEY, self.mode().toggled().as_str())"));
+    // No other setting is written, and the mode is not built from text.
+    for word in [
+        "settings.set_value(",
+        "settings.set_boolean(",
+        "settings.set_int(",
+        "format!(\"floating",
+        "format!(\"docked",
+    ] {
+        assert!(!main.contains(word), "{word}");
+    }
+    let window = code(include_str!("../../vexos-ai-viewmodel/src/window.rs"));
+    let shipped = window.split("#[cfg(test)]").next().unwrap();
+    assert!(!shipped.contains("String"), "the mode carries no text");
 }

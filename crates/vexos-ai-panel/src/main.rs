@@ -17,9 +17,10 @@ use adw::prelude::*;
 use gtk::{gdk, gio, glib};
 use vexos_ai_core::{Agent, Config, Decision, Error, Session};
 use vexos_ai_viewmodel::{
-    AGENT_FILE, Answer, ApprovalCard, Composer, Conversation, DiffLine, Item, Offer, Outgoing,
-    PANEL_SETTINGS_FILE, PanelSettings, Placement, Proposal, Rebuild, Sent, State, USAGE_LOCK, Via,
-    agent_label, markdown, mode_label, saved_agent,
+    AGENT_FILE, Answer, ApprovalCard, Composer, Conversation, DiffLine, EXTENSION_BUS_NAME, Item,
+    Offer, Outgoing, PANEL_SETTINGS_FILE, PanelSettings, Placement, Proposal, Rebuild, Sent, State,
+    USAGE_LOCK, Via, WINDOW_MODE_KEY, WINDOW_SCHEMA, WindowMode, agent_label, markdown, mode_label,
+    saved_agent, window_look,
 };
 
 const APP_ID: &str = "io.github.victorytek.VexosAssistant";
@@ -64,6 +65,20 @@ fn toggle(window: Option<bool>) -> Toggle {
 fn main() -> glib::ExitCode {
     let app = adw::Application::builder().application_id(APP_ID).build();
     let slot = Slot::default();
+    // Docked by the extension: square top corners, the bottom ones stay round.
+    app.connect_startup(|_| {
+        if let Some(display) = gdk::Display::default() {
+            let css = gtk::CssProvider::new();
+            css.load_from_string(
+                "window.csd.vexos-docked { border-top-left-radius: 0; border-top-right-radius: 0; }",
+            );
+            gtk::style_context_add_provider_for_display(
+                &display,
+                &css,
+                gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+            );
+        }
+    });
     // Watchers run only in the primary instance.
     app.connect_startup(notify::start_watchers);
     app.connect_activate({
@@ -134,6 +149,13 @@ struct Ui {
     lock_note: gtk::Label,
     cancel: gtk::Button,
     rebuild_button: gtk::Button,
+    /// Docked or floating, shown only with the Shell extension running. Its
+    /// only action is writing `WindowMode::as_str()` to the shared setting.
+    dock_toggle: gtk::Button,
+    /// The extension's schema, when installed with the panel.
+    mode_settings: Option<gio::Settings>,
+    extension_running: Cell<bool>,
+    watcher: RefCell<Option<Box<dyn FnOnce()>>>,
     conversation: RefCell<Option<Conversation>>,
     session: RefCell<Option<Arc<Session>>>,
     rebuild: RefCell<Rebuild>,
@@ -163,6 +185,16 @@ impl Ui {
         let header = adw::HeaderBar::builder().title_widget(&title).build();
         header.pack_start(&cancel);
         header.pack_end(&rebuild_button);
+        let dock_toggle = gtk::Button::builder()
+            .visible(false)
+            .focus_on_click(false)
+            .build();
+        dock_toggle.add_css_class("flat");
+        header.pack_end(&dock_toggle);
+        // Never `Settings::new`: it aborts when the schema is missing.
+        let mode_settings = gio::SettingsSchemaSource::default()
+            .and_then(|source| source.lookup(WINDOW_SCHEMA, true))
+            .map(|schema| gio::Settings::new_full(&schema, None::<&gio::SettingsBackend>, None));
 
         let list = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
@@ -276,6 +308,10 @@ impl Ui {
             lock_note,
             cancel,
             rebuild_button,
+            dock_toggle,
+            mode_settings,
+            extension_running: Cell::new(false),
+            watcher: RefCell::new(None),
             conversation: RefCell::new(None),
             session: RefCell::new(None),
             rebuild: RefCell::new(Rebuild::default()),
@@ -367,14 +403,88 @@ impl Ui {
             let ui = ui.clone();
             move |_| rebuild::ask(&ui)
         });
+        ui.dock_toggle.connect_clicked({
+            let ui = ui.clone();
+            move |_| ui.toggle_mode()
+        });
+        if let Some(settings) = &ui.mode_settings {
+            settings.connect_changed(Some(WINDOW_MODE_KEY), {
+                let weak = Rc::downgrade(&ui);
+                move |_, _| {
+                    if let Some(ui) = weak.upgrade() {
+                        ui.apply_look();
+                    }
+                }
+            });
+        }
+        // The extension owns this name while it is enabled.
+        let watcher = gio::bus_watch_name(
+            gio::BusType::Session,
+            EXTENSION_BUS_NAME,
+            gio::BusNameWatcherFlags::NONE,
+            {
+                let weak = Rc::downgrade(&ui);
+                move |_, _, _| {
+                    if let Some(ui) = weak.upgrade() {
+                        ui.extension_running.set(true);
+                        ui.apply_look();
+                    }
+                }
+            },
+            {
+                let weak = Rc::downgrade(&ui);
+                move |_, _| {
+                    if let Some(ui) = weak.upgrade() {
+                        ui.extension_running.set(false);
+                        ui.apply_look();
+                    }
+                }
+            },
+        );
+        *ui.watcher.borrow_mut() = Some(Box::new(move || gio::bus_unwatch_name(watcher)));
+        ui.apply_look();
         ui.window.connect_close_request({
             let ui = ui.clone();
             move |_| {
+                if let Some(unwatch) = ui.watcher.borrow_mut().take() {
+                    unwatch();
+                }
                 ui.close_session();
                 glib::Propagation::Proceed
             }
         });
         ui
+    }
+
+    fn mode(&self) -> WindowMode {
+        self.mode_settings.as_ref().map_or(WindowMode::Docked, |s| {
+            WindowMode::parse(&s.string(WINDOW_MODE_KEY))
+        })
+    }
+
+    /// The header button and the square top corners, from the view-model.
+    fn apply_look(&self) {
+        let look = window_look(
+            self.extension_running.get(),
+            self.mode_settings.is_some(),
+            self.mode(),
+        );
+        self.dock_toggle.set_visible(look.toggle_visible);
+        self.dock_toggle.set_icon_name(look.icon);
+        self.dock_toggle.set_tooltip_text(Some(look.tooltip));
+        self.dock_toggle
+            .update_property(&[gtk::accessible::Property::Label(look.tooltip)]);
+        if look.docked {
+            self.window.add_css_class("vexos-docked");
+        } else {
+            self.window.remove_css_class("vexos-docked");
+        }
+    }
+
+    fn toggle_mode(&self) {
+        if let Some(settings) = &self.mode_settings {
+            let _ = settings.set_string(WINDOW_MODE_KEY, self.mode().toggled().as_str());
+        }
     }
 
     /// Starts the session in the background; the window is already up.

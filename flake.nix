@@ -144,11 +144,25 @@
           jq -e '.uuid == "${ext.extensionUuid}" and ."shell-version" == ["50"]
                  and ."settings-schema" == "org.gnome.shell.extensions.vexos-assistant"' ${dir}/metadata.json
           # Exactly these files.
-          diff <(cd ${dir} && find . -type f | sort) <(printf '%s\n' ./extension.js ./metadata.json \
+          diff <(cd ${dir} && find . -type f | sort) <(printf '%s\n' ./extension.js ./layout.js ./metadata.json \
             ./schemas/gschemas.compiled ./schemas/org.gnome.shell.extensions.vexos-assistant.gschema.xml)
           node --check ${dir}/extension.js
           gsettings --schemadir ${dir}/schemas list-keys org.gnome.shell.extensions.vexos-assistant \
             | grep -qx toggle-assistant
+          keys=$(gsettings --schemadir ${dir}/schemas list-keys org.gnome.shell.extensions.vexos-assistant)
+          grep -qx window-mode <<<"$keys"
+          # The shared value: two choices, docked by default, nothing else storable.
+          range=$(gsettings --schemadir ${dir}/schemas range org.gnome.shell.extensions.vexos-assistant window-mode)
+          [ "$range" = "$(printf '%s\n' enum "'docked'" "'floating'")" ]
+          [ "$(gsettings --schemadir ${dir}/schemas get org.gnome.shell.extensions.vexos-assistant window-mode)" = "'docked'" ]
+          export GSETTINGS_BACKEND=memory HOME=$TMPDIR
+          if gsettings --schemadir ${dir}/schemas set org.gnome.shell.extensions.vexos-assistant window-mode bogus; then
+            echo "window-mode accepted a value outside its choices"; exit 1
+          fi
+          gsettings --schemadir ${dir}/schemas set org.gnome.shell.extensions.vexos-assistant window-mode floating
+          # Size function, validation and the no-agent-text scan, on the built files.
+          cp -r ${./tests/extension} tests
+          EXT=${dir} node --test tests/layout.test.mjs
           touch $out
         '';
 
@@ -204,6 +218,7 @@
               programs.vexos-ai = { enable = true; enablePanel = false; enablePanelExtension = true; };
             };
             "the module never enables the extension" = !lib.hasInfix uuid (enabling gnome);
+            "the module never sets the window mode" = !lib.hasInfix "window-mode" (enabling gnome);
             "the panel comes with the AI feature" = on.programs.vexos-ai.enablePanel && panel != null && failing on == "";
             "no AI feature, no panel" = !off.programs.vexos-ai.enablePanel && panelOf off == null;
             "the panel can be left out" = panelOf (eval { programs.vexos-ai = { enable = true; enablePanel = false; }; }) == null;
@@ -235,6 +250,17 @@
               && grep -q '${agents.opencodePackage}/bin' ${panel}/bin/vexos-ai-panel \
               && echo 'ok   the panel runs the pinned agents first on PATH' \
               || { echo 'FAIL the panel runs the pinned agents first on PATH'; failed=1; }
+            # The panel reads and writes the extension's `window-mode` key, so it must
+            # find the same schema, and reach dconf to write it.
+            schemas=$(find ${panel}/share/gsettings-schemas -name 'org.gnome.shell.extensions.vexos-assistant.gschema.xml')
+            [ -n "$schemas" ] \
+              && cmp "$schemas" ${self}/extension/${uuid}/schemas/org.gnome.shell.extensions.vexos-assistant.gschema.xml \
+              && test -f "$(dirname "$schemas")/gschemas.compiled" \
+              && echo 'ok   the panel installs the extension schema, unchanged and compiled' \
+              || { echo 'FAIL the panel installs the extension schema, unchanged and compiled'; failed=1; }
+            grep -aq 'dconf-[^ ]*-lib/lib/gio/modules' ${panel}/bin/.vexos-ai-panel-wrapped_ \
+              && echo 'ok   the panel can reach dconf' \
+              || { echo 'FAIL the panel can reach dconf'; failed=1; }
             test -f ${panel}/share/applications/io.github.victorytek.VexosAssistant.desktop \
               && echo 'ok   the desktop entry is installed' \
               || { echo 'FAIL the desktop entry is installed'; failed=1; }
