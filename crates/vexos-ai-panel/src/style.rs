@@ -86,7 +86,6 @@ mod tests {
 
     const MAIN: &str = include_str!("main.rs");
     const NOTIFY: &str = include_str!("notify.rs");
-    const REBUILD: &str = include_str!("rebuild.rs");
 
     /// Style classes from libadwaita and GTK that the code may use.
     const LIBRARY: [&str; 12] = [
@@ -142,10 +141,7 @@ mod tests {
     }
 
     fn used() -> BTreeSet<String> {
-        [MAIN, NOTIFY, REBUILD]
-            .into_iter()
-            .flat_map(classes_in)
-            .collect()
+        [MAIN, NOTIFY].into_iter().flat_map(classes_in).collect()
     }
 
     #[test]
@@ -173,7 +169,7 @@ mod tests {
 
     #[test]
     fn class_names_are_fixed_literals() {
-        for file in [MAIN, NOTIFY, REBUILD] {
+        for file in [MAIN, NOTIFY] {
             assert!(
                 !classes_in(file).contains(&"<not a literal>".to_owned()),
                 "a style class is not a string literal"

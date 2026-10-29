@@ -270,7 +270,9 @@ internal: crash-watch, usage-check, theme-watch, welcome   (replaced by `service
    message tray later. A D-Bus-activated app (`DBusActivatable=true`, the
    prerequisite for persistent notifications) receives
    `app.diagnose-crash(pid)`, `app.switch-account(label)`, `app.setup` and
-   `app.diagnose-rebuild` even when it was not running. Covers crashes, usage
+   `app.diagnose-rebuild` even when it was not running. (The panel's own
+   `app.diagnose-rebuild` action and its rebuild button were removed on
+   2026-10-29; see `assistant_panel_app_spec.md`.) Covers crashes, usage
    near a limit (button: "Switch to <best>"), the welcome prompt, and rebuild
    failures (vexos-nix calls `vexos-ai notify rebuild-failed` from
    `just rebuild`). Works on GNOME. On Hyprland and COSMIC it works through the

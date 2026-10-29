@@ -8,7 +8,8 @@ import {pathToFileURL} from 'node:url';
 const dir = resolve(process.env.EXT ??
     'extension/vexos-assistant@victorytek.github.io');
 const layout = await import(pathToFileURL(join(dir, 'layout.js')));
-const {parseMode, dockedRect, floatingRect, normalSize, DEFAULT_NORMAL} = layout;
+const {parseMode, dockedRect, floatingRect, normalSize, DEFAULT_NORMAL,
+    slideStart, slideDecision, SLIDE_MS, SLIDE_EASING, FALLBACK_MS} = layout;
 
 test('parseMode: both strings', () => {
     assert.equal(parseMode('floating'), 'floating');
@@ -113,4 +114,74 @@ test('source scan: only the two known settings keys are used, and set is never c
 
 test('source scan: layout.js imports nothing', () => {
     assert.ok(!/^\s*import\b/m.test(code(sources[1][1])));
+});
+
+test('slide: about 250 ms, ease-out, and a fallback that outlasts the slide start', () => {
+    assert.equal(SLIDE_MS, 250);
+    assert.equal(SLIDE_EASING, 'EASE_OUT_QUAD');
+    assert.ok(FALLBACK_MS >= 300 && FALLBACK_MS <= 1000);
+});
+
+test('slideStart: the whole window above the screen edge', () => {
+    // Work area under a 32 px top bar: the window must clear the bar too.
+    assert.equal(slideStart(520, 32, 0), -552);
+    // No bar (second monitor): just its height.
+    assert.equal(slideStart(629, 0, 0), -629);
+    assert.equal(slideStart(520, 1112, 1080), -552);
+    // Always above the docked top edge by at least the window's height.
+    for (const h of [0, 1, 400, 1000])
+        for (const bar of [0, 24, 32, 64])
+            assert.ok(slideStart(h, bar, 0) <= -(h + bar));
+});
+
+test('slideStart: bad numbers never move the window below its place', () => {
+    for (const [h, y, sy] of [[NaN, 32, 0], [Infinity, 0, 0], [-5, 32, 0], [520, NaN, 0],
+        [520, 32, undefined], [undefined, undefined, undefined]])
+        assert.ok(slideStart(h, y, sy) <= 0 && Number.isFinite(slideStart(h, y, sy)),
+            String([h, y, sy]));
+});
+
+test('slideDecision: slide only after the move landed; never invisible for long', () => {
+    assert.equal(slideDecision({}), 'wait');
+    assert.equal(slideDecision({landed: true}), 'slide');
+    assert.equal(slideDecision({timedOut: true}), 'show');
+    assert.equal(slideDecision({landed: true, timedOut: true}), 'slide');
+    assert.equal(slideDecision({gone: true}), 'abort');
+    assert.equal(slideDecision({gone: true, landed: true, timedOut: true}), 'abort');
+});
+
+test('source scan: the window is hidden only while parked, and always revealed', () => {
+    const ext = code(sources[0][1]);
+    // Opacity goes to 0 in one place (the park); everything else restores it.
+    assert.equal(ext.match(/opacity = 0;/g).length, 1);
+    assert.ok(ext.match(/opacity = 255;/g).length >= 3);
+    const place = ext.slice(ext.indexOf('_place(window, entry) {'), ext.indexOf('_actor(window) {'));
+    // Floating returns before anything is hidden or deferred.
+    assert.ok(/if \(this\._mode\(\) !== DOCKED\)\s+return;/.test(place));
+    assert.ok(place.indexOf('this._mode() !== DOCKED') < place.indexOf('this._park('));
+    // With the overview open Shell's effect cannot be ended: no park.
+    assert.ok(/Main\.overview\.visible\) \{[^}]*this\._apply\(window, entry, DOCKED\)/.test(place));
+    // The park waits behind Shell's async map effect, and a failure reveals.
+    assert.ok(place.includes('Promise.resolve().then(() => this._park(window, entry))'));
+    assert.ok(place.includes('this._reveal(this._actor(window))'));
+    const park = ext.slice(ext.indexOf('_park(window, entry) {'), ext.indexOf('_armSlide(window, entry, actor, start) {'));
+    assert.ok(park.includes('this._windows?.get(window) !== entry'), 'a closed window is skipped');
+    assert.ok(park.indexOf('remove_all_transitions()') < park.indexOf('opacity = 0;'));
+    assert.ok(park.includes('this._armSlide(window, entry, actor, start);'));
+    assert.ok(park.indexOf('this._armSlide(') < park.indexOf('move_resize_frame'),
+        'the landing signals are connected before the move');
+    assert.ok(ext.includes('GLib.timeout_add(GLib.PRIORITY_DEFAULT, FALLBACK_MS'));
+    assert.ok(ext.includes('GLib.source_remove(slide.timer)'));
+    // The reveal parks the actor again after ending transitions, then eases.
+    const reveal = ext.slice(ext.indexOf('_reveal(actor, start = null) {'), ext.indexOf('_sync() {'));
+    assert.ok(reveal.indexOf('remove_all_transitions()') < reveal.indexOf('translation_y = start;'));
+    assert.ok(reveal.indexOf('translation_y = start;') < reveal.indexOf('actor.ease('));
+    assert.equal(ext.match(/move_resize_frame\(/g).length, 3);
+});
+
+test('source scan: the extension never reads the frame position during the slide', () => {
+    const ext = code(sources[0][1]);
+    const armed = ext.slice(ext.indexOf('_armSlide(window, entry, actor, start) {'), ext.indexOf('_sync() {'));
+    for (const word of ['get_frame_rect', 'get_buffer_rect', 'translation_y;', 'get_position'])
+        assert.ok(!armed.includes(word), word);
 });

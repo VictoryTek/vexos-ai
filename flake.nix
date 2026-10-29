@@ -32,7 +32,7 @@
         default = pkgs.mkShell {
           packages = with pkgs; [ shellcheck shfmt jq bats util-linux cargo rustc clippy rustfmt pkg-config ];
           # For crates/vexos-ai-panel.
-          buildInputs = with pkgs; [ gtk4 libadwaita vte-gtk4 ];
+          buildInputs = with pkgs; [ gtk4 libadwaita ];
         };
       });
 

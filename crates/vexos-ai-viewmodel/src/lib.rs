@@ -10,8 +10,8 @@
 //!   what the core last confirmed.
 //! - Agent replies are formatted as literal text runs; nothing in one can
 //!   become markup, a clickable link or a loaded image.
-//! - Rebuilding the system is a separate state machine with a fixed command;
-//!   nothing in a conversation can start it.
+//! - Nothing here can apply a system change: the panel has no rebuild
+//!   action (that stays a terminal action, `just rebuild`).
 //! - A failure notification leads to a draft for the input box, never to a
 //!   prompt: collected text is redacted, capped and fenced as untrusted, and
 //!   the user decides whether to send it.
@@ -40,7 +40,6 @@ mod diagnose;
 mod markdown;
 mod notify;
 mod proposal;
-mod rebuild;
 mod redact;
 mod usage;
 mod window;
@@ -58,7 +57,6 @@ pub use diagnose::{
 pub use markdown::{Run, Style, markdown};
 pub use notify::{Crashes, FailedUnits, SETTINGS_FILE, Settings};
 pub use proposal::{DiffLine, Proposal, line_diff};
-pub use rebuild::{Rebuild, RebuildCommand, describe_wait_status};
 pub use usage::{
     CLICK_TOOLTIP, Disabled, FiveHour, PANEL_SETTINGS_FILE, PanelSettings, USAGE_LOCK, UsageButton,
     five_hour, freshness, tooltip,

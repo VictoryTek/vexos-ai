@@ -59,6 +59,11 @@ button.vexos-choice {
   outline-color: color-mix(in srgb, var(--accent-bg-color) 70%, transparent);
 }
 
+/* Send: the same radius as the input, and as tall as it (the row's valign). */
+button.vexos-send {
+  border-radius: 14px;
+}
+
 .vexos-input textview,
 .vexos-input textview > text {
   background: none;

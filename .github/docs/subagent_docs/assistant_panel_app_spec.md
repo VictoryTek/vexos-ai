@@ -3,6 +3,19 @@
 Status: Phase 1, 2026-10-25. Builds on `assistant_panel_spec.md` (step 3 of its
 section 7) and the core in `crates/vexos-ai-core`. No GNOME extension work.
 
+> **Update, 2026-10-29: the "Run just rebuild" button was removed.** The
+> header button, its confirmation dialog, the embedded VTE terminal window, the
+> panel's and the view-model's `rebuild` modules, and the `vte4` dependency are
+> gone, and the sections below that describe them (the rebuild privilege, the
+> `vte4::Terminal` spawn, the `vte4` and `vte-gtk4` versions) are history. Why:
+> a panel button that applies a system configuration is the one place the
+> assistant's window could cause a switch, however many confirmations sit in
+> front of it, and the panel's rule is that it never runs anything that applies
+> system changes. Applying changes stays a terminal action: `just rebuild`.
+> The panel only runs the fixed read-only collectors (`journalctl`,
+> `coredumpctl`) behind a notification click. A source scan
+> (`scan_tests.rs`, `the_panel_has_no_way_to_rebuild_the_system`) keeps it so.
+
 ## 1. Request
 
 0. Live plan-exit re-check (Claude, plan allowed) under the managed policy,

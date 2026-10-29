@@ -4,6 +4,16 @@ Status: Phase 1, 2026-10-26. Builds on `assistant_panel_spec.md` (section 7,
 step 5: GNotification actions) and `assistant_panel_app_spec.md`. No change
 to `nix/policy.nix`, `docs/contract.md`, CI, the extension, or the core.
 
+> **Update, 2026-10-29: the failed-rebuild trigger was removed** together with
+> the panel's "Run just rebuild" button it depended on (the notification fired
+> when the app's own terminal exited with a failure). Gone: the `rebuild-failed`
+> setting (an old line for it in `notifications.conf` is now an unknown key and
+> is ignored), the `app.diagnose-rebuild` action, `Subject::Rebuild` and the
+> "rebuild output is no longer available" draft text. Kept: failed systemd
+> units, coredumps, the draft banner and composer, and the settings file.
+> Applying changes stays a terminal action: `just rebuild`. Sections below that
+> describe the rebuild trigger are history.
+
 ## 1. Request
 
 Notifications for a failed rebuild, a failed systemd unit and a coredump of

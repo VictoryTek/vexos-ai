@@ -7,12 +7,11 @@
 //! appear in the files they read.
 
 const NOTIFY: &str = include_str!("notify.rs");
-const REBUILD: &str = include_str!("rebuild.rs");
 const MAIN: &str = include_str!("main.rs");
 const STYLE: &str = include_str!("style.rs");
 
 /// The view-model's sources, where an `Outgoing` can be made.
-const VIEWMODEL: [(&str, &str); 11] = [
+const VIEWMODEL: [(&str, &str); 10] = [
     (
         "lib.rs",
         include_str!("../../vexos-ai-viewmodel/src/lib.rs"),
@@ -40,10 +39,6 @@ const VIEWMODEL: [(&str, &str); 11] = [
     (
         "proposal.rs",
         include_str!("../../vexos-ai-viewmodel/src/proposal.rs"),
-    ),
-    (
-        "rebuild.rs",
-        include_str!("../../vexos-ai-viewmodel/src/rebuild.rs"),
     ),
     (
         "redact.rs",
@@ -77,7 +72,7 @@ fn body(name: &str) -> String {
 
 #[test]
 fn notification_code_never_sends_or_touches_a_session() {
-    for file in [code(NOTIFY), code(REBUILD)] {
+    for file in [code(NOTIFY)] {
         for word in [
             "send_prompt",
             "submit",
@@ -251,7 +246,7 @@ fn the_usage_label_comes_only_from_the_parser() {
     assert!(show.contains("update_property(&[gtk::accessible::Property::Label(&text)])"));
     // In the view-model, a figure exists only from the parser.
     let (_, conversation) = VIEWMODEL[2];
-    let (_, usage) = VIEWMODEL[9];
+    let (_, usage) = VIEWMODEL[8];
     let mut known = Vec::new();
     let mut parsed = Vec::new();
     for (name, file) in VIEWMODEL {
@@ -329,11 +324,7 @@ const FILE_WRITES: [&str; 10] = [
 #[test]
 fn the_panel_cannot_write_or_switch_the_agent_choice() {
     // No file is written from the panel or the view-model's shipped code.
-    for (name, file) in [
-        ("main.rs", MAIN),
-        ("notify.rs", NOTIFY),
-        ("rebuild.rs", REBUILD),
-    ] {
+    for (name, file) in [("main.rs", MAIN), ("notify.rs", NOTIFY)] {
         let code = code(file);
         for word in FILE_WRITES {
             assert!(!code.contains(word), "{word:?} in panel {name}");
@@ -487,11 +478,7 @@ fn css_is_loaded_once_from_the_bundled_sheet_and_never_from_text() {
         1
     );
     // No other file makes a provider, loads a sheet, or builds markup.
-    for (name, file) in [
-        ("main.rs", code(MAIN)),
-        ("notify.rs", code(NOTIFY)),
-        ("rebuild.rs", code(REBUILD)),
-    ] {
+    for (name, file) in [("main.rs", code(MAIN)), ("notify.rs", code(NOTIFY))] {
         for word in [
             "CssProvider",
             "load_from_",
@@ -527,11 +514,7 @@ fn the_title_buttons_come_only_from_the_fixed_layouts() {
 
 #[test]
 fn style_classes_are_fixed_literals_in_every_panel_file() {
-    for (name, file) in [
-        ("main.rs", code(MAIN)),
-        ("notify.rs", code(NOTIFY)),
-        ("rebuild.rs", code(REBUILD)),
-    ] {
+    for (name, file) in [("main.rs", code(MAIN)), ("notify.rs", code(NOTIFY))] {
         for call in file.split("add_css_class(").skip(1) {
             let call = call.trim_start();
             assert!(
@@ -540,4 +523,60 @@ fn style_classes_are_fixed_literals_in_every_panel_file() {
             );
         }
     }
+}
+
+#[test]
+fn the_panel_has_no_way_to_rebuild_the_system() {
+    // The "Run just rebuild" button was removed: applying changes stays a
+    // terminal action. Nothing in the panel names it, spawns a terminal, or
+    // runs anything but the two fixed read-only collectors.
+    let manifest = include_str!("../Cargo.toml");
+    for (name, text) in [
+        ("main.rs", code(MAIN)),
+        ("notify.rs", code(NOTIFY)),
+        ("style.rs", code(STYLE)),
+        ("Cargo.toml", manifest.to_owned()),
+    ] {
+        for word in [
+            "vte",
+            "Vte",
+            "mod rebuild",
+            "Rebuild",
+            "rebuild_",
+            "\"just\"",
+            "just rebuild",
+            "nixos-rebuild",
+            "spawn_async",
+            "spawn_command_line",
+            "AppInfo",
+            "launch_uri",
+            "Terminal",
+            "diagnose-rebuild",
+            "rebuild-failed",
+        ] {
+            assert!(!text.contains(word), "{word:?} in {name}");
+        }
+    }
+    // The only process the panel starts is the fixed journalctl/coredumpctl
+    // argv from the view-model, in notify.rs; main.rs starts none.
+    assert_eq!(code(NOTIFY).matches("Subprocess::newv(").count(), 1);
+    assert!(!code(MAIN).contains("Subprocess"));
+    assert!(!code(MAIN).contains("Command::new"));
+    assert!(!code(NOTIFY).contains("Command::new"));
+    // The view-model has no state machine for it either.
+    for (name, file) in VIEWMODEL {
+        let code = shipped(file);
+        for word in ["RebuildCommand", "describe_wait_status", "/etc/nixos"] {
+            assert!(!code.contains(word), "{word:?} in view-model {name}");
+        }
+    }
+}
+
+#[test]
+fn send_fills_the_input_row_with_a_fixed_class() {
+    let main = code(MAIN);
+    assert!(main.contains("send.add_css_class(\"vexos-send\");"));
+    assert!(main.contains("send.set_valign(gtk::Align::Fill);"));
+    assert!(!main.contains("send.set_valign(gtk::Align::End)"));
+    assert!(include_str!("style.css").contains("button.vexos-send {"));
 }

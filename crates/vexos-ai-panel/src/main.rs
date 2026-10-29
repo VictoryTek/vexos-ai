@@ -4,7 +4,6 @@
 //! view-model, which are tested headless.
 
 mod notify;
-mod rebuild;
 #[cfg(test)]
 mod scan_tests;
 mod style;
@@ -20,8 +19,8 @@ use style::TagColors;
 use vexos_ai_core::{Agent, Config, Decision, Error, Session};
 use vexos_ai_viewmodel::{
     AGENT_FILE, Answer, ApprovalCard, Composer, Conversation, DiffLine, EXTENSION_BUS_NAME, Empty,
-    Item, Offer, Outgoing, PANEL_SETTINGS_FILE, PanelSettings, Placement, Proposal, Rebuild, Sent,
-    State, USAGE_LOCK, Via, WINDOW_MODE_KEY, WINDOW_SCHEMA, WindowMode, agent_label, docked_layout,
+    Item, Offer, Outgoing, PANEL_SETTINGS_FILE, PanelSettings, Placement, Proposal, Sent, State,
+    USAGE_LOCK, Via, WINDOW_MODE_KEY, WINDOW_SCHEMA, WindowMode, agent_label, docked_layout,
     markdown, mode_label, saved_agent, window_look,
 };
 
@@ -147,7 +146,6 @@ struct Ui {
     /// Above the input while the launch `/usage` holds it (its note slides in).
     lock_reveal: gtk::Revealer,
     cancel: gtk::Button,
-    rebuild_button: gtk::Button,
     /// Docked or floating, shown only with the Shell extension running. Its
     /// only action is writing `WindowMode::as_str()` to the shared setting.
     dock_toggle: gtk::Button,
@@ -157,8 +155,6 @@ struct Ui {
     watcher: RefCell<Option<Box<dyn FnOnce()>>>,
     conversation: RefCell<Option<Conversation>>,
     session: RefCell<Option<Arc<Session>>>,
-    rebuild: RefCell<Rebuild>,
-    rebuild_view: RefCell<Option<rebuild::RebuildView>>,
     /// What is in the input, and whether it is an unsent draft. The only
     /// source of a message to send.
     composer: RefCell<Composer>,
@@ -180,10 +176,8 @@ impl Ui {
             .tooltip_text("Cancel the current turn")
             .sensitive(false)
             .build();
-        let rebuild_button = gtk::Button::with_label("Run just rebuild");
         let header = adw::HeaderBar::builder().title_widget(&title).build();
         header.pack_start(&cancel);
-        header.pack_end(&rebuild_button);
         let dock_toggle = gtk::Button::builder()
             .visible(false)
             .focus_on_click(false)
@@ -240,7 +234,9 @@ impl Ui {
             .sensitive(false)
             .build();
         send.add_css_class("suggested-action");
-        send.set_valign(gtk::Align::End);
+        send.add_css_class("vexos-send");
+        // Fill the row: as tall as the input, whether it holds one line or many.
+        send.set_valign(gtk::Align::Fill);
         let composer = gtk::Box::builder()
             .spacing(8)
             .margin_top(8)
@@ -350,15 +346,12 @@ impl Ui {
             narrow: Cell::new(false),
             lock_reveal,
             cancel,
-            rebuild_button,
             dock_toggle,
             mode_settings,
             extension_running: Cell::new(false),
             watcher: RefCell::new(None),
             conversation: RefCell::new(None),
             session: RefCell::new(None),
-            rebuild: RefCell::new(Rebuild::default()),
-            rebuild_view: RefCell::new(None),
             composer: RefCell::new(Composer::default()),
             syncing: Cell::new(false),
             starting_note,
@@ -441,10 +434,6 @@ impl Ui {
         ui.cancel.connect_clicked({
             let ui = ui.clone();
             move |_| ui.cancel_turn()
-        });
-        ui.rebuild_button.connect_clicked({
-            let ui = ui.clone();
-            move |_| rebuild::ask(&ui)
         });
         ui.dock_toggle.connect_clicked({
             let ui = ui.clone();
@@ -800,10 +789,6 @@ impl Ui {
     }
 
     fn refresh(self: &Rc<Self>) {
-        self.rebuild_button.set_sensitive(matches!(
-            *self.rebuild.borrow(),
-            Rebuild::Idle | Rebuild::Finished(_)
-        ));
         let conversation = self.conversation.borrow();
         let Some(c) = conversation.as_ref() else {
             return;

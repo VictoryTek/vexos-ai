@@ -9,29 +9,18 @@ use crate::diagnose::{Crash, UnitName, core_file};
 /// Under `$XDG_CONFIG_HOME`. One `key = true|false` per line, `#` comments:
 ///
 /// ```text
-/// rebuild-failed = true
 /// failed-units = false
 /// coredumps = false
 /// ```
 pub const SETTINGS_FILE: &str = "vexos-ai/notifications.conf";
 
 /// Which triggers are on. A missing file, an unknown key or a bad value
-/// leaves the default: rebuild failures on, the watchers off.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// leaves the default: the watchers off. A `rebuild-failed` line from an older
+/// file is an unknown key now, and ignored.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Settings {
-    pub rebuild_failed: bool,
     pub failed_units: bool,
     pub coredumps: bool,
-}
-
-impl Default for Settings {
-    fn default() -> Self {
-        Settings {
-            rebuild_failed: true,
-            failed_units: false,
-            coredumps: false,
-        }
-    }
 }
 
 impl Settings {
@@ -48,7 +37,6 @@ impl Settings {
                 _ => continue,
             };
             match key.trim() {
-                "rebuild-failed" => s.rebuild_failed = value,
                 "failed-units" => s.failed_units = value,
                 "coredumps" => s.coredumps = value,
                 _ => {}
@@ -162,7 +150,6 @@ mod tests {
         assert_eq!(
             Settings::default(),
             Settings {
-                rebuild_failed: true,
                 failed_units: false,
                 coredumps: false
             }
@@ -174,12 +161,16 @@ mod tests {
         assert_eq!(
             s,
             Settings {
-                rebuild_failed: false,
                 failed_units: true,
                 coredumps: false
             }
         );
         assert!(Settings::parse("coredumps = true").coredumps);
+        // The removed rebuild trigger's key is just an unknown key now.
+        assert_eq!(
+            Settings::parse("rebuild-failed = true"),
+            Settings::default()
+        );
     }
 
     #[test]

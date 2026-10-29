@@ -59,3 +59,29 @@ export function normalSize(frame, area) {
         return {...DEFAULT_NORMAL};
     return {width: frame.width, height: frame.height};
 }
+
+// The slide down from the top bar.
+export const SLIDE_MS = 250;
+// Clutter.AnimationMode name, mapped to the enum in extension.js.
+export const SLIDE_EASING = 'EASE_OUT_QUAD';
+// If the window has not reported its move by then, show it anyway.
+export const FALLBACK_MS = 400;
+
+// translation_y that puts the whole window above the screen's top edge when it
+// is docked at the work area's top (the top bar sits between the two).
+export function slideStart(height, areaY, screenY) {
+    const h = Number.isFinite(height) ? Math.max(0, height) : 0;
+    const bar = Number.isFinite(areaY - screenY) ? Math.max(0, areaY - screenY) : 0;
+    return -(h + bar);
+}
+
+// What to do with the hidden window: 'slide' once its move has landed, 'show'
+// (no slide, just visible) when it never does, 'abort' if it is gone, else
+// 'wait'. Gone wins over everything, a landed move over the timeout.
+export function slideDecision({landed, gone, timedOut}) {
+    if (gone)
+        return 'abort';
+    if (landed)
+        return 'slide';
+    return timedOut ? 'show' : 'wait';
+}

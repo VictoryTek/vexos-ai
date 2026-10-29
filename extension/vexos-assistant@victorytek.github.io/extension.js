@@ -12,6 +12,16 @@
 // sized and moved once, when it is shown, and the slide animates the actor's
 // translation only, so no position is read back while it runs.
 //
+// The slide has to beat Shell's own map effect. For a normal window Shell
+// (windowManager.js _mapWindow, async) scales the actor up from its bottom
+// edge and fades it in over 150 ms, starting that ease in a promise job that
+// runs after 'shown' returns; its _mapWindowDone then resets translation_y to
+// 0 and removes all transitions. On Wayland the resize is also only applied
+// when the client acks it. So, behind Shell's promise job, the effect is ended
+// and the window hidden (opacity 0) and parked above the screen in one turn,
+// moved once, and only shown, sliding, when its move has landed (or after a
+// short timeout, so it can never stay invisible).
+//
 // The window is "docked" (a drop-down under the top bar, sized by layout.js)
 // or "floating" (left to Mutter), by the `window-mode` setting. The app writes
 // it from its header button; only the strings "docked" and "floating" mean
@@ -29,15 +39,14 @@ import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import * as QuickSettings from 'resource:///org/gnome/shell/ui/quickSettings.js';
 
-import {DEFAULT_NORMAL, DOCKED, FLOATING, dockedRect, floatingRect, normalSize, parseMode}
-    from './layout.js';
+import {DEFAULT_NORMAL, DOCKED, FALLBACK_MS, FLOATING, SLIDE_EASING, SLIDE_MS, dockedRect,
+    floatingRect, normalSize, parseMode, slideDecision, slideStart} from './layout.js';
 
 const APP_ID = 'io.github.victorytek.VexosAssistant';
 const APP_PATH = '/io/github/victorytek/VexosAssistant';
 const EXTENSION_NAME = `${APP_ID}.Extension`;
 const SHORTCUT = 'toggle-assistant';
 const MODE_KEY = 'window-mode';
-const SLIDE_MS = 180;
 
 const AssistantToggle = GObject.registerClass(
 class AssistantToggle extends QuickSettings.QuickToggle {
@@ -68,7 +77,7 @@ class AssistantIndicator extends QuickSettings.SystemIndicator {
 export default class AssistantExtension extends Extension {
     enable() {
         this._cancellable = new Gio.Cancellable();
-        // Meta.Window -> {ids, placed, raised}
+        // Meta.Window -> {ids, placed, raised, slide}
         this._windows = new Map();
         // New windows not identified yet: Meta.Window -> handler ids
         this._pending = new Map();
@@ -138,8 +147,8 @@ export default class AssistantExtension extends Extension {
             });
     }
 
-    // The app's main window: its app id, a normal window, and no parent (the
-    // app's rebuild terminal is a transient window, and is left alone).
+    // The app's main window: its app id, a normal window, and no parent (a
+    // transient window of the app is left alone).
     _isAssistant(window) {
         try {
             const id = window.get_gtk_application_id() ?? window.get_wm_class();
@@ -190,7 +199,7 @@ export default class AssistantExtension extends Extension {
     _track(window, place) {
         if (!window || this._windows.has(window) || !this._isAssistant(window))
             return null;
-        const entry = {ids: [], placed: !place, raised: false};
+        const entry = {ids: [], placed: !place, raised: false, slide: null};
         this._windows.set(window, entry);
         // Open when the extension was enabled (also after a screen lock, which
         // disables it): learn its normal size, and dock it to match the
@@ -229,12 +238,14 @@ export default class AssistantExtension extends Extension {
                 window.disconnect(id);
             } catch {}
         }
+        this._cancelSlide(window, entry);
         if (restore) {
             try {
                 const actor = window.get_compositor_private();
                 if (actor) {
                     actor.remove_all_transitions();
                     actor.translation_y = 0;
+                    actor.opacity = 255;
                 }
                 if (entry.raised) {
                     window.unmake_above();
@@ -270,9 +281,11 @@ export default class AssistantExtension extends Extension {
                 return;
             const actor = window.get_compositor_private();
             const area = window.get_work_area_for_monitor(window.get_monitor());
+            this._cancelSlide(window, entry);
             if (actor) {
                 actor.remove_all_transitions();
                 actor.translation_y = 0;
+                actor.opacity = 255;
             }
             if (mode === FLOATING) {
                 const r = floatingRect(area, this._normal ?? DEFAULT_NORMAL);
@@ -303,8 +316,9 @@ export default class AssistantExtension extends Extension {
     }
 
     // Once per window, when it is first shown: the normal size is remembered
-    // (once per enable), then, if docked, one move and resize to the work
-    // area's top and a slide down from above the screen edge.
+    // (once per enable), then, if docked, the window is hidden and parked above
+    // the screen edge, moved once to the work area's top, and slid down when
+    // the move has landed. Floating never touches opacity or translation.
     _place(window, entry) {
         if (entry.placed)
             return;
@@ -312,31 +326,146 @@ export default class AssistantExtension extends Extension {
         try {
             if (window.is_hidden() || window.is_maximized() || window.is_fullscreen())
                 return;
-            const actor = window.get_compositor_private();
-            if (!actor)
+            if (!window.get_compositor_private())
                 return;
             // Read once, before the move; never after it.
             this._remember(window);
             if (this._mode() !== DOCKED)
                 return;
-            const monitor = window.get_monitor();
-            const area = window.get_work_area_for_monitor(monitor);
-            const screen = global.display.get_monitor_geometry(monitor);
-            const r = dockedRect(area);
-            window.move_resize_frame(false, r.x, r.y, r.width, r.height);
-            window.make_above();
-            window.stick();
-            entry.raised = true;
-
-            actor.remove_all_transitions();
-            actor.translation_y = -(r.height + area.y - screen.y);
-            actor.ease({
-                translation_y: 0,
-                duration: SLIDE_MS,
-                mode: Clutter.AnimationMode.EASE_OUT_QUAD,
+            if (Main.overview.visible) {
+                // Shell holds its map effect until the overview closes, so a
+                // parked actor would be overridden: dock without the slide.
+                this._apply(window, entry, DOCKED);
+                return;
+            }
+            // Shell's _mapWindow is async: it has set the actor to scale
+            // 0.01 / opacity 0 but starts its ease only in a promise job, which
+            // runs after this signal returns. Queue behind it (jobs are FIFO)
+            // so the effect is ended and the actor parked in one turn, before
+            // any frame.
+            Promise.resolve().then(() => this._park(window, entry)).catch(e => {
+                console.warn(`VexOS Assistant: cannot place the window: ${e.message}`);
+                this._cancelSlide(window, entry);
+                this._reveal(this._actor(window));
             });
         } catch (e) {
             console.warn(`VexOS Assistant: cannot place the window: ${e.message}`);
+        }
+    }
+
+    _actor(window) {
+        try {
+            return window.get_compositor_private();
+        } catch {
+            return null;
+        }
+    }
+
+    // Ends Shell's map effect, hides and parks the actor above the screen, and
+    // moves the window once. The landing is waited for in _armSlide.
+    _park(window, entry) {
+        // Closed, disabled or no longer docked since the signal.
+        if (this._windows?.get(window) !== entry || window.is_hidden() ||
+            window.is_maximized() || window.is_fullscreen())
+            return;
+        const actor = window.get_compositor_private();
+        if (!actor)
+            return;
+        const monitor = window.get_monitor();
+        const area = window.get_work_area_for_monitor(monitor);
+        const screen = global.display.get_monitor_geometry(monitor);
+        const r = dockedRect(area);
+        const start = slideStart(r.height, area.y, screen.y);
+
+        actor.remove_all_transitions();
+        actor.opacity = 0;
+        actor.translation_y = start;
+        this._armSlide(window, entry, actor, start);
+
+        window.move_resize_frame(false, r.x, r.y, r.width, r.height);
+        window.make_above();
+        window.stick();
+        entry.raised = true;
+    }
+
+    // Waits for the move to land (the window reports a new position or size),
+    // or for the fallback timer, then shows the window.
+    _armSlide(window, entry, actor, start) {
+        const slide = {ids: [], timer: 0, idle: 0};
+        entry.slide = slide;
+        const decide = state => {
+            if (entry.slide !== slide)
+                return;
+            const verdict = slideDecision(state);
+            if (verdict === 'wait')
+                return;
+            this._cancelSlide(window, entry);
+            if (verdict === 'slide')
+                this._reveal(actor, start);
+            else if (verdict === 'show')
+                this._reveal(actor);
+        };
+        const landed = () => {
+            // One idle later, so the actor has the new geometry.
+            if (slide.idle || entry.slide !== slide)
+                return;
+            slide.idle = GLib.idle_add(GLib.PRIORITY_DEFAULT, () => {
+                slide.idle = 0;
+                decide({landed: true, gone: !this._windows?.has(window)});
+                return GLib.SOURCE_REMOVE;
+            });
+        };
+        slide.timer = GLib.timeout_add(GLib.PRIORITY_DEFAULT, FALLBACK_MS, () => {
+            slide.timer = 0;
+            decide({timedOut: true, gone: !this._windows?.has(window)});
+            return GLib.SOURCE_REMOVE;
+        });
+        try {
+            slide.ids.push(window.connect('position-changed', landed));
+            slide.ids.push(window.connect('size-changed', landed));
+        } catch {
+            decide({timedOut: true, gone: false});
+        }
+    }
+
+    _cancelSlide(window, entry) {
+        const slide = entry?.slide;
+        if (!slide)
+            return;
+        entry.slide = null;
+        if (slide.timer)
+            GLib.source_remove(slide.timer);
+        if (slide.idle)
+            GLib.source_remove(slide.idle);
+        slide.timer = slide.idle = 0;
+        for (const id of slide.ids) {
+            try {
+                window.disconnect(id);
+            } catch {}
+        }
+    }
+
+    // Makes the parked actor visible: sliding down from `start`, or, with no
+    // start, at once in its place.
+    _reveal(actor, start = null) {
+        try {
+            if (!actor)
+                return;
+            actor.remove_all_transitions();
+            actor.opacity = 255;
+            if (start === null) {
+                actor.translation_y = 0;
+                return;
+            }
+            // Ending a transition can reset the actor: park it again first.
+            actor.translation_y = start;
+            actor.ease({
+                translation_y: 0,
+                duration: SLIDE_MS,
+                mode: Clutter.AnimationMode[SLIDE_EASING],
+            });
+        } catch (e) {
+            console.warn(`VexOS Assistant: cannot show the window: ${e.message}`);
         }
     }
 

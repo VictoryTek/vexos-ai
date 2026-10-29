@@ -1,5 +1,5 @@
-//! Diagnosis notifications: a failed rebuild in the app's own terminal, and,
-//! when switched on, newly failed systemd units and the user's own crashes.
+//! Diagnosis notifications, when switched on: newly failed systemd units and
+//! the user's own crashes.
 //!
 //! A notification carries a fixed title and a validated name, never log
 //! text. Clicking it opens the window and collects read-only (fixed argv,
@@ -19,10 +19,10 @@ use adw::prelude::*;
 use gtk::{gio, glib};
 use vexos_ai_viewmodel::{
     Crash, Crashes, FailedUnits, Log, Missing, SETTINGS_FILE, Settings, Subject, UnitName,
-    coredump_argv, coredump_log, describe_wait_status, draft, journal_argv, journal_log,
+    coredump_argv, coredump_log, draft, journal_argv, journal_log,
 };
 
-use crate::{Slot, Ui, rebuild, window};
+use crate::{Slot, Ui, window};
 
 /// Where systemd-coredump links new core files.
 const COREDUMP_DIR: &str = "/var/lib/systemd/coredump";
@@ -52,17 +52,6 @@ fn uid() -> Option<u32> {
 /// activate these too, so each target is validated again, and all they can
 /// do is put a draft in the input.
 pub(crate) fn actions(slot: &Slot) -> Vec<gio::ActionEntry<adw::Application>> {
-    let rebuild_action = gio::ActionEntry::builder("diagnose-rebuild")
-        .activate({
-            let slot = slot.clone();
-            move |app: &adw::Application, _, _| {
-                let ui = window(app, &slot);
-                ui.window.present();
-                let (status, log) = rebuild::output(&ui);
-                ui.hold_draft(draft(&Subject::Rebuild(status), &log));
-            }
-        })
-        .build();
     let unit_action = gio::ActionEntry::builder("diagnose-unit")
         .parameter_type(Some(glib::VariantTy::STRING))
         .activate({
@@ -96,7 +85,7 @@ pub(crate) fn actions(slot: &Slot) -> Vec<gio::ActionEntry<adw::Application>> {
             }
         })
         .build();
-    vec![rebuild_action, unit_action, coredump_action]
+    vec![unit_action, coredump_action]
 }
 
 /// Runs the fixed argv, then holds the draft in the window.
@@ -127,20 +116,6 @@ async fn run(argv: &[String]) -> Option<(bool, Vec<u8>, Vec<u8>)> {
             None
         }
     }
-}
-
-/// The app's own `just rebuild` exited with a failure.
-pub(crate) fn rebuild_failed(app: &impl IsA<gio::Application>, wait_status: i32) {
-    if !settings().rebuild_failed {
-        return;
-    }
-    let n = gio::Notification::new("System rebuild failed");
-    n.set_body(Some(&format!(
-        "just rebuild {}",
-        describe_wait_status(wait_status)
-    )));
-    n.set_default_action("app.diagnose-rebuild");
-    app.send_notification(Some("rebuild-failed"), &n);
 }
 
 fn unit_failed(app: &adw::Application, unit: &UnitName) {

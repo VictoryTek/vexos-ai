@@ -8,10 +8,7 @@ description = "VexOS assistant panel: a GTK4/libadwaita window over the assistan
 
 [dependencies]
 adw = { package = "libadwaita", version = "0.9", features = ["v1_6"] }
-# vte4 0.10 uses gtk::Accessible (GTK 4.10) without enabling it; nixpkgs has 4.22.
 gtk = { package = "gtk4", version = "0.11", features = ["v4_18"] }
 tokio = { version = "1", features = ["rt-multi-thread"] }
 vexos-ai-core = { path = "../vexos-ai-core" }
 vexos-ai-viewmodel = { path = "../vexos-ai-viewmodel" }
-# v0_72: Terminal::text_range_format, to read a failed rebuild's output.
-vte = { package = "vte4", version = "0.10", features = ["v0_72"] }

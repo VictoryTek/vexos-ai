@@ -2817,3 +2817,176 @@ Exit 0 for each, on the final code. **rustc 1.95.0** (the devShell's; CI pins
 - **A double-click on the title or Super+Up** can still maximise a docked window.
   `gtk-decoration-layout` is read when the look is applied, so moving the title
   buttons while docked takes effect at the next mode toggle. Cosmetic.
+
+## Refinements
+
+2026-10-29. Three fixes from real use on a VM: the docked window did not visibly
+slide, Send was shorter than a tall input, and the "Run just rebuild" button was
+removed. Done under a scope rule: nothing written outside the repo (except
+`/nix/store`), no live-session run, no git writes, and no change to
+`nix/policy.nix`, `docs/contract.md`, CI, `crates/vexos-ai-core`, `bin/vexos-ai.sh`
+or any safety behaviour of the view-model. Tier 3, plan approved first. The
+nix checks ran on copies under `target/` (`tree-refine`, `tree-refine2`).
+
+### 1. Why no slide was visible
+
+Read from the GNOME Shell 50.5 and Mutter 50.5 sources (the locked nixpkgs
+revision), not from a running shell. See "What is untested" for what that means.
+
+- Mutter's `meta_window_show` (`core/window.c`) calls `meta_compositor_show_window`
+  with the create effect, which runs Shell's `_mapWindow` (`windowManager.js`)
+  synchronously, and only then emits `shown` (the extension's trigger).
+- `_mapWindow` is `async`. It sets the actor to scale 0.01 x 0.05 and opacity 0,
+  shows it, then does `await this._waitForOverviewToHide()`. The 150 ms ease of
+  opacity and scale (with `onStopped: _mapWindowDone`) starts only after that
+  await, in a promise job that runs after `shown` has returned. **My first fix
+  missed this**: I assumed the effect had already started when `shown` fired. The
+  reviewer found it; the fix is below.
+- `_mapWindowDone` ends with `remove_all_transitions()`, `translation_y = 0` and
+  `opacity = 255`. So the old code (translation set on `shown`, then eased) had its
+  parked offset reset at about 150 ms, or its own `remove_all_transitions()` ended
+  Shell's effect and left a 0 to 0 ease: a pop-in with no slide.
+- On Wayland `move_resize_frame` (`meta-window-wayland.c`) moves the window only
+  when the client acks the new size (`can_move_now`). Until then the window sits
+  at Mutter's first placement. So the window was visible, scaling in, at the wrong
+  place, and then jumped: the "normal window that snaps".
+
+**Why the earlier nested-shell test was not proof.** It read the actor's
+`translation_y` property (-800, -526, 0 at 1, 60 and 400 ms). That shows the
+property was animated, not that pixels were drawn sliding. It took no frames. The
+window was also already placed, so it never exercised the first-map race with
+Shell's effect, and it never saw Shell's reset.
+
+### 1. What changed (extension)
+
+- `layout.js` (pure, no imports): `SLIDE_MS` 250, `SLIDE_EASING` `EASE_OUT_QUAD`,
+  `FALLBACK_MS` 400, `slideStart(height, areaY, screenY)` (minus the window height
+  and the top bar, so the whole window is above the screen), `slideDecision`
+  (`abort` / `slide` / `show` / `wait`).
+- `extension.js`, docked first show: `Promise.resolve().then(...)` from the `shown`
+  handler queues the park behind Shell's own promise job (jobs run first in, first
+  out, from a GSource at priority -1000, ahead of any redraw). `_park` re-checks
+  the window is still tracked, ends Shell's effect (`remove_all_transitions()`),
+  sets opacity 0 and `translation_y = slideStart(...)` in the same turn, connects
+  `position-changed` and `size-changed`, then moves once. When a landing signal
+  arrives (one idle later) `_reveal` sets opacity 255, re-parks at the start offset
+  (ending a transition can reset the actor) and eases `translation_y` to 0 over
+  250 ms. A 400 ms timer reveals the window with no slide if nothing landed; an
+  exception reveals it too. The top bar is in the layout chrome above
+  `window_group`, so it draws over the sliding window.
+- Overview open: Shell holds its effect until the overview closes, so the park
+  would be overridden; the window is docked with the old single move and no slide.
+- Floating returns before anything is hidden. `disable()`, `_untrack`, a mode change
+  and the lock/adopt path cancel the timer, idle and signals and restore opacity 255
+  and translation 0. No window position is read during the slide.
+- Slide-up on hide: **skipped.** The app owns hide; animating first and then calling
+  toggle needs a second state machine for little gain, and the extension stays a
+  thin client that only calls toggle.
+
+### 2. Send button
+
+`send.set_valign(Fill)` (was `End`) plus the fixed class `vexos-send`
+(`button.vexos-send { border-radius: 14px; }`). The composer row is as tall as the
+input's scroller (one line up to the 200 px cap), so Send now spans it. Width,
+signals, Enter and Shift+Enter, and the draft gating are untouched. Not seen on a
+screen (see below).
+
+### 3. "Run just rebuild" removed
+
+Map of what existed only for it, and what was kept:
+
+- Deleted: `crates/vexos-ai-panel/src/rebuild.rs` (VTE window, confirmation
+  dialog, run, output read) and `crates/vexos-ai-viewmodel/src/rebuild.rs` (state
+  machine, fixed command, `describe_wait_status`).
+- `main.rs`: the header button, the `rebuild`/`rebuild_view` fields, the click
+  handler, the sensitivity update. Panel `notify.rs`: the `diagnose-rebuild`
+  action and `rebuild_failed()`. View-model `notify.rs`: the `rebuild-failed`
+  setting (an old line in `notifications.conf` is now an unknown key and ignored;
+  tested). `diagnose.rs`: `Subject::Rebuild`, `Missing::OutputGone`, and the draft
+  text for them.
+- `vte4` and `vte4-sys` (and the orphaned `io-lifetimes`) are out of `Cargo.toml`
+  and `Cargo.lock`, `vte-gtk4` out of `nix/panel.nix` and the `flake.nix` devShell.
+- Shared and left alone: `excerpt`, `Log`, `Missing` (other variants), `draft`,
+  `Subject::Unit` and `Coredump`, the unit and coredump notifications and
+  watchers, the draft banner and composer, the notifications settings file and its
+  other keys, `redact.rs`. Not touched: the CLI (`vexos-ai notify rebuild-failed`),
+  the contract, the policy, and `nix/module.nix` text about the user running
+  `just rebuild`.
+- Docs: `assistant_panel_app_spec.md` and `notifications_spec.md` start with an
+  update note (removed, and why: applying changes stays a terminal action, `just
+  rebuild`); `docs/spec.md` has a short note.
+- No help text, tooltip or desktop entry mentioned the button (grep of the repo:
+  the remaining "rebuild" hits are the CLI, the policy, the skills, docs history,
+  `spike/`, and a prompt-injection test fixture).
+- The panel still cannot run anything that applies system changes: the new scan
+  `the_panel_has_no_way_to_rebuild_the_system` forbids `vte`, `Rebuild`, `"just"`,
+  `nixos-rebuild`, `spawn_async`, `spawn_command_line`, `AppInfo`, `launch_uri`,
+  `Terminal` and `Command::new` in the panel sources and manifest, and requires
+  exactly one `Subprocess::newv(` (the fixed journalctl/coredumpctl argv).
+
+### Tests and mutation checks
+
+- Node: 21 tests (14 before, 7 new): `slideStart`, `slideDecision`, constants, bad
+  numbers, and source scans for the park/reveal order, the deferral behind Shell's
+  job, the overview case, floating returning first, no position read.
+- Rust: panel 23 (+1 ignored), view-model 168; the new scans
+  `the_panel_has_no_way_to_rebuild_the_system` and
+  `send_fills_the_input_row_with_a_fixed_class`, and an assertion that
+  `rebuild-failed` is an ignored key.
+- Mutations on copies under `target/mut-refine*`: **JS 17 of 17 caught** (plus a
+  no-op control that survived, as it should): slide sign, bar ignored, decision
+  order, no timeout fallback, a timeout that slides, duration, easing, fallback
+  length, a second hide, floating parking, park not deferred, overview not handled,
+  reveal not re-parking, never armed, a failure leaving the window hidden, the timer
+  never removed, a closed window not skipped. **Rust 9 of 9 caught**: `vte` in
+  main, `Command::new`, a `"just"` argv, a second `Subprocess::newv`, Send valign
+  back to `End`, the Send class dropped, the css rule dropped, `RebuildCommand` back
+  in the view-model, the `rebuild-failed` key revived. Mutation runs found weak
+  tests and fixed them: `indexOf` returning -1 passed three ordering checks, and the
+  settings key order hid a revived key.
+
+### Review
+
+Independent `reviewer` subagent, given the plan and the files.
+
+- **Round 1: NEEDS REFINEMENT, one CRITICAL**: Shell's map ease starts after
+  `shown` returns (above), so the park was overridden. Also RECOMMENDED: the
+  overview case, a test slice with index -1, and a rebuild scan that missed other
+  launch APIs. All fixed.
+- **Round 2: PASS**, no CRITICAL. It checked the ordering against Shell/Mutter
+  50.5 and GJS promise-job order, and every cleanup path. RECOMMENDED, noted here:
+  if the app takes longer than 400 ms to accept the resize (a cold first launch is
+  plausible), the window is shown at Mutter's first placement with no slide and
+  then jumps when the resize lands, which is the old snap in that slow case. It
+  also noted existing behaviour: on `disable()` (screen lock) a docked window is
+  first moved to its floating size and `enable()` docks it again, two visible moves.
+
+### What is untested
+
+- **The slide on a real screen, and on any screen at all.** I built a nested
+  headless GNOME Shell 50.5 harness (`target/devkit-refine/`, private buses,
+  `env -i`, a helper extension that logs the actor's opacity and translation and
+  saves PNG frames). The shell started and created a software renderer, but it
+  could not create its Wayland socket: `bind() failed: Operation not supported`,
+  because the repo is on a Windows drive under WSL and that filesystem cannot hold
+  a socket. The only fix is a runtime directory outside the repo, which the scope
+  rule forbids. **So there are no screenshots and no logs of the new slide.** The
+  cause above comes from the source, and the fix is checked by node scans, mutation
+  tests and two reviews, not by seeing it run.
+- The Send button on a screen, with the input growing and shrinking.
+- Other monitors, HiDPI, the overview-open path, a client that acks the resize
+  after 400 ms, and the slide with a real agent.
+
+**Check it on the VM (three steps):**
+
+1. Install the new build and re-enable the extension (`gnome-extensions disable`
+   then `enable vexos-assistant@victorytek.github.io`, or log out and in). Close
+   the panel completely.
+2. Press the shortcut or the Assistant tile once. The window should come down from
+   under the top bar over about a quarter of a second, with the top bar drawn over
+   it, and never show a frame in the middle of the screen. For a slow look, in
+   Looking Glass (`lg`) run `St.Settings.get().slow_down_factor = 6`.
+3. Hide and show it again, then switch to floating with the header button and show
+   it again: docked slides each time, floating appears normally. Then type several
+   lines and check that Send is as tall as the input.
+
