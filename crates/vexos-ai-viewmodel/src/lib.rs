@@ -47,8 +47,8 @@ mod window;
 pub use composer::{Composer, Draft, Offer, Outgoing, Placement, Via};
 pub use conversation::{
     AGENT_FILE, Answer, ApprovalCard, ClickError, Conversation, Decider, Empty, Item, NO_REPLY,
-    NOT_SENT, Sent, State, ToolCard, USAGE_COMMAND, USAGE_NOT_SENT, agent_label, choice_label,
-    mode_label, parse_agent, saved_agent,
+    NOT_SENT, Sent, Startup, State, ToolCard, USAGE_COMMAND, USAGE_NOT_SENT, agent_label,
+    choice_label, mode_label, parse_agent, saved_agent, since_process_start,
 };
 pub use diagnose::{
     BEGIN, Crash, END, Excerpt, INSTRUCTION, Log, Missing, Subject, UnitName, core_file,

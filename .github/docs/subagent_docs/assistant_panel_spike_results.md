@@ -2990,3 +2990,415 @@ Independent `reviewer` subagent, given the plan and the files.
    it again: docked slides each time, floating appears normally. Then type several
    lines and check that Send is as tall as the input.
 
+
+## Launch speed
+
+2026-10-29. Why the panel takes a few seconds to appear after Super+F12 on a
+real VM, and what was fixed. Done under a scope rule: nothing written outside
+the repo (except `/nix/store`), no run in the live session (PID 1960 on this
+host is the real GNOME Shell; none of it was touched), no git writes, and no
+change to `nix/policy.nix`, `docs/contract.md`, CI, `crates/vexos-ai-core`, the
+extension or its slide logic, or any safety behaviour. Tier 3, plan approved
+first. The finding from the VM: the whole window appears at once, a few seconds
+after the key, with no "Starting" frame first, so the delay is **before the first
+frame**, not in the agent spawn.
+
+**Short answer.** In this isolated test the path to a visible window costs about
+0.3 s, so a few seconds on the VM is not our code's own work. What I measured
+and what I could not:
+
+- Measured here: process start to `main` 0.03 s (wrappers and linking), GTK and
+  libadwaita ready by 0.09 s, our window build 0.01 s, then `present()` to
+  *mapped* 0.21 s, first frame 0.01-0.02 s later. **The renderer is the big lever**:
+  the same launch mapped at 0.31 s with GTK's default (Vulkan), 0.13 s with
+  `GSK_RENDERER=cairo` and 0.17-0.20 s with `gl`. This host has real GPUs; a VM
+  with software Vulkan (lavapipe) or software GL will pay more, which is my
+  hypothesis for the VM and is **not measured**.
+- Fixed: on a machine with few CPUs, starting the agent *before* the first frame
+  made the first frame wait. With the panel on one CPU and an agent that burns CPU
+  for 2 s, the window was created at 0.67-0.72 s instead of 0.31 s. The agent now
+  starts after the first frame (or after 3 s if no frame comes).
+- Not the extension: see "Slide" below.
+
+### 1. The path, step by step
+
+Times are from the isolated nested GNOME Shell run (section 3): warm Nix store,
+this host's GPU, a fake agent. "Blocks" means: must finish before the first frame.
+
+| # | Step | What it does | Blocks? | Measured / expected |
+|---|---|---|---|---|
+| 1 | Extension `_toggle()` | `ActivateAction('toggle')` over D-Bus by app id, async (`extension.js:136-148`) | yes | < 1 ms in the Shell (not timed) |
+| 2 | D-Bus activation | no owner for the name, so the bus runs `Exec=<wrapped>/vexos-ai-panel --gapplication-service` (`nix/module.nix:42-49`, `nix/panel.nix:44-54`) | yes | the reply to the call arrives about 0.31 s later; `main` is reached 0.03 s after the process started |
+| 3 | Wrappers | the module's wrapper is a **bash script** (`pkgs.makeWrapper`, `nix/module.nix:43-44`: PATH), which `exec`s `wrapGAppsHook4`'s **compiled C wrapper** (GIO modules, `XDG_DATA_DIRS`, pixbuf), which `exec`s the binary. Earlier I wrote that both were bash; the second is not | yes | `--help` of the whole chain 28.0-28.4 ms, of the raw binary 24.5-26.5 ms (50 runs each, warm): the wrappers cost about 1-4 ms |
+| 4 | Process start and linking | exec, dynamic linking of GTK, libadwaita, GL and Vulkan loaders | yes | about 25 ms warm (the `--help` figure above); cold page cache **not measured** |
+| 5 | `main` to GTK ready | `adw::Application` registers on the session bus, then `gtk_init` and libadwaita init, before our startup handler (`main.rs:94-110`) | yes | 0.06 s (main 0.03 s, ready 0.09 s) |
+| 6 | Our startup handlers | stylesheet parse (`style.rs:12`), watchers only if switched on (`notify.rs:145`) | yes | about 0 ms (stylesheet 0.09 s, same tick as ready) |
+| 7 | `toggle` to `window()` to `Ui::build` | widgets, schema lookup and a dconf-backed `Settings`, `bus_watch_name` (async), `apply_look` (`main.rs:138-143`, `:255-560`) | yes | 0.01 s (requested 0.09-0.10 s, built 0.10 s) |
+| 8 | `start()` | creates the conversation, reads the agent file (at most 64 bytes) and the panel settings once (`main.rs:654-675`) | no | negligible. **Before this change it also spawned the agent here**; see step 10 |
+| 9 | `present()` | realize (Wayland surface, **renderer creation**, CSS for every node), map, layout, first paint | it is the first frame | mapped 0.31 s, first frame 0.32-0.33 s: **+0.21 s** over `built` |
+| 10 | Agent spawn | `Session::spawn` on the tokio runtime (`main.rs:679-687`); now from `begin_start`, after the first frame | not any more | before the change: ready 0.31 s (instant fake). After it: requested 0.32 s, ready 2.34 s (fake agent burning 2 s of CPU) |
+| 11 | Shell maps the window | the extension parks it hidden, moves once, reveals when the move lands (or after `FALLBACK_MS` 400 ms), then slides 250 ms | adds | `shown` 19-39 ms after `created`; slide moving 4-8 ms after `shown`; settled about 0.26 s later |
+
+**What the library sources say** (GTK 4.22.4, libadwaita 1.9.3, glib 2.88.3, read
+from the source in `/nix/store`): these are synchronous and have no timeout.
+
+- `gdk/wayland/gdksettings-wayland.c:442-466`: `g_dbus_proxy_new_for_bus_sync`
+  for `org.freedesktop.portal.Desktop` (auto-start allowed), then a `ReadAll`
+  call with `G_MAXINT` as the timeout. If the portal is not running yet it is
+  started, and GTK waits for it.
+- `gtk/a11y/gtkatspicontext.c:1873-1890`: `g_bus_get_sync` and a `GetAddress`
+  call to `org.a11y.Bus`, timeout -1, also auto-started.
+- `gdk/gdk.c:464-478`: `ListActivatableNames` (timeout 25 s) to decide whether
+  to use portals at all.
+- libadwaita `src/adw-settings.c:265` and `adw-settings-impl-portal.c:57`: its
+  own sync proxy and call to the same portal.
+- `gsk/gskrenderer.c:714-725`: the renderer is chosen in this order: Vulkan, then
+  GL, then the Vulkan and GL fallbacks, then Cairo, unless `GSK_RENDERER` says
+  otherwise.
+
+Fixed costs I could not isolate: the fresh-session run in section 3 showed no
+extra cost, but I did not check whether the portal, the accessibility bus and
+`gvfs` were already running by then. One that is slow to start on the first login
+of a VM would be paid inside step 5. Switching the portal and
+accessibility calls off (`GDK_DEBUG=default-settings`, `GTK_A11Y=none`) saved
+only about 45 ms here (0.31 to 0.27 s) with those services warm.
+
+### 2. Blocking work before the first frame, in our code
+
+All of it is small. Nothing here is "seconds".
+
+- `main.rs:94-110`: stylesheet load in the startup handler, about 0 ms.
+- `main.rs:138-143` and `:255-560`: `Ui::build`, 0.01 s: a schema lookup
+  (`:271`), one dconf `Settings`, a 30 s timer (`:472`), `bus_watch_name`
+  (`:537`, answered later, off the critical path), `apply_look`.
+- `main.rs:157-161`: `saved_agent` (a read of at most 64 bytes) and
+  `panel_settings` (read once, `OnceLock`).
+- `notify.rs:145`: `start_watchers` runs in the startup handler, but does
+  nothing unless a watcher is switched on (it is off by default).
+- The extension-presence check is `bus_watch_name` (async): not blocking.
+- Duplicate work: none found. Settings are read once; `window()` returns the
+  existing window on a second call.
+- Spawning the agent was the one avoidable cost: it was issued before
+  `present()`, on the main thread's way to the first frame (see section 4).
+
+### 3. Measurements
+
+Harness: the nested headless GNOME Shell 50.5 from "Docked window" (`target/devkit/`:
+`env -i`, a private session bus and an empty stand-in system bus, everything under
+`target/`), now on a native Linux filesystem, so its Wayland socket works (it did
+not on `/mnt/c`, see "Refinements"). The panel was D-Bus activated from a service
+file pointing at the build under test, with the module's real wrapper chain. A
+fake agent on `PATH`; no real agent, no credentials, no real home. A driver script
+(kept outside the repo) timed, on the Shell's monotonic clock, the toggle call, the
+reply, `window-created`, `shown`, and the actor's opacity and translation (polled
+every 4 ms). The panel's own numbers come from the new tooltip (below), read in
+screenshots (`target/devkit/shots-launch/`, not committed).
+
+Cold process (the panel closed first), default renderer, warm cache, ms after the
+toggle call (5 runs):
+
+| Run | reply | created | shown | slide moving | settled |
+|---|---|---|---|---|---|
+| 1 | 324 | 321 | 360 | 368 | 626 |
+| 2 | 305 | 303 | 322 | 327 | 592 |
+| 3 | 333 | 331 | 350 | 354 | 618 |
+| 4 | 331 | 330 | 366 | 374 | 634 |
+| 5 | 310 | 308 | 328 | 336 | 595 |
+
+Hidden to shown (5 runs): reply 10-12 ms, `shown` 27-29 ms, settled 294-297 ms
+(almost all of it the 250 ms slide).
+
+**The tooltip, read from a screenshot** (cold, default renderer, before the agent-start change):
+"Since the process started: main 0.03 s, GTK ready 0.09 s, stylesheet 0.09 s, window
+requested 0.09 s, built 0.10 s, mapped 0.31 s, first frame 0.33 s, agent start
+requested 0.10 s, ready 0.31 s".
+
+**Renderer** (`GSK_RENDERER`, three runs each, ms after the toggle, `created` is the
+window being mapped): default 312-336 (the default is Vulkan here: `vulkan` gave
+the same 304-312); `cairo` 130-131; `gl` 174-196 (and `shown` came 53-253 ms after
+`created`, against 19-39 ms for the default renderer). Settled: default about 600-620, cairo about 416,
+gl 495-702.
+
+**First launch in a fresh Shell session** (whether the portal, a11y and `gvfs` had
+already started was not checked):
+`created` 317 and 308 ms, no different from the warm runs. With `GTK_A11Y=none` and
+`GDK_DEBUG=default-settings`: 271 and 261 ms.
+
+**CPU contention** (the panel pinned to one CPU with `taskset -c 0`, so is the
+agent; the fake agent either answers at once or burns 2 s of CPU first). `created`
+and settled, ms after the toggle:
+
+| Case | created | settled |
+|---|---|---|
+| one CPU, no agent on `PATH` (spawn fails at once) | 313-322 | 599-625 |
+| one CPU, normal fake agent | 323-344 | 609-632 |
+| **before the fix**, one CPU, agent burns 2 s | **669-724** | **1040-1129** |
+| all CPUs, agent burns 2 s | 319-338 | 605-624 |
+| **after the fix**, one CPU, agent burns 2 s | 312-327 | 614-652 |
+| after the fix, one CPU, normal fake agent | 317-325 | 603-612 |
+| after the fix, all CPUs, normal fake agent | 305-329 | 592-615 |
+
+After the fix the tooltip for the burning case read: first frame 0.32 s, agent
+start requested 0.32 s, ready 2.34 s, and "Claude is ready" showed. So the window
+is up at the same time whatever the agent does, and the agent still starts and
+becomes ready (2.0 s after its start, as it burns 2 s). I did not record the
+before-the-fix ready time for the burning case, so I cannot say how much later
+it is than it used to be; the spawn used to be issued at about 0.10 s and now at 0.32 s, so the delay should
+be at most that gap, about 0.2 s here (an estimate).
+
+**Idle memory** (for the options below), the panel with its window shown and a
+fake agent: 190 MB resident, of which 34 MB private (`RssAnon`) and 157 MB
+file-backed, mostly shared libraries that other processes map too. 27 threads. The
+fake agent (Python) 12.7 MB. A real `claude-agent-acp` is Node and not measured.
+
+**Not measured, and why it matters:**
+
+- **The real VM's renderer, GPU and CPU count.** This host has real GPUs and 16
+  threads. The two things that I found to matter (the renderer's first-frame cost
+  and few-CPU contention) are exactly what a VM changes.
+- **A cold Nix store or page cache** (dropping caches needs root, outside the scope
+  rule). The first start after boot reads GTK, libadwaita, Mesa and the Vulkan
+  ICDs from disk; on a VM disk that can be seconds, and it is paid in steps 3-5.
+- **The real session's portal and accessibility bus** starting on demand (above).
+- **The real agents** (Node start-up, `opencode`) and the real `claude-agent-acp`.
+- **D-Bus activation by the real broker**: the nested run used `dbus-daemon`;
+  this host runs `dbus-broker`, which starts services as transient systemd units.
+- The pixels: all times are signal and property times, not frames shown on a
+  screen. The first-frame time is GTK's `after-paint`, not the compositor's
+  presentation.
+
+### 4. What changed
+
+Low-risk only, and only the one cause that the data showed in our code.
+
+- **Timing, shown only in the title tooltip** (`launch_summary`, its one
+  consumer, as before; never printed, logged, stored or sent):
+  `crates/vexos-ai-viewmodel/src/conversation.rs` has `Startup`,
+  `since_process_start` (pure: the process start time from field 22 of
+  `/proc/self/stat` against `/proc/uptime`, counted after the last `)`),
+  `built`, `mapped`, `first_frame`. The summary is now available from the first
+  frame, not only when ready, and for the first window of a process lists, from
+  the process start: main, GTK ready, stylesheet, window requested, built, mapped,
+  first frame, agent start requested, ready. A later window of the same process
+  is counted from its request. `main.rs` reads the two `/proc` files (read only),
+  marks the startup handler, and records `map` and the first `after-paint` of the
+  window's frame clock, then disconnects.
+- **Agent start after the first frame.** `start()` now only creates the
+  conversation and sets `pending_start`; `begin_start()` takes it (so it runs once)
+  and calls `Session::spawn`. It is called from the first-frame hook, or by a 3 s
+  deadline timer if no frame comes (`START_DEADLINE`, `main.rs:32`), and closing
+  the window first cancels it (`close_session`). Same agent, same arguments, same
+  pinned modes, same gate: only the moment moved. `spawn_requested` is recorded
+  when the spawn is really issued.
+- Not changed: the renderer. `GSK_RENDERER` is a user decision (below).
+- Tests: view-model: 2 new launch tests (the first window's process timeline; the
+  `/proc` parser: names with spaces and `)`, short, empty, non-numeric, negative,
+  NaN, infinite and huge input, a start time in the future, and two-decimal uptimes
+  such as 0.29 that a floor would be a tick short on, found by the reviewer) and 1
+  changed (summary ordering and once-only; the old test required "None before
+  ready"). Panel scans: `/proc` read in one place and read only; the first-frame
+  hook only records and starts the agent; the agent is spawned only in
+  `begin_start`, once, reached only from the hook and the deadline timer, after
+  `first_frame` is recorded, cleared on close; the existing timer scan now expects
+  three timers and exactly one with the deadline. Existing scans updated: `start`
+  and `begin_start` both touch no composer, input or prompt.
+
+### 5. Slide: is the window late because of the extension's timer, or the app?
+
+**The app is late; the extension is not what holds it.** Nothing was changed in
+the extension or its slide logic.
+
+- The extension can only act once the window exists: it reacts to `shown`
+  (`extension.js:165-185`, `:220-223`). Its 400 ms `FALLBACK_MS` timer is armed in
+  `_armSlide`, called from `_park`, which runs after `shown`
+  (`extension.js:366-429`, `layout.js:68`). So it cannot delay anything before the
+  app's first frame; it cannot add seconds before the window appears.
+- Measured, the default-renderer cold launches in the table in section 3 (not the
+  `gl` runs, where `shown` was later): `shown` came 19-39 ms after `created`; the
+  slide was moving 4-8 ms after `shown` (the landing signal won; the 400 ms timer
+  never fired); settled about 260 ms after that (the 250 ms slide). Hidden to
+  shown: `shown` 27-29 ms after the toggle, settled 294-297 ms.
+  Cold launch to settled: 0.59-0.63 s, of which 0.31 s is the app getting its
+  window up.
+- What the extension does add: at most about 0.4 s of the window being invisible
+  while it waits for the move to land (the fallback), and the 250 ms slide. On a VM
+  whose frames are very slow, the app may take longer than 400 ms to acknowledge
+  the resize; then the window shows at its first placement and jumps (the case the
+  reviewer noted in "Refinements"). That is possible and **not measured**; it
+  would add a fraction of a second, not seconds.
+- With the Overview open the extension docks without the slide (by design). The
+  nested shell starts in the Overview, which hid the slide in my first runs; I
+  closed it for every run reported here.
+
+### 6. The bigger options (not implemented; for you to decide)
+
+Numbers are from section 3 (this host, a fake agent); the real agent is not
+measured.
+
+**A. Keep the panel running, hidden, from login.** A user service (or autostart)
+runs `vexos-ai-panel --gapplication-service`; the first toggle only shows a window.
+
+- Saves: process start, linking, wrappers, GTK/libadwaita init and, at login
+  instead of at first use, the portal, accessibility bus and cold-disk reads (about
+  0.1 s here; much more on a cold VM disk). It does **not** save `present()` to map
+  (0.21 s here) unless the window is also created and realized hidden at login.
+  Hidden to shown measured 10-12 ms to the app, which shows what a pre-built window
+  costs. Whether GTK can realize a window without showing it on Wayland was not
+  tested.
+- Memory: about 34 MB private (`RssAnon`) for the process with a window, 27
+  threads; its 157 MB of file-backed pages are shared libraries, mostly shared with
+  the Shell and other apps. A pre-built window adds its renderer and GPU context
+  (not measured).
+- Battery: an idle process, but it is no longer idle for free: the usage line's
+  30 s timer (`main.rs:472`) would wake it every 30 s while hidden unless it is
+  paused when hidden; the notification watchers poll every 60 s if switched on.
+- Safety: **no new exposure**. No agent, no session, nothing to approve; the
+  window and the gate are as today. One more long-lived process of the user's own.
+  It needs the module to ship the service (`nix/module.nix`, `checks.module`).
+  Closing the window must keep ending the session, and the process must stay up.
+
+**B. Start the agent before the window is requested.** At login, start the saved
+agent and a session with no prompt, so the first window is ready at once.
+
+- Saves: the agent's start-up, which is the one thing a user waits for after the
+  window is up. It does **not** help what you saw (a late first frame), and on few
+  CPUs a start at login competes with everything else logging in.
+- Memory: a live agent, resident all session. Not measured for the real agent; a
+  Node process is likely over 100 MB (this is an estimate, not a measurement).
+- Battery and network: a resident Node process, and `usage_on_launch` would have to
+  be held back so it does not call the API at login without the user.
+- Safety: **the largest surface of the three.** A live session with the user's
+  credentials and a pinned mode, with nobody looking. Approvals could arrive with
+  no window to show them; the "deny by default" and pinned-mode rules would need
+  proving for a session with no window, and "closing the window ends the session"
+  would need rethinking. Every scan that says "starting is not sending" would need
+  to be re-argued.
+
+**C. (A third, cheaper one.) The renderer.** `GSK_RENDERER=cairo` in the panel's
+wrapper (one `--set` in `nix/module.nix`) took the first window from 0.31 s to
+0.13 s here, and removes Vulkan/GL shader compilation, which is the likeliest big
+cost on a VM with software Vulkan. Cost: the window is drawn on the CPU (fine for a
+text window; a long scrolling transcript at high resolution is the case to try).
+No safety effect. It is your call and I have not set it; it can be tried without a
+rebuild by starting the panel by hand with `GSK_RENDERER=cairo vexos-ai-panel`
+(close it first; the next start by D-Bus is back to the default).
+
+**Recommendation:** read the tooltip on the VM first (next section), because the
+three options fix different parts and I could not measure the VM.
+
+- If **mapped minus built** is large (a second or more): C first, it is the
+  smallest and safest change and it is exactly that step.
+- If **main** or **GTK ready** is large: A, because that is process start,
+  linking and the portal and accessibility waits, which A moves to login.
+- Not B: it does not touch what you saw and it adds the most risk.
+
+If I must pick one of the two you asked about: **A**.
+
+### 7. Reading the numbers on the VM
+
+Install the build, close the panel, press the shortcut, and when it is up hover
+over the title ("VexOS Assistant") for a second. The tooltip reads like this (the
+numbers above, here with the agent started after the first frame):
+
+> Since the process started: main 0.03 s, GTK ready 0.09 s, stylesheet 0.10 s,
+> window requested 0.10 s, built 0.10 s, mapped 0.31 s, first frame 0.32 s, agent
+> start requested 0.32 s, ready 2.34 s
+
+Each time is from the start of the process, so differences are the steps:
+
+- big **main**: wrappers, linking, cold disk (steps 3-4);
+- big gap to **GTK ready**: app registration, GTK and libadwaita init, a portal or
+  accessibility bus being started (step 5);
+- big gap from **built** to **mapped**: realize and the renderer (step 9);
+- **mapped** to **first frame**: layout and the first paint;
+- **window requested** much later than **stylesheet**: the toggle reached an
+  already running process late.
+
+A second window in the same process (hide then show does not make one; close then
+open does, in a new process) says "process already running" and counts from the
+request. The tooltip shows nothing until the first frame is painted. It is only
+ever the title's tooltip: never printed, logged, stored or sent (scan-tested).
+
+### 8. Mutation checks
+
+35 mutants on a copy of the tree (`target/mut-launch`, never the repo files; the
+baseline passed first; each mutant restored afterwards). **All caught in the
+end.** Parser: name parsed from the first `)`, off-by-one field, USER_HZ 1000, a
+wrong tick scale, a future start accepted, uptime floored instead of rounded;
+summary: shown before the first frame, needing ready again, `before_main` ignored,
+base ignoring `main`, each of the first-frame, mapped and spawn labels dropped, the
+origin label swapped, built, mapped, first-frame and spawn times overwritten;
+agent start: spawned in `start`, taken with `get` not `take`, the hook not
+starting it, the deadline timer removed or changed to 30 s, close not cancelling
+it (and the cancel moved below the early return), started before the first frame
+is recorded, the frame handler never disconnecting, its id never stored,
+`first_frame` never recorded; scans: a `/proc` read in `notify.rs`, a second one
+in `main.rs`, timing printed, the hook touching the composer, the hook writing a
+file, the startup timeline copied instead of taken.
+
+Misses on the way, all mine and all fixed:
+
+- "Future start accepted" survived: the extra guard in `since_process_start` was
+  dead code, because `Duration::try_from_secs_f64` already refuses negative, NaN,
+  infinite and huge values. The guard is gone; a replacement mutant (taking the
+  absolute value) is caught.
+- "Startup timeline taken twice" survived (a later window of the same process would
+  have been labelled "since the process started"): a scan now requires
+  `STARTUP.take()`.
+
+### 9. Review
+
+Independent `reviewer` subagent, given the approved plan and the changed files.
+
+- **Round 1: PASS**, no CRITICAL; four RECOMMENDED, all fixed. A real bug: the
+  uptime was floored, so about 6 % of launches showed every process-relative time
+  one tick (0.01 s) short (now rounded, with a test on 0.29, 0.57, 1.13 and 4.35).
+  The "cancelled on close" scan did not pin where the clear sits, the frame
+  handler's disconnect was not pinned, and an ordering check could pass when the
+  thing it looked for was missing. Two doc inaccuracies (the new-test count, and
+  the range of `shown`).
+- **Round 2: PASS**, no CRITICAL; the fixes verified. Seven RECOMMENDED, all fixed:
+  `handler.set(Some(id))` not pinned (a deletion would stop the disconnect), a test
+  comment that said the hook starts nothing (it calls `begin_start`), and doc
+  statements stronger than the data (the fresh-session wording, the 4-14 ms figure,
+  the `gl` range, step 10 mixing before and after, an unsupported "ready when it
+  would have been").
+- **Round 3: PASS**, no CRITICAL, on the final code; four one-line doc wording
+  items, fixed (ready delay "about 0.2 s, an estimate", the settled range, the
+  `shown` range, "0.01-0.02 s later"). Those four edits were made after the last
+  review run and are doc-only.
+- Noted by the reviewer, outside this change and not touched: closing the window
+  while the agent is still starting leaves the late-finishing session running
+  (`begin_start`'s future stores it after `close_session` found none). It was
+  already so before, in `start`; the process normally exits with its last window,
+  but not while a notification watcher holds it open.
+
+### 10. Checks run
+
+Rust **1.95.0** (the devShell's; CI pins 1.95.0), Nix in this host's NixOS, the
+repo on a native Linux filesystem. Exit 0 for each, on the final code:
+
+- `cargo build --all-targets`, `cargo test` (core 3 + 43, panel 25 + 1 ignored,
+  view-model 170), `cargo clippy --all-targets -- -D warnings`,
+  `cargo fmt --all --check`.
+- `scripts/preflight.sh` (on the git tree; no new files, so no copy was needed):
+  `nix build`, `checks.x86_64-linux.{policy,contract,core,panel,module,extension}`
+  one by one, the module `nix eval`, and rustfmt. Which of these came from the
+  store and which were rebuilt was not recorded; `core` and `panel` inputs changed,
+  so those were rebuilt.
+
+**What did not run:**
+
+- `nix flake check` (forbidden). The ignored GTK stylesheet test
+  (`style::tests::the_stylesheet_parses_without_errors`; the stylesheet did not
+  change).
+- The panel in the user's session, a real agent, the VM, a cold Nix store, the real
+  D-Bus broker's activation, real frames on a screen (see section 3).
+- The measurements are from one run of each case on one machine. The numbers are
+  evidence about where time goes here, not a benchmark.
+- Files outside the repo: only `/nix/store` (sources and builds) was written. The
+  nested-shell session and the scripts that drove it live under `target/` and the
+  session's scratch directory; the nested shell was stopped with `target/devkit/stop.sh`
+  and none is left running. An earlier nested shell crashed once (a compositor
+  disconnect after a screenshot); I restarted it, and the runs reported here came
+  from the sessions after that.

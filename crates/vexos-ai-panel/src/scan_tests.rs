@@ -215,7 +215,15 @@ fn usage_is_sent_only_at_launch_and_from_its_line() {
             &rest[..rest.find("});").expect("timer end")]
         })
         .collect();
-    assert_eq!(timers.len(), 2);
+    // The two usage timers, and the deadline that starts the agent.
+    assert_eq!(timers.len(), 3);
+    assert_eq!(
+        timers
+            .iter()
+            .filter(|t| t.contains("START_DEADLINE"))
+            .count(),
+        1
+    );
     for timer in timers {
         for word in [
             "check_usage",
@@ -375,18 +383,22 @@ fn the_panel_cannot_write_or_switch_the_agent_choice() {
 fn a_started_session_sends_no_text() {
     // Starting a session only spawns the agent; nothing in `start` or in the
     // window's opening touches the input, the composer or a prompt.
-    let start = body("start");
-    for word in [
-        "composer",
-        "submit",
-        "send_prompt",
-        "input",
-        "check_usage",
-        "take_launch_usage",
-        ".prompt(",
-        "Outgoing",
+    for (name, start) in [
+        ("start", body("start")),
+        ("begin_start", body("begin_start")),
     ] {
-        assert!(!start.contains(word), "{word:?} in start");
+        for word in [
+            "composer",
+            "submit",
+            "send_prompt",
+            "input",
+            "check_usage",
+            "take_launch_usage",
+            ".prompt(",
+            "Outgoing",
+        ] {
+            assert!(!start.contains(word), "{word:?} in {name}");
+        }
     }
     let main = code(MAIN);
     assert_eq!(main.matches("Session::spawn(").count(), 1);
@@ -579,4 +591,91 @@ fn send_fills_the_input_row_with_a_fixed_class() {
     assert!(main.contains("send.set_valign(gtk::Align::Fill);"));
     assert!(!main.contains("send.set_valign(gtk::Align::End)"));
     assert!(include_str!("style.css").contains("button.vexos-send {"));
+}
+
+#[test]
+fn launch_timing_reads_only_the_process_clock_and_the_hook_does_nothing_else() {
+    let main = code(MAIN);
+    // The process age is read from two /proc files, in one place, read only.
+    for path in ["\"/proc/self/stat\"", "\"/proc/uptime\""] {
+        assert_eq!(main.matches(path).count(), 1, "{path}");
+        for (name, file) in [("notify.rs", NOTIFY), ("style.rs", STYLE)] {
+            assert!(!code(file).contains(path), "{path} in {name}");
+        }
+        for (name, file) in VIEWMODEL {
+            assert!(!shipped(file).contains(path), "{path} in {name}");
+        }
+    }
+    assert_eq!(main.matches("fs::read_to_string(\"/proc").count(), 2);
+    assert_eq!(main.matches("since_process_start(").count(), 1);
+    // Only the first window of a process gets the process timeline: the cell
+    // is emptied, not copied.
+    assert_eq!(main.matches("STARTUP.take()").count(), 1);
+    assert_eq!(main.matches("STARTUP.with(").count(), 1); // `mark`
+    // The first-frame hook records the time and then calls `begin_start` (the
+    // one thing that starts the agent, pinned in the test below); it names no
+    // composer, prompt, session, agent, runtime or file itself.
+    let from = main.find("fn time_first_frame(").expect("hook");
+    let hook = &main[from..];
+    let hook = &hook[..hook.find("\n}\n").expect("end of hook")];
+    assert_eq!(hook.matches("connect_after_paint(").count(), 1);
+    assert_eq!(hook.matches("connect_map(").count(), 1);
+    for word in [
+        "submit",
+        "send_prompt",
+        "composer",
+        "prompt(",
+        "session",
+        "Session",
+        "agent",
+        "runtime()",
+        "spawn",
+        "fs::",
+        "File",
+    ] {
+        assert!(!hook.contains(word), "{word:?} in time_first_frame");
+    }
+    // Both hooks run for the one window `window()` builds, and the callers
+    // that open the window do not time anything themselves.
+    assert_eq!(main.matches("time_first_frame(&ui)").count(), 1);
+}
+
+#[test]
+fn the_agent_starts_after_the_first_frame_or_at_the_deadline_and_never_twice() {
+    let main = code(MAIN);
+    // `start` only prepares: the one spawn is in `begin_start`.
+    let start = body("start");
+    assert!(!start.contains("Session::spawn(") && !start.contains("runtime()"));
+    let begin = body("begin_start");
+    assert_eq!(begin.matches("Session::spawn(").count(), 1);
+    // Once: the pending agent is taken first, so a second call does nothing.
+    assert!(
+        begin.contains("let Some(agent) = self.pending_start.take() else {"),
+        "{begin}"
+    );
+    assert!(begin.find("pending_start.take()") < begin.find("Session::spawn("));
+    // Set in one place, cleared on close.
+    assert_eq!(main.matches("pending_start.set(Some(").count(), 1);
+    // The first thing `close_session` does, before its early return.
+    let close = body("close_session");
+    assert!(
+        close.contains("{\n        self.pending_start.set(None);\n        let Some(session)"),
+        "{close}"
+    );
+    // Reached from the deadline timer and the first-frame hook, nowhere else.
+    assert_eq!(main.matches("begin_start()").count(), 2);
+    assert!(start.contains("glib::timeout_add_local_once(START_DEADLINE"));
+    assert!(start.contains("ui.begin_start();"));
+    let from = main.find("fn time_first_frame(").expect("hook");
+    let hook = &main[from..];
+    let hook = &hook[..hook.find("\n}\n").expect("end of hook")];
+    assert_eq!(hook.matches("ui.begin_start();").count(), 1);
+    // After the first frame was recorded.
+    let (frame, begin) = (hook.find("c.first_frame("), hook.find("ui.begin_start();"));
+    assert!(frame.is_some() && begin.is_some() && frame < begin);
+    // The frame handler disconnects itself, or it would run on every frame.
+    assert_eq!(hook.matches("clock.disconnect(id)").count(), 1);
+    // ... and it is given the id to disconnect, or `take()` finds nothing.
+    assert_eq!(hook.matches("handler.set(Some(id))").count(), 1);
+    assert!(main.contains("const START_DEADLINE: Duration = Duration::from_secs(3);"));
 }

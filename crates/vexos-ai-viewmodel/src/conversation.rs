@@ -8,7 +8,7 @@ use std::path::Path;
 
 use vexos_ai_core::{Agent, Decision, Error, Event, PermissionRequest, Session, ToolCall};
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::composer::Outgoing;
 use crate::proposal::Proposal;
@@ -221,8 +221,41 @@ pub struct Conversation {
     /// Launch timing on a monotonic clock. Display only: never sent, logged
     /// or stored.
     requested: Option<Instant>,
+    startup: Option<Startup>,
+    built: Option<Instant>,
+    mapped: Option<Instant>,
+    first_frame: Option<Instant>,
     spawn: Option<Instant>,
     ready: Option<Instant>,
+}
+
+/// How long a process has been running, from the text of `/proc/self/stat`
+/// and `/proc/uptime` (proc(5)): the start time is field 22, in clock ticks
+/// since boot (USER_HZ, always 100 for user space), the uptime is in seconds,
+/// both on the boot clock. Field 2 (the name) may hold spaces and `)`, so
+/// fields are counted after the last `)`. `None` for anything unexpected.
+pub fn since_process_start(stat: &str, uptime: &str) -> Option<Duration> {
+    let after = stat.get(stat.rfind(')')? + 1..)?;
+    let ticks: u64 = after.split_whitespace().nth(19)?.parse().ok()?;
+    let up: f64 = uptime.split_whitespace().next()?.parse().ok()?;
+    // /proc/uptime has two decimals, so this is a whole number of ticks. Round:
+    // `0.29 * 100.0` is 28.999..., and a floor would lose a tick.
+    // `try_from_secs_f64` refuses what is not a sane age: negative (started
+    // "in the future"), NaN, infinite, huge.
+    let up_ticks = (up * 100.0).round();
+    Duration::try_from_secs_f64((up_ticks - ticks as f64) / 100.0).ok()
+}
+
+/// How the process got to its first window, for the launch timing: what ran
+/// before `main` (the wrappers and the dynamic linker), and when `main`, GTK
+/// and the stylesheet were ready. Only the first window of a process has one.
+/// Display only: never sent, logged or stored.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Startup {
+    pub before_main: Option<Duration>,
+    pub main: Option<Instant>,
+    pub gtk_ready: Option<Instant>,
+    pub styled: Option<Instant>,
 }
 
 /// What [`Conversation::send`] did with a message.
@@ -276,6 +309,10 @@ impl Conversation {
             hidden_reply: String::new(),
             usage: None,
             requested: None,
+            startup: None,
+            built: None,
+            mapped: None,
+            first_frame: None,
             spawn: None,
             ready: None,
         }
@@ -287,23 +324,70 @@ impl Conversation {
         self
     }
 
+    /// The process's own start-up, for the first window of a process.
+    pub fn startup(mut self, startup: Startup) -> Self {
+        self.startup = Some(startup);
+        self
+    }
+
+    /// The window's widgets were built. Only the first call counts.
+    pub fn built(&mut self, at: Instant) {
+        self.built.get_or_insert(at);
+    }
+
+    /// The window was mapped (`present` ran). Only the first call counts.
+    pub fn mapped(&mut self, at: Instant) {
+        self.mapped.get_or_insert(at);
+    }
+
+    /// The window's first frame was painted. Only the first call counts.
+    pub fn first_frame(&mut self, at: Instant) {
+        self.first_frame.get_or_insert(at);
+    }
+
     /// The agent's start was requested. Only the first call counts.
     pub fn spawn_requested(&mut self, at: Instant) {
         self.spawn.get_or_insert(at);
     }
 
-    /// How long the start took, once the session is ready. Display only.
+    /// Where the time went, once the first frame or the session is there.
+    /// Times are cumulative: from the process start for the first window of a
+    /// process, else from the request. Display only.
     pub fn launch_summary(&self) -> Option<String> {
-        let (requested, ready) = (self.requested?, self.ready?);
-        let secs = |at: Instant| at.saturating_duration_since(requested).as_secs_f64();
-        let spawn = self
-            .spawn
-            .map(|at| format!(" (agent start requested at {:.2} s)", secs(at)))
-            .unwrap_or_default();
-        Some(format!(
-            "Ready {:.2} s after the window was requested{spawn}",
-            secs(ready)
-        ))
+        let requested = self.requested?;
+        if self.first_frame.is_none() && self.ready.is_none() {
+            return None;
+        }
+        let startup = self.startup;
+        let base = startup.and_then(|s| s.main).unwrap_or(requested);
+        let before = startup
+            .and_then(|s| s.before_main)
+            .unwrap_or_default()
+            .as_secs_f64();
+        let secs = |at: Instant| before + at.saturating_duration_since(base).as_secs_f64();
+        let mut parts = Vec::new();
+        let mut mark = |label: &str, at: Option<Instant>| {
+            if let Some(at) = at {
+                parts.push(format!("{label} {:.2} s", secs(at)));
+            }
+        };
+        if let Some(s) = startup {
+            mark("main", s.main);
+            mark("GTK ready", s.gtk_ready);
+            mark("stylesheet", s.styled);
+        }
+        mark("window requested", Some(requested));
+        mark("built", self.built);
+        mark("mapped", self.mapped);
+        mark("first frame", self.first_frame);
+        mark("agent start requested", self.spawn);
+        mark("ready", self.ready);
+        let origin = match startup.and_then(|s| s.before_main.zip(s.main)) {
+            Some(_) => "Since the process started",
+            None if startup.is_some() => "Since main",
+            None => "Since the window was requested, process already running",
+        };
+        Some(format!("{origin}: {}", parts.join(", ")))
     }
 
     /// The note above the input while the session starts, and the input is
@@ -2081,20 +2165,133 @@ mod tests {
     }
 
     #[test]
-    fn launch_times_are_recorded_once_and_only_when_ready() {
+    fn launch_times_are_recorded_once_and_only_from_the_first_frame_or_ready() {
         let t0 = Instant::now();
+        let ms = |n: u64| t0 + Duration::from_millis(n);
         let mut c = Conversation::new(Agent::Claude).window_requested(t0);
-        c.spawn_requested(t0 + std::time::Duration::from_millis(10));
-        c.spawn_requested(t0 + std::time::Duration::from_secs(9));
+        c.spawn_requested(ms(10));
+        c.spawn_requested(ms(9000));
+        c.built(ms(20));
+        c.built(ms(9000));
+        c.mapped(ms(30));
+        c.mapped(ms(9000));
+        // Nothing to show before the first frame or ready.
         assert_eq!(c.launch_summary(), None);
         c.started();
         assert_eq!(c.launch_summary(), None);
+        c.first_frame(ms(450));
+        c.first_frame(ms(9000));
+        let shown = c.launch_summary().unwrap();
+        assert_eq!(
+            shown,
+            "Since the window was requested, process already running: window requested 0.00 s, \
+             built 0.02 s, mapped 0.03 s, first frame 0.45 s, agent start requested 0.01 s"
+        );
         c.apply(Event::Mode("default".into()));
         let first = c.launch_summary().unwrap();
-        assert!(first.contains("agent start requested at 0.01 s"), "{first}");
+        assert!(first.starts_with(&shown), "{first}");
+        assert!(first.contains(", ready "), "{first}");
         c.apply(Event::Mode("plan".into()));
         assert_eq!(c.launch_summary().unwrap(), first);
         assert_eq!(Conversation::new(Agent::Claude).launch_summary(), None);
+        // Without a request there is nothing to measure from.
+        let mut bare = Conversation::new(Agent::Claude);
+        bare.first_frame(ms(1));
+        assert_eq!(bare.launch_summary(), None);
+    }
+
+    #[test]
+    fn the_first_window_of_a_process_is_timed_from_the_process_start() {
+        let t0 = Instant::now();
+        let ms = |n: u64| t0 + Duration::from_millis(n);
+        let startup = Startup {
+            before_main: Some(Duration::from_millis(1500)),
+            main: Some(t0),
+            gtk_ready: Some(ms(200)),
+            styled: Some(ms(210)),
+        };
+        let mut c = Conversation::new(Agent::Claude)
+            .window_requested(ms(300))
+            .startup(startup);
+        c.built(ms(350));
+        c.mapped(ms(360));
+        c.first_frame(ms(900));
+        assert_eq!(
+            c.launch_summary().unwrap(),
+            "Since the process started: main 1.50 s, GTK ready 1.70 s, stylesheet 1.71 s, \
+             window requested 1.80 s, built 1.85 s, mapped 1.86 s, first frame 2.40 s"
+        );
+        // A process age that could not be read: counted from main.
+        let unknown = Startup {
+            before_main: None,
+            ..startup
+        };
+        let mut c = Conversation::new(Agent::Claude)
+            .window_requested(ms(300))
+            .startup(unknown);
+        c.first_frame(ms(900));
+        let text = c.launch_summary().unwrap();
+        assert!(
+            text.starts_with("Since main: main 0.00 s, GTK ready 0.20 s"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn process_age_comes_from_stat_and_uptime() {
+        // Field 22 is 1234 ticks; the 20th field after the name.
+        let fields = |name: &str| {
+            format!(
+                "42 ({name}) S 1 42 42 0 -1 4194560 100 0 0 0 1 2 0 0 20 0 5 0 1234 1000 200 18446744073709551615 1 2 3"
+            )
+        };
+        let age = |name: &str, up: &str| since_process_start(&fields(name), up);
+        assert_eq!(
+            age("panel", "15.34 60.0"),
+            Some(Duration::from_millis(3000))
+        );
+        // Spaces, `)` and digits in the name do not shift the fields.
+        for name in [
+            "a b",
+            "x) S 1 2 3",
+            "((",
+            ") (",
+            "9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0",
+        ] {
+            assert_eq!(
+                age(name, "15.34 60.0"),
+                Some(Duration::from_millis(3000)),
+                "{name}"
+            );
+        }
+        // Just started; and started "in the future" (a bad clock) is refused.
+        assert_eq!(age("p", "12.34 1.0"), Some(Duration::ZERO));
+        // Uptimes whose product with 100 falls just below a whole number must
+        // not lose a tick.
+        let at_zero = fields("p").replace(" 1234 ", " 0 ");
+        for (up, ms) in [("0.29", 290), ("0.57", 570), ("1.13", 1130), ("4.35", 4350)] {
+            let want = Some(Duration::from_millis(ms));
+            assert_eq!(since_process_start(&at_zero, up), want, "{up}");
+        }
+        assert_eq!(age("p", "12.33 1.0"), None);
+        // Short, empty, non-numeric, negative, NaN and huge input.
+        for (stat, up) in [
+            ("", "1.0"),
+            ("42 (p) S 1", "1.0"),
+            ("no parens at all 1 2 3", "1.0"),
+            ("42 (p", "1.0"),
+        ] {
+            assert_eq!(since_process_start(stat, up), None, "{stat:?}");
+        }
+        assert_eq!(age("p", ""), None);
+        assert_eq!(age("p", "soon"), None);
+        assert_eq!(age("p", "-5.0"), None);
+        assert_eq!(age("p", "NaN"), None);
+        assert_eq!(age("p", "inf"), None);
+        let bad = fields("p").replace(" 1234 ", " twelve ");
+        assert_eq!(since_process_start(&bad, "60.0"), None);
+        let huge = fields("p").replace(" 1234 ", " 99999999999999999999999 ");
+        assert_eq!(since_process_start(&huge, "60.0"), None);
     }
 
     /// Timing against a fake agent on an in-memory pipe, as the core's tests

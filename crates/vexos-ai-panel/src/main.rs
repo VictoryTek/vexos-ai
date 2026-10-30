@@ -11,7 +11,7 @@ mod style;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use adw::prelude::*;
 use gtk::{gdk, gio, glib};
@@ -19,14 +19,17 @@ use style::TagColors;
 use vexos_ai_core::{Agent, Config, Decision, Error, Session};
 use vexos_ai_viewmodel::{
     AGENT_FILE, Answer, ApprovalCard, Composer, Conversation, DiffLine, EXTENSION_BUS_NAME, Empty,
-    Item, Offer, Outgoing, PANEL_SETTINGS_FILE, PanelSettings, Placement, Proposal, Sent, State,
-    USAGE_LOCK, Via, WINDOW_MODE_KEY, WINDOW_SCHEMA, WindowMode, agent_label, docked_layout,
-    markdown, mode_label, saved_agent, window_look,
+    Item, Offer, Outgoing, PANEL_SETTINGS_FILE, PanelSettings, Placement, Proposal, Sent, Startup,
+    State, USAGE_LOCK, Via, WINDOW_MODE_KEY, WINDOW_SCHEMA, WindowMode, agent_label, docked_layout,
+    markdown, mode_label, saved_agent, since_process_start, window_look,
 };
 
 const APP_ID: &str = "io.github.victorytek.VexosAssistant";
 /// Where every session runs, as `vexos-ai` does in the terminal.
 const WORKDIR: &str = "/etc/nixos";
+/// The agent starts after the window's first frame, because its start takes
+/// CPU the first frame needs; or after this long if no frame ever comes.
+const START_DEADLINE: Duration = Duration::from_secs(3);
 
 /// The panel's own settings, read once; the file is never written.
 fn panel_settings() -> PanelSettings {
@@ -36,6 +39,31 @@ fn panel_settings() -> PanelSettings {
             .map(|text| PanelSettings::parse(&text))
             .unwrap_or_default()
     })
+}
+
+thread_local! {
+    /// Start-up times of this process, taken by its first window. Display
+    /// only: shown in the title tooltip and nowhere else.
+    static STARTUP: Cell<Option<Startup>> = const {
+        Cell::new(Some(Startup { before_main: None, main: None, gtk_ready: None, styled: None }))
+    };
+}
+
+fn mark(set: impl FnOnce(&mut Startup)) {
+    STARTUP.with(|cell| {
+        if let Some(mut startup) = cell.get() {
+            set(&mut startup);
+            cell.set(Some(startup));
+        }
+    });
+}
+
+/// How long this process has been running (read only).
+fn process_age() -> Option<Duration> {
+    since_process_start(
+        &std::fs::read_to_string("/proc/self/stat").ok()?,
+        &std::fs::read_to_string("/proc/uptime").ok()?,
+    )
 }
 
 /// The core is async on tokio; GTK owns the main thread.
@@ -64,12 +92,20 @@ fn toggle(window: Option<bool>) -> Toggle {
 }
 
 fn main() -> glib::ExitCode {
+    let age = process_age();
+    mark(|s| {
+        s.before_main = age;
+        s.main = Some(Instant::now());
+    });
     let app = adw::Application::builder().application_id(APP_ID).build();
     let slot = Slot::default();
     app.connect_startup(|_| {
+        // GTK and libadwaita are initialised before this handler runs.
+        mark(|s| s.gtk_ready = Some(Instant::now()));
         if let Some(display) = gdk::Display::default() {
             style::load(&display);
         }
+        mark(|s| s.styled = Some(Instant::now()));
     });
     // Watchers run only in the primary instance.
     app.connect_startup(notify::start_watchers);
@@ -105,6 +141,8 @@ fn window(app: &adw::Application, slot: &Slot) -> Rc<Ui> {
     }
     let requested = Instant::now();
     let ui = Ui::build(app);
+    let built = Instant::now();
+    time_first_frame(&ui);
     // Runs after the session's own close handler.
     ui.window.connect_close_request({
         let slot = slot.clone();
@@ -119,8 +157,51 @@ fn window(app: &adw::Application, slot: &Slot) -> Rc<Ui> {
     ui.start(
         saved_agent(&glib::user_config_dir().join(AGENT_FILE)),
         requested,
+        built,
     );
     ui
+}
+
+/// Records when the window is first mapped and when its first frame is
+/// painted, for the launch timing, and then lets the agent start.
+fn time_first_frame(ui: &Rc<Ui>) {
+    let armed = Cell::new(true);
+    let weak = Rc::downgrade(ui);
+    ui.window.connect_map(move |window| {
+        let note = |record: fn(&mut Conversation, Instant)| {
+            if let Some(ui) = weak.upgrade() {
+                ui.with_conversation(|c| {
+                    record(c, Instant::now());
+                    Vec::new()
+                });
+            }
+        };
+        note(Conversation::mapped);
+        if !armed.replace(false) {
+            return;
+        }
+        let Some(clock) = window.frame_clock() else {
+            return;
+        };
+        let handler = Rc::new(Cell::new(None::<glib::SignalHandlerId>));
+        let id = clock.connect_after_paint({
+            let handler = handler.clone();
+            let weak = weak.clone();
+            move |clock| {
+                if let Some(id) = handler.take() {
+                    clock.disconnect(id);
+                }
+                if let Some(ui) = weak.upgrade() {
+                    ui.with_conversation(|c| {
+                        c.first_frame(Instant::now());
+                        Vec::new()
+                    });
+                    ui.begin_start();
+                }
+            }
+        });
+        handler.set(Some(id));
+    });
 }
 
 struct Ui {
@@ -153,6 +234,8 @@ struct Ui {
     mode_settings: Option<gio::Settings>,
     extension_running: Cell<bool>,
     watcher: RefCell<Option<Box<dyn FnOnce()>>>,
+    /// The agent to start once the window has had its first frame.
+    pending_start: Cell<Option<Agent>>,
     conversation: RefCell<Option<Conversation>>,
     session: RefCell<Option<Arc<Session>>>,
     /// What is in the input, and whether it is an unsent draft. The only
@@ -350,6 +433,7 @@ impl Ui {
             mode_settings,
             extension_running: Cell::new(false),
             watcher: RefCell::new(None),
+            pending_start: Cell::new(None),
             conversation: RefCell::new(None),
             session: RefCell::new(None),
             composer: RefCell::new(Composer::default()),
@@ -565,18 +649,41 @@ impl Ui {
         }
     }
 
-    /// Starts the session in the background; the window is already up.
-    fn start(self: &Rc<Self>, agent: Agent, requested: Instant) {
+    /// Prepares the session; the window is already up. The agent itself
+    /// starts in `begin_start`, after the first frame.
+    fn start(self: &Rc<Self>, agent: Agent, requested: Instant, built: Instant) {
         if self.conversation.borrow().is_some() {
             return;
         }
         let mut conversation = Conversation::new(agent)
             .usage_on_launch(panel_settings().usage_on_launch)
             .window_requested(requested);
-        conversation.spawn_requested(Instant::now());
+        if let Some(startup) = STARTUP.take() {
+            conversation = conversation.startup(startup);
+        }
+        conversation.built(built);
         *self.conversation.borrow_mut() = Some(conversation);
         self.refresh();
 
+        self.pending_start.set(Some(agent));
+        let weak = Rc::downgrade(self);
+        glib::timeout_add_local_once(START_DEADLINE, move || {
+            if let Some(ui) = weak.upgrade() {
+                ui.begin_start();
+            }
+        });
+    }
+
+    /// Starts the session in the background, once: after the first frame, or
+    /// at the deadline. Closing the window first cancels it.
+    fn begin_start(self: &Rc<Self>) {
+        let Some(agent) = self.pending_start.take() else {
+            return;
+        };
+        self.with_conversation(|c| {
+            c.spawn_requested(Instant::now());
+            Vec::new()
+        });
         let starting = runtime().spawn(Session::spawn(agent, Config::new(WORKDIR)));
         let ui = self.clone();
         glib::spawn_future_local(async move {
@@ -779,6 +886,7 @@ impl Ui {
 
     /// Denies what is pending, then stops the agent.
     fn close_session(self: &Rc<Self>) {
+        self.pending_start.set(None);
         let Some(session) = self.session.borrow_mut().take() else {
             return;
         };
