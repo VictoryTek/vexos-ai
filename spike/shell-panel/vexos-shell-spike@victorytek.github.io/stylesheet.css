@@ -1,0 +1,20 @@
+.spike-panel { background-color: #242424; color: #eeeeee; padding: 8px 12px 12px 12px;
+  border-radius: 0 0 12px 12px; spacing: 6px; }
+.spike-header { spacing: 8px; }
+.spike-title { font-weight: bold; }
+.spike-chat { background-color: #1c1c1c; border-radius: 8px; }
+.spike-rows { padding: 8px; spacing: 8px; }
+.spike-row { padding: 6px 8px; border-radius: 8px; background-color: #2e2e2e; spacing: 4px; }
+.spike-you { background-color: #1f3a5f; }
+.spike-role { font-size: 80%; color: #aaaaaa; }
+.spike-text { selection-background-color: #3584e4; selected-color: #ffffff; }
+.spike-code { font-family: monospace; background-color: #111111; padding: 6px; border-radius: 6px;
+  selection-background-color: #3584e4; selected-color: #ffffff; }
+.spike-card { padding: 8px; border: 1px solid #c64600; border-radius: 8px; spacing: 6px; }
+.spike-card-title { font-weight: bold; }
+.spike-card-buttons { spacing: 8px; }
+.spike-button { padding: 4px 12px; }
+.spike-notice { color: #ff7b63; }
+.spike-input { background-color: #1c1c1c; border-radius: 8px; }
+.spike-entry { background-color: transparent; border: 0; box-shadow: none; padding: 6px 8px;
+  selection-background-color: #3584e4; selected-color: #ffffff; }

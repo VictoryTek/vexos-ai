@@ -593,3 +593,60 @@ The Context7 and nixos MCP servers failed to connect, so nothing here depends
 on them, and the locked Shell 50.5 sources in `/nix/store` were not read (no
 Nix on this host); the `gnome-50` branch was read instead, which may differ from
 the locked 50.5 revision.
+
+## Phase 0 results
+
+Run 2026-10-30. Code: `spike/shell-panel/` (a separate extension,
+`vexos-shell-spike@victorytek.github.io`; fake data, no helper, no D-Bus, no
+timers; never enabled by anything in the repo; only the nested-shell harness enables it, inside its own shell). Tested in a **headless nested
+GNOME Shell 50.5** (1280x800 virtual monitor, private bus, input from virtual
+devices). Not tested on a real screen or GPU; the renderer used was not checked
+and is probably software. Screenshots and traces are in
+`target/shell-spike-run/` (not committed). Manual steps for the VM are in
+`spike/shell-panel/README.md`.
+
+| # | Criterion | Result | Evidence |
+|---|---|---|---|
+| 1 | Open and close | **PASS** (not instant) | `Super+F10` opened and closed it in every one of 5 cycles, and from inside the overview; `Escape` closes. Key to handler 0.3 ms; **key to first paint 58 to 70 ms (median 61), to the first frame that moves 78 to 89 ms (median 79)**. Close: Escape to handler 17 ms (one frame), first moving frame 34 ms. The first paint is layout of the fake content: with the first 64 KiB cap it took 130 to 156 ms (a 64 KiB label cost about 31 ms a pass, measured once by hand, no trace kept), and with the 16 KiB cap 58 to 70 ms. So the open is quick but not "instant", and it grows with content |
+| 2 | Slide | **PASS after one fix** | First version: **fail**. The ease started before a 130 ms first layout, so the first visible frame was already 74% down (`y` -106 of -488 to 32). Fix: start the ease in the first painted frame. Now 16 frames per open, `y` -488, -488, -424, -360, -301, ... 22, 30, never falling; gaps 13.9 to 19.3 ms after a first doubled sample (1 to 3 ms); close 14 frames, gaps 15.6 to 17.8 ms, never rising. Slow-motion shots (factor 20): before = bare desktop; early = only the panel's bottom edge and input under the bar; middle = about three quarters down; end = fully down with header, chat, card, input. The top bar stays drawn over the panel both ways. Real-GPU smoothness untested |
+| 3 | Multi-line input | **PASS, with limits** (the gate) | Typing, `Shift+Enter` new line, **Enter sends** (chosen), empty or spaces-only Enter does nothing. Box height 31, 50, 69 ... 164 px for 1 to 8 lines, then stays 164 and scrolls with the cursor kept in view; shrinks back to 31 on delete. Paste (`Ctrl+V`, 3 lines and 15,000 chars), `Ctrl+C`/`Ctrl+X`, `Ctrl+A`, `Shift+Left`/`Shift+Home`, typing or Backspace over a selection all work. Chat: wheel scrolls 52 px a notch; it stays at the bottom after a send. Replies: mouse drag and double-click select text; Copy button put the row's displayed text on the clipboard (escaped, cut to the cap, including the "shortened" line, so what Copy should copy is a Phase 1 decision). **Limits:** no undo (`Ctrl+Z` does nothing); no context menu; **selected text in a reply is unreadable** (white on light, my selection colours did not apply to `St.Label`); **Clutter's text buffer holds at most 65,535 bytes** (not characters), so a 1 MiB paste keeps 65,534 characters and 30,000 three-byte characters keep 21,844, silently, which makes the 72 KiB limit and its "too long" notice unreachable. Bug found and fixed: after a paste the box did not grow, because `actor.width` returns the natural width while a relayout is pending. **Risk, untested:** Enter is handled in the entry's `key-press-event` before `Clutter.Text`'s own key handling, where an input method filters keys, so an IME user pressing Enter to commit a composition may send the message instead. IME, spell check, other layouts untested |
+| 4 | Keyboard grab | **PASS** | `pushModal` with `Shell.ActionMode.POPUP` and the keybinding bound for NORMAL, OVERVIEW and POPUP: the shortcut closed the panel while it was open. With a real app (GNOME Text Editor) in the nested shell: `aa` typed before opening, `zz` typed while open went to the panel input, `bb` after closing went to the app (it shows `aabb`). `focus_window` never changed; stage key focus after closing equals the value before opening; `Main.modalCount` 1 open, 0 closed; action mode 128 open, 1 closed. Works the same inside the overview. Side effect: the shortcut also fires while a Shell popup menu is open (not tried). Clicks outside the panel while open: not tried |
+| 5 | Scrolling and size caps | **PASS after changing the cap** | **The note's 64 KiB per message failed.** A 64 KiB label painted only its first part (blank after about 4,000 px) and its "shortened" mark was lost, because the Clutter text buffer holds 65,535 bytes. Probes: labels of 14,469 and 22,389 characters painted to the end; 32,889 and more lost the tail, whatever their height (cause not confirmed). **Cap now: 16 KiB per message (after escaping, never inside a character), 2,000 lines, last 200 rows, input 8 lines then scroll.** Overflow is shown as `… shortened: 190670 units not shown` as the last line (units are UTF-16 units of the escaped text, not original characters) (screenshot checked, tail pixels painted); the code block's tail also paints. The 207 KB message: build 10 ms, never froze the shell; 1 MiB paste kept the shell answering in 11 ms; with 65,534 characters in the input a key press takes 12 to 14 ms; 250 rows added in 46 ms (200 kept). Wide table line wraps by character, so nothing overflows sideways |
+| 6 | No dock icon, window entry or Alt+Tab entry | **PASS** | With the panel open or closed: window actors 1 (the app only), Alt+Tab list and `Shell.AppSystem.get_running()` identical. The panel is one actor in `uiGroup` placed just before `panelBox`. Overview screenshot: the dash shows its favourites and only Text Editor running, nothing for the spike; the panel can be opened inside the overview |
+| 7 | Failure containment | **PASS** | Threw on purpose in a button handler, a key handler and an input handler: each time the panel was removed, the Shell kept answering, `modalCount` 0, action mode NORMAL, key focus restored, no leftover actor, and it opened again. The log has the error name only (`SpikeTestError`, `TypeError`, `RangeError`); two secret message strings I threw never appeared in it. Disabling the extension while open, and in the middle of the slide: actor gone, grab popped, the stage handler (connected before) disconnected, shortcut gone, re-enable works. **Not covered:** a crash in native St/Clutter/Pango code (no `try` can catch it; that is still the end of the session) |
+| 8 | Idle cost | **PASS** (by inspection) | Closed, the extension instance holds the `Gio.Settings` for its keybinding and inert leftovers (`_rect`, a flag, and the last `_trace` of up to 600 frames); no actor, grab or stage handler. Source scan (a node test): no timeout, idle, `Meta` later, polling, I/O, D-Bus or markup; the only signal handlers are on actors it creates, plus one stage `after-paint` handler that exists only while a slide runs. Not measured with a profiler (wake-ups, CPU) |
+
+**Not tested** (all need a real session or a person): smoothness at the real
+refresh rate and on a real GPU (the first-paint cost may differ); HiDPI and
+multi-monitor placement; IME composition, spell check, other keyboard layouts;
+screen reader; clicks outside the panel while it is open; other extensions
+running together with it; a fullscreen window behind it; screen lock with the
+panel open; the shortcut conflicting with the user's own bindings; the sender
+identity of an extension's D-Bus calls and everything else about the helper
+(Phase 1, not part of this spike). Unit tests cover only the pure logic and the
+source scans (40 tests; the 30 mutations in `spike/shell-panel/tests/mutate.py` were all caught); the Shell glue was checked
+only by the nested-shell runs above.
+
+**Changes to what this note assumed.** `Clutter.Text` `single_line_mode`,
+`line_wrap`, `selectable`, `reactive` and `max_length`, `position_to_coords`,
+`St.ScrollView.vadjustment` and `St.Clipboard.set_text(CLIPBOARD, text)` exist
+and work in 50.5 (the note marked them [unconfirmed]). Not as assumed: 64 KiB
+per message and 72 KiB per send are too big for a `St.Label` or the entry
+(about 16 KiB shown, about 64 KiB typed); the ease must start after the first
+painted frame; selection colours need their own styling; there is no undo.
+
+**Recommendation: continue, to Phase 1 under conditions.** The gate passed: the
+growing multi-line input works, selection and copy work, the slide is smooth once
+it starts after the first frame, and the shortcut and focus survive the grab.
+Errors and disabling are contained. Conditions before building more: (1) cut
+the display to about 16 KiB per message (split or page longer replies) and the
+send limit to below the 64 KiB the entry can hold, and detect a truncated paste;
+(2) decide whether about 80 ms to open is acceptable (it comes from laying out
+the content; keeping the widgets alive between opens would remove it but
+conflicts with option A in section 5); (3) accept no undo and no context menu in
+the input, or find a fix, and settle Enter-to-send against input methods (the
+main risk to the gate; test Enter while composing in the VM); (4) run the manual list in `spike/shell-panel/README.md`
+on a real screen in the VM first (smoothness, IME, grab with real shortcuts and
+extensions, lock), because everything above is from a headless shell. The main
+cost in section 11 is unchanged: a native crash in the Shell ends the session,
+and nothing here reduces that.

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="org.gnome.shell.extensions.vexos-shell-spike"
+          path="/org/gnome/shell/extensions/vexos-shell-spike/">
+    <key name="toggle-panel" type="as">
+      <default><![CDATA[['<Super>F10']]]></default>
+      <summary>Show or hide the spike panel</summary>
+    </key>
+  </schema>
+</schemalist>

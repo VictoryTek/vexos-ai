@@ -1,0 +1,8 @@
+{
+  "uuid": "vexos-shell-spike@victorytek.github.io",
+  "name": "VexOS Shell Panel Spike",
+  "description": "Throwaway Phase 0 spike: a static drop-down chat panel drawn in the Shell with fake data (Super+F10). Not part of the shipped assistant.",
+  "shell-version": ["50"],
+  "url": "https://github.com/VictoryTek/vexos-ai",
+  "settings-schema": "org.gnome.shell.extensions.vexos-shell-spike"
+}
