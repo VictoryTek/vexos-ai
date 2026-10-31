@@ -585,6 +585,30 @@ fn the_panel_has_no_way_to_rebuild_the_system() {
 }
 
 #[test]
+fn the_event_loop_denies_too_large_requests_through_apply_with() {
+    // A request too large to review is denied at once by `apply_with`; a plain
+    // `apply` would leave it to the core's timeout. So the loop calls
+    // `apply_with` whenever there is a session, and `apply` only when there is
+    // none (nothing to answer to).
+    let main = code(MAIN);
+    assert!(main.contains("Some(session) => c.apply_with(event, &**session),"));
+    assert_eq!(main.matches(".apply(").count(), 1);
+    assert!(main.contains("None => c.apply(event),"));
+    // and the panel says what happened, in fixed words
+    assert!(main.contains("Answer::TooLarge => \"Denied: too large to review.\","));
+    assert!(main.contains("Proposal::TooLarge(bytes)"));
+    assert!(main.contains("This request is too large to review here"));
+}
+
+#[test]
+fn a_tool_card_is_named_only_through_the_view_model() {
+    // The id is agent text; `ToolCard::name` shows it as visible text.
+    let main = code(MAIN);
+    assert!(main.contains("let name = card.name();"));
+    assert!(!main.contains("&card.id"));
+}
+
+#[test]
 fn a_click_never_leaves_send_focused() {
     // A focused Send is activated by Enter or Space, and unlike Enter in the
     // input it sends a draft that has not been edited.

@@ -11,6 +11,7 @@
 //! The commands that collect it are fixed argv, built from constants and
 //! validated identifiers, run by the app (never the agent) without a shell.
 
+use crate::escape::is_hidden;
 use crate::redact::redact;
 
 /// Written by the app, never derived from what was collected.
@@ -47,15 +48,6 @@ impl Excerpt {
     }
 }
 
-/// Characters that can hide or reorder text on screen, or carry text that
-/// shows as nothing (tag characters, variation selectors).
-fn is_invisible(c: char) -> bool {
-    matches!(c,
-        '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2064}'
-        | '\u{2066}'..='\u{2069}' | '\u{061C}' | '\u{180B}'..='\u{180F}' | '\u{FE00}'..='\u{FE0F}'
-        | '\u{FEFF}' | '\u{E0000}'..='\u{E007F}' | '\u{E0100}'..='\u{E01EF}')
-}
-
 /// Drops terminal escape sequences and carriage returns; replaces other
 /// control and invisible characters.
 fn sanitize(text: &str) -> (String, usize) {
@@ -85,7 +77,7 @@ fn sanitize(text: &str) -> (String, usize) {
             },
             '\r' => {}
             '\n' | '\t' => out.push(c),
-            c if c.is_control() || is_invisible(c) => {
+            c if c.is_control() || is_hidden(c) => {
                 replaced += 1;
                 out.push('\u{FFFD}');
             }

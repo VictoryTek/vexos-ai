@@ -37,6 +37,7 @@
 mod composer;
 mod conversation;
 mod diagnose;
+mod escape;
 mod markdown;
 mod notify;
 mod proposal;
@@ -46,15 +47,16 @@ mod window;
 
 pub use composer::{Composer, Draft, Offer, Outgoing, Placement, Via};
 pub use conversation::{
-    AGENT_FILE, Answer, ApprovalCard, ClickError, Conversation, Decider, Empty, Item, NO_REPLY,
-    NOT_SENT, Sent, Startup, State, ToolCard, USAGE_COMMAND, USAGE_NOT_SENT, agent_label,
-    choice_label, mode_label, parse_agent, saved_agent, since_process_start,
+    AGENT_FILE, Answer, ApprovalCard, CARD_LIMIT, ClickError, Conversation, Decider, Empty, Item,
+    NO_REPLY, NOT_SENT, Sent, Startup, State, TOO_LARGE_TITLE, ToolCard, USAGE_COMMAND,
+    USAGE_NOT_SENT, agent_label, choice_label, mode_label, parse_agent, saved_agent,
+    since_process_start,
 };
 pub use diagnose::{
     BEGIN, Crash, END, Excerpt, INSTRUCTION, Log, Missing, Subject, UnitName, core_file,
     coredump_argv, coredump_log, draft, excerpt, journal_argv, journal_log,
 };
-pub use markdown::{Run, Style, markdown};
+pub use markdown::{Block, BlockKind, Run, Style, blocks, markdown};
 pub use notify::{Crashes, FailedUnits, SETTINGS_FILE, Settings};
 pub use proposal::{DiffLine, Proposal, line_diff};
 pub use usage::{

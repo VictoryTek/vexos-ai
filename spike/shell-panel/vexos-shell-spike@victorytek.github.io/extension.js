@@ -180,6 +180,7 @@ export default class SpikeExtension extends Extension {
         }
         this._entry = this._chat = this._chatScroll = this._inputScroll = null;
         this._inputBox = this._notice = null;
+        this._cut = false;
         if (panel)
             panel.destroy();
     }
@@ -235,6 +236,7 @@ export default class SpikeExtension extends Extension {
     }
 
     _buildInput(panel) {
+        this._cut = false;
         this._entry = new St.Entry({style_class: 'spike-entry', can_focus: true, x_expand: true,
             hint_text: 'Enter sends, Shift+Enter adds a line'});
         const ct = this._entry.clutter_text;
@@ -281,11 +283,18 @@ export default class SpikeExtension extends Extension {
     }
 
     // A text over the send limit, or so long that the entry may have cut a paste,
-    // gets a visible notice as soon as it is in the box, not only at Send.
+    // gets a visible notice as soon as it is in the box, not only at Send. Once
+    // a paste was cut, the notice stays until the box is empty.
     _showInputNotice() {
-        const kind = Logic.inputNotice(this._entry.clutter_text.text);
+        const state = Logic.inputNoticeState(this._cut, this._entry.clutter_text.text);
+        this._cut = state.cut;
+        const kind = state.kind;
         if (kind === 'full')
             this._notice.text = 'The box is full (about 64 KiB). Anything pasted past that was cut and is not here. Too long to send (limit 60,000 bytes).';
+        else if (kind === 'cut-long')
+            this._notice.text = 'Anything pasted past the 64 KiB limit was cut and is not here. Still too long to send (limit 60,000 bytes). This stays until the box is emptied or sent.';
+        else if (kind === 'cut')
+            this._notice.text = 'Anything pasted past the 64 KiB limit was cut and is not here. You can still send what is in the box. This stays until the box is emptied or sent.';
         else if (kind === 'long')
             this._notice.text = 'Too long to send (limit 60,000 bytes). Shorten the text to send it.';
         else {

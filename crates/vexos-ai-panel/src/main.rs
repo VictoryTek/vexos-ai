@@ -18,10 +18,11 @@ use gtk::{gdk, gio, glib};
 use style::TagColors;
 use vexos_ai_core::{Agent, Config, Decision, Error, Session};
 use vexos_ai_viewmodel::{
-    AGENT_FILE, Answer, ApprovalCard, Composer, Conversation, DiffLine, EXTENSION_BUS_NAME, Empty,
-    Item, Offer, Outgoing, PANEL_SETTINGS_FILE, PanelSettings, Placement, Proposal, Sent, Startup,
-    State, USAGE_LOCK, Via, WINDOW_MODE_KEY, WINDOW_SCHEMA, WindowMode, agent_label, docked_layout,
-    markdown, mode_label, saved_agent, since_process_start, window_look,
+    AGENT_FILE, Answer, ApprovalCard, CARD_LIMIT, Composer, Conversation, DiffLine,
+    EXTENSION_BUS_NAME, Empty, Item, Offer, Outgoing, PANEL_SETTINGS_FILE, PanelSettings,
+    Placement, Proposal, Sent, Startup, State, USAGE_LOCK, Via, WINDOW_MODE_KEY, WINDOW_SCHEMA,
+    WindowMode, agent_label, docked_layout, markdown, mode_label, saved_agent, since_process_start,
+    window_look,
 };
 
 const APP_ID: &str = "io.github.victorytek.VexosAssistant";
@@ -702,7 +703,12 @@ impl Ui {
             };
             // `Events` is a plain channel; it needs no tokio reactor.
             while let Some(event) = events.recv().await {
-                ui.with_conversation(|c| c.apply(event));
+                // With a session, a request too large to review is denied at once.
+                let session = ui.session();
+                ui.with_conversation(|c| match &session {
+                    Some(session) => c.apply_with(event, &**session),
+                    None => c.apply(event),
+                });
             }
         });
     }
@@ -1000,11 +1006,7 @@ impl Ui {
             }
             Item::Agent(text) => reply(text, &TagColors::of(&self.window)).upcast(),
             Item::Tool(card) => {
-                let name = card
-                    .title
-                    .as_deref()
-                    .or(card.kind.as_deref())
-                    .unwrap_or(&card.id);
+                let name = card.name();
                 let status = c.tool_status(card);
                 let label = text_label(&format!("{name} — {status}"));
                 label.add_css_class("vexos-quiet");
@@ -1050,6 +1052,7 @@ impl Ui {
                 Answer::Withdrawn => "No longer pending. Not approved.",
                 Answer::Closed => "Denied: the session closed.",
                 Answer::TimedOut => "Timed out, denied.",
+                Answer::TooLarge => "Denied: too large to review.",
             };
             let label = text_label(answer);
             label.add_css_class("vexos-quiet");
@@ -1146,6 +1149,12 @@ fn proposal(proposal: &Proposal, colors: &TagColors) -> gtk::Widget {
         }
         Proposal::Plan(plan) => text_label(plan).upcast(),
         Proposal::Other(json) => code_box(&monospace(json)),
+        Proposal::TooLarge(bytes) => text_label(&format!(
+            "This request is too large to review here ({} KiB; the limit is {} KiB). It was denied.",
+            bytes.div_ceil(1024),
+            CARD_LIMIT / 1024
+        ))
+        .upcast(),
         Proposal::Diff { path, lines } => {
             let view = gtk::TextView::builder()
                 .editable(false)

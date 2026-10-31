@@ -134,6 +134,22 @@ export function inputNotice(text) {
     return n > MAX_SEND_BYTES ? 'long' : 'none';
 }
 
+// The notice with memory. `cut` says an earlier text in this box was cut by the
+// entry; it stays set, whatever the text shrinks to, until the box is empty
+// (emptied by the user or by a send). Sending is not affected: this only says
+// what to show. Kinds: 'none', 'long', 'full', 'cut' (shorter now, can be sent)
+// and 'cut-long' (shorter now, still over the send limit).
+export function inputNoticeState(cut, text) {
+    if (typeof text !== 'string' || text === '')
+        return {cut: false, kind: 'none'};
+    const kind = inputNotice(text);
+    if (kind === 'full')
+        return {cut: true, kind};
+    if (cut)
+        return {cut: true, kind: kind === 'long' ? 'cut-long' : 'cut'};
+    return {cut: false, kind};
+}
+
 const num = (v, d = 0) => Number.isFinite(v) ? v : d;
 
 function fit(fraction, min, max, available) {

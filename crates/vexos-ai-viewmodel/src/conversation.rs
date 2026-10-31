@@ -11,6 +11,7 @@ use vexos_ai_core::{Agent, Decision, Error, Event, PermissionRequest, Session, T
 use std::time::{Duration, Instant};
 
 use crate::composer::Outgoing;
+use crate::escape::visible;
 use crate::proposal::Proposal;
 use crate::usage::{Disabled, Shown, UsageButton, five_hour, tooltip};
 
@@ -121,6 +122,18 @@ pub struct ToolCard {
     pub status: Option<String>,
 }
 
+impl ToolCard {
+    /// What to call the tool call: its title, else its kind, else its id.
+    pub fn name(&self) -> String {
+        match (&self.title, &self.kind) {
+            (Some(title), _) => title.clone(),
+            (None, Some(kind)) => kind.clone(),
+            // The id is agent text too.
+            (None, None) => visible(&self.id),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Answer {
     Pending,
@@ -133,7 +146,17 @@ pub enum Answer {
     Closed,
     /// The core's timeout denied it: nobody answered in time.
     TimedOut,
+    /// Over [`CARD_LIMIT`] once escaped: never shown, denied at once.
+    TooLarge,
 }
+
+/// The most an approval card may show, in bytes, once escaped: its title and
+/// everything the request would put on screen. A request over it is denied and
+/// never shown, so a cut command can never be shown for approval.
+pub const CARD_LIMIT: usize = 16 * 1024;
+
+/// The title of a card that is too large to review.
+pub const TOO_LARGE_TITLE: &str = "Request too large to review";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ApprovalCard {
@@ -148,13 +171,32 @@ pub struct ApprovalCard {
 
 impl ApprovalCard {
     fn new(request: PermissionRequest) -> Self {
+        let title = visible(&request.title);
+        let proposal =
+            Proposal::from_request(request.kind.as_deref(), &request.raw_input).escaped();
+        let bytes = title.len() + proposal.shown_bytes();
+        let too_large = bytes > CARD_LIMIT;
         ApprovalCard {
             request: request.id,
             tool_call: request.tool_call_id,
-            proposal: Proposal::from_request(request.kind.as_deref(), &request.raw_input),
-            title: request.title,
+            // A card too large to review keeps none of the request: not its
+            // title, and not a cut-off part of its command.
+            proposal: if too_large {
+                Proposal::TooLarge(bytes)
+            } else {
+                proposal
+            },
+            title: if too_large {
+                TOO_LARGE_TITLE.to_owned()
+            } else {
+                title
+            },
             choices: request.choices,
-            answer: Answer::Pending,
+            answer: if too_large {
+                Answer::TooLarge
+            } else {
+                Answer::Pending
+            },
         }
     }
 
@@ -201,6 +243,8 @@ pub struct Conversation {
     approvals: HashMap<String, usize>,
     /// A message the core refused to send, for the input to offer again.
     unsent: Option<String>,
+    /// Requests too large to review, to be denied by the next `apply_with`.
+    deny_now: Vec<u64>,
     /// The panel's setting: `/usage` runs once when the session is ready.
     usage_on_launch: bool,
     /// Set by the ready transition and cleared by the next call: the launch
@@ -300,6 +344,7 @@ impl Conversation {
             cards: HashMap::new(),
             approvals: HashMap::new(),
             unsent: None,
+            deny_now: Vec::new(),
             usage_on_launch: true,
             launch_due: false,
             hidden_due: false,
@@ -574,6 +619,17 @@ impl Conversation {
         self.unsent.take()
     }
 
+    /// [`Self::apply`], then denies the requests it found too large to review
+    /// (one "deny once" each, never an approval). A front end with a session
+    /// uses this one; without it the core's own timeout denies them.
+    pub fn apply_with(&mut self, event: Event, decider: &dyn Decider) -> Vec<usize> {
+        let changed = self.apply(event);
+        for request in std::mem::take(&mut self.deny_now) {
+            let _ = decider.decide(request, Decision::DenyOnce);
+        }
+        changed
+    }
+
     /// Takes one event from the core. Returns the indices of the items that
     /// changed or were added, in order. Never answers a request.
     pub fn apply(&mut self, event: Event) -> Vec<usize> {
@@ -605,7 +661,13 @@ impl Conversation {
             Event::Permission(request) => {
                 let id = request.id;
                 let tool_call = request.tool_call_id.clone();
-                let index = self.push(Item::Approval(ApprovalCard::new(request)));
+                let card = ApprovalCard::new(request);
+                if matches!(card.proposal, Proposal::TooLarge(_))
+                    && card.choices.contains(&Decision::DenyOnce)
+                {
+                    self.deny_now.push(id);
+                }
+                let index = self.push(Item::Approval(card));
                 self.cards.insert(id, index);
                 if let Some(tool_call) = tool_call {
                     self.approvals.insert(tool_call, index);
@@ -631,6 +693,13 @@ impl Conversation {
     /// Updates arrive by id, many without a title: a missing field keeps the
     /// value it had.
     fn tool(&mut self, call: ToolCall) -> usize {
+        // Agent text, shown as it is: made visible before it is kept.
+        let call = ToolCall {
+            title: call.title.as_deref().map(visible),
+            kind: call.kind.as_deref().map(visible),
+            status: call.status.as_deref().map(visible),
+            ..call
+        };
         if let Some(&index) = self.tools.get(&call.id)
             && let Item::Tool(card) = &mut self.items[index]
         {
@@ -984,6 +1053,382 @@ mod tests {
             Item::Approval(card) => card,
             other => panic!("not a card: {other:?}"),
         }
+    }
+
+    fn permission(title: &str, kind: &str, raw: serde_json::Value) -> Event {
+        Event::Permission(PermissionRequest {
+            id: 7,
+            tool_call_id: Some("t7".into()),
+            title: title.into(),
+            kind: Some(kind.into()),
+            raw_input: raw,
+            choices: BOTH.to_vec(),
+        })
+    }
+
+    #[test]
+    fn a_card_shows_hidden_characters_in_every_field() {
+        let hid = "x\u{202e}y\u{1b}z";
+        let shown = r"x\u{202e}y\u{1b}z";
+        let cases = [
+            ("execute", json!({ "command": hid })),
+            ("switch_mode", json!({ "plan": hid })),
+            (
+                "edit",
+                json!({ "file_path": hid, "old_string": hid, "new_string": "n" }),
+            ),
+            ("edit", json!({ "file_path": hid, "content": hid })),
+            (
+                "edit",
+                json!({ "file_path": "f", "edits": [{ "old_string": hid, "new_string": hid }] }),
+            ),
+            (
+                "edit",
+                json!({ "filepath": hid, "diff": format!("@@ {hid}\n+{hid}\n-{hid}\n {hid}") }),
+            ),
+            ("other", json!({ "k": hid })),
+        ];
+        for (kind, raw) in cases {
+            let mut c = ready();
+            let index = c.apply(permission(hid, kind, raw.clone()))[0];
+            let card = card(&c, index);
+            assert_eq!(card.title, shown, "{kind} {raw}");
+            let all = format!("{:?}", card.proposal);
+            assert!(
+                !all.contains('\u{202e}') && !all.contains('\u{1b}'),
+                "{kind}: {all}"
+            );
+            assert!(all.contains("u{202e}"), "{kind}: {all}");
+        }
+    }
+
+    #[test]
+    fn tool_card_text_is_made_visible_whether_it_arrives_first_or_in_an_update() {
+        let hid = "a\u{202e}b";
+        let shown = r"a\u{202e}b";
+        let mut c = ready();
+        let index = c.apply(tool("t1", Some(hid), Some(hid), Some(hid)))[0];
+        let Item::Tool(t) = &c.items()[index] else {
+            panic!("not a tool card")
+        };
+        assert_eq!(t.title.as_deref(), Some(shown));
+        assert_eq!(t.kind.as_deref(), Some(shown));
+        assert_eq!(t.status.as_deref(), Some(shown));
+        let later = "c\u{2066}d";
+        c.apply(tool("t1", Some(later), Some(later), Some(later)));
+        let Item::Tool(t) = &c.items()[index] else {
+            panic!("not a tool card")
+        };
+        let now = r"c\u{2066}d";
+        assert_eq!(t.title.as_deref(), Some(now));
+        assert_eq!(t.kind.as_deref(), Some(now));
+        assert_eq!(t.status.as_deref(), Some(now));
+    }
+
+    #[test]
+    fn a_tool_card_is_named_by_title_then_kind_then_its_id_as_visible_text() {
+        let mut c = ready();
+        let by = |c: &Conversation, i: usize| match &c.items()[i] {
+            Item::Tool(t) => t.name(),
+            other => panic!("not a tool card: {other:?}"),
+        };
+        let i = c.apply(tool("t1", Some("Run ls"), Some("execute"), None))[0];
+        assert_eq!(by(&c, i), "Run ls");
+        let i = c.apply(tool("t2", None, Some("execute"), None))[0];
+        assert_eq!(by(&c, i), "execute");
+        let i = c.apply(tool("id\u{202e}x", None, None, None))[0];
+        assert_eq!(by(&c, i), r"id\u{202e}x");
+    }
+
+    #[test]
+    fn a_plain_card_and_tool_are_unchanged() {
+        let mut c = ready();
+        let index = c.apply(request(1, &BOTH))[0];
+        assert_eq!(card(&c, index).title, "touch x");
+        assert_eq!(
+            card(&c, index).proposal,
+            Proposal::Command("touch x".into())
+        );
+        let t = c.apply(tool(
+            "t9",
+            Some("Run touch x"),
+            Some("execute"),
+            Some("completed"),
+        ))[0];
+        let Item::Tool(t) = &c.items()[t] else {
+            panic!("not a tool card")
+        };
+        assert_eq!(t.title.as_deref(), Some("Run touch x"));
+        assert_eq!(t.status.as_deref(), Some("completed"));
+    }
+
+    fn sized(
+        id: u64,
+        choices: &[Decision],
+        title: &str,
+        kind: &str,
+        raw: serde_json::Value,
+    ) -> Event {
+        Event::Permission(PermissionRequest {
+            id,
+            tool_call_id: Some(format!("t{id}")),
+            title: title.into(),
+            kind: Some(kind.into()),
+            raw_input: raw,
+            choices: choices.to_vec(),
+        })
+    }
+
+    /// A request of each kind whose shown size is `n` bytes plus the title `t`.
+    fn of_size(kind: &str, n: usize) -> serde_json::Value {
+        let lines = |count: usize| "x\n".repeat(count / 2);
+        match kind {
+            "command" => json!({ "command": "x".repeat(n) }),
+            "plan" => json!({ "plan": "x".repeat(n) }),
+            "other" => json!({ "k": "x".repeat(n.saturating_sub(10)) }),
+            "write" => json!({ "file_path": "f", "content": lines(n) }),
+            "edit" => json!({ "file_path": "f", "old_string": "a", "new_string": lines(n) }),
+            "multi" => {
+                json!({ "file_path": "f", "edits": [{ "old_string": "a", "new_string": lines(n) }] })
+            }
+            "unified" => {
+                json!({ "filepath": "f", "diff": format!("@@\n{}", lines(n).replace("x\n", "+x\n")) })
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    fn denied_at_once(c: &mut Conversation, event: Event) -> (usize, Vec<(u64, Decision)>) {
+        let recorder = Recorder::default();
+        let index = c.apply_with(event, &recorder)[0];
+        (index, recorder.calls())
+    }
+
+    #[test]
+    fn a_card_exactly_at_the_limit_is_pending_and_one_byte_over_is_too_large() {
+        for (n, over) in [(CARD_LIMIT - 1, false), (CARD_LIMIT, true)] {
+            let mut c = ready();
+            let (i, calls) = denied_at_once(
+                &mut c,
+                sized(
+                    3,
+                    &BOTH,
+                    "t",
+                    "execute",
+                    json!({ "command": "x".repeat(n) }),
+                ),
+            );
+            let card = card(&c, i);
+            if over {
+                assert_eq!(card.answer, Answer::TooLarge, "{n}");
+                assert!(card.buttons().is_empty());
+                assert_eq!(calls, [(3, Decision::DenyOnce)]);
+            } else {
+                assert_eq!(card.answer, Answer::Pending, "{n}");
+                assert_eq!(card.buttons().len(), 2);
+                assert!(calls.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn every_kind_of_request_over_the_limit_is_too_large() {
+        for kind in [
+            "command", "plan", "other", "write", "edit", "multi", "unified",
+        ] {
+            let mut c = ready();
+            let (i, calls) = denied_at_once(
+                &mut c,
+                sized(5, &BOTH, "t", "edit", of_size(kind, CARD_LIMIT + 100)),
+            );
+            assert_eq!(card(&c, i).answer, Answer::TooLarge, "{kind}");
+            assert_eq!(calls, [(5, Decision::DenyOnce)], "{kind}");
+            // and a small one of the same kind is an ordinary card
+            let mut c = ready();
+            let (i, calls) =
+                denied_at_once(&mut c, sized(6, &BOTH, "t", "edit", of_size(kind, 100)));
+            assert_eq!(card(&c, i).answer, Answer::Pending, "{kind}");
+            assert!(calls.is_empty(), "{kind}");
+        }
+    }
+
+    #[test]
+    fn a_long_title_alone_is_enough() {
+        let mut c = ready();
+        let (i, calls) = denied_at_once(
+            &mut c,
+            sized(
+                8,
+                &BOTH,
+                &"t".repeat(CARD_LIMIT + 1),
+                "execute",
+                json!({ "command": "ls" }),
+            ),
+        );
+        assert_eq!(card(&c, i).answer, Answer::TooLarge);
+        assert_eq!(calls, [(8, Decision::DenyOnce)]);
+    }
+
+    #[test]
+    fn the_size_is_counted_after_escaping() {
+        // 3000 right-to-left overrides are 9000 bytes typed, 24000 once shown.
+        let mut c = ready();
+        let (i, _) = denied_at_once(
+            &mut c,
+            sized(
+                1,
+                &BOTH,
+                "t",
+                "execute",
+                json!({ "command": "\u{202e}".repeat(3000) }),
+            ),
+        );
+        assert_eq!(card(&c, i).answer, Answer::TooLarge);
+        // 1 byte typed, 5 shown (`\u{1}`): 3276 of them plus the title fit, 3277 do not.
+        for (n, answer) in [(3276, Answer::Pending), (3277, Answer::TooLarge)] {
+            let mut c = ready();
+            let (i, _) = denied_at_once(
+                &mut c,
+                sized(
+                    1,
+                    &BOTH,
+                    "t",
+                    "execute",
+                    json!({ "command": "\u{1}".repeat(n) }),
+                ),
+            );
+            assert_eq!(card(&c, i).answer, answer, "{n}");
+        }
+    }
+
+    #[test]
+    fn nothing_of_a_too_large_request_is_kept_or_shown() {
+        let pad = "x".repeat(CARD_LIMIT);
+        let cases = [
+            json!({ "command": format!("SECRET-CMD {pad}") }),
+            json!({ "plan": format!("SECRET-PLAN {pad}") }),
+            json!({ "k": format!("SECRET-OTHER {pad}") }),
+            json!({ "file_path": "SECRET-PATH", "content": format!("SECRET-LINE\n{pad}") }),
+            json!({ "file_path": "SECRET-PATH", "old_string": "SECRET-OLD", "new_string": format!("SECRET-NEW\n{pad}") }),
+            json!({ "filepath": "SECRET-PATH", "diff": format!("@@ SECRET-HUNK\n+SECRET-ADD\n+{pad}") }),
+        ];
+        for raw in cases {
+            let mut c = ready();
+            let (i, _) = denied_at_once(&mut c, sized(2, &BOTH, "SECRET-TITLE", "edit", raw));
+            let card = card(&c, i);
+            let all = format!("{card:?} {:?}", c.items());
+            assert!(!all.contains("SECRET"), "{}", &all[..all.len().min(300)]);
+            assert_eq!(card.title, TOO_LARGE_TITLE);
+            let Proposal::TooLarge(bytes) = card.proposal else {
+                panic!("not too large: {:?}", card.proposal)
+            };
+            assert!(bytes > CARD_LIMIT);
+        }
+    }
+
+    #[test]
+    fn a_too_large_card_is_denied_once_and_never_approved() {
+        let mut c = ready();
+        let recorder = Recorder::default();
+        c.apply_with(
+            sized(
+                4,
+                &BOTH,
+                "t",
+                "execute",
+                json!({ "command": "x".repeat(CARD_LIMIT) }),
+            ),
+            &recorder,
+        );
+        // other events later do not repeat it
+        c.apply_with(Event::AgentText("hi".into()), &recorder);
+        c.apply_with(
+            tool("t4", Some("run"), Some("execute"), Some("failed")),
+            &recorder,
+        );
+        assert_eq!(recorder.calls(), [(4, Decision::DenyOnce)]);
+        // a click, a close and a cancel do not change it or approve it
+        assert_eq!(
+            c.click(4, Decision::ApproveOnce, &recorder),
+            Err(ClickError::AlreadyAnswered)
+        );
+        assert_eq!(
+            c.click(4, Decision::DenyOnce, &recorder),
+            Err(ClickError::AlreadyAnswered)
+        );
+        c.cancelled();
+        c.close(&recorder);
+        assert_eq!(card(&c, 0).answer, Answer::TooLarge);
+        assert_eq!(recorder.calls(), [(4, Decision::DenyOnce)]);
+        // the failed tool says "denied"
+        let Item::Tool(t) = &c.items()[2] else {
+            panic!("not a tool")
+        };
+        assert_eq!(c.tool_status(t), "denied");
+    }
+
+    #[test]
+    fn a_too_large_card_with_no_deny_choice_makes_no_call() {
+        for choices in [&[Decision::ApproveOnce][..], &[][..]] {
+            let mut c = ready();
+            let (i, calls) = denied_at_once(
+                &mut c,
+                sized(
+                    9,
+                    choices,
+                    "t",
+                    "execute",
+                    json!({ "command": "x".repeat(CARD_LIMIT) }),
+                ),
+            );
+            assert_eq!(card(&c, i).answer, Answer::TooLarge);
+            assert!(card(&c, i).buttons().is_empty());
+            assert!(calls.is_empty());
+        }
+        let mut c = ready();
+        let (_, calls) = denied_at_once(
+            &mut c,
+            sized(
+                9,
+                &[Decision::DenyOnce],
+                "t",
+                "execute",
+                json!({ "command": "x".repeat(CARD_LIMIT) }),
+            ),
+        );
+        assert_eq!(calls, [(9, Decision::DenyOnce)]);
+    }
+
+    #[test]
+    fn a_failed_decide_on_a_too_large_card_leaves_it_denied() {
+        let mut c = ready();
+        let recorder = Recorder {
+            fail: true,
+            ..Recorder::default()
+        };
+        let index = c.apply_with(
+            sized(
+                9,
+                &BOTH,
+                "t",
+                "execute",
+                json!({ "command": "x".repeat(CARD_LIMIT) }),
+            ),
+            &recorder,
+        )[0];
+        assert_eq!(card(&c, index).answer, Answer::TooLarge);
+        assert!(card(&c, index).buttons().is_empty());
+    }
+
+    #[test]
+    fn too_large_is_set_in_one_place_and_only_apply_with_calls_decide() {
+        let source = include_str!("conversation.rs");
+        let code = &source[..source.find("#[cfg(test)]").expect("tests")];
+        assert_eq!(code.matches("Answer::TooLarge").count(), 1);
+        assert_eq!(code.matches("Proposal::TooLarge(bytes)").count(), 1);
+        let apply = code.find("pub fn apply(").expect("apply");
+        let apply_body = &code[apply..apply + code[apply..].find("\n    }\n").unwrap()];
+        assert!(!apply_body.contains(".decide("), "apply never answers");
     }
 
     #[test]

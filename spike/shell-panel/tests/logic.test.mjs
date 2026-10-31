@@ -168,6 +168,38 @@ test('inputNotice: none, too long, and full (the entry may have cut a paste)', (
     assert.equal(L.inputNotice('😀'.repeat(15001)), 'long');
 });
 
+test('inputNoticeState: a cut paste stays flagged until the box is emptied', () => {
+    const a = n => 'a'.repeat(n);
+    const st = L.inputNoticeState;
+    assert.deepEqual(st(false, ''), {cut: false, kind: 'none'});
+    assert.deepEqual(st(true, ''), {cut: false, kind: 'none'});
+    assert.deepEqual(st(false, undefined), {cut: false, kind: 'none'});
+    assert.deepEqual(st(false, 'hi'), {cut: false, kind: 'none'});
+    assert.deepEqual(st(false, a(61000)), {cut: false, kind: 'long'});
+    assert.deepEqual(st(false, a(65531)), {cut: true, kind: 'full'});
+    // once cut, it stays: shorter (still too long, or sendable), even whitespace only
+    assert.deepEqual(st(true, a(65531)), {cut: true, kind: 'full'});
+    assert.deepEqual(st(true, a(61000)), {cut: true, kind: 'cut-long'});
+    assert.deepEqual(st(true, a(60000)), {cut: true, kind: 'cut'});
+    assert.deepEqual(st(true, 'hi'), {cut: true, kind: 'cut'});
+    assert.deepEqual(st(true, ' '), {cut: true, kind: 'cut'});
+});
+
+test('inputNoticeState: paste cut, shorten, send, then a new text starts clean', () => {
+    const st = L.inputNoticeState;
+    let s = st(false, 'a'.repeat(65534));          // a 1 MiB paste, cut by the entry
+    assert.equal(s.kind, 'full');
+    s = st(s.cut, 'a'.repeat(62000));              // some deleted: still too long
+    assert.equal(s.kind, 'cut-long');
+    s = st(s.cut, 'a'.repeat(59000));              // shortened: sendable, still warned
+    assert.equal(s.kind, 'cut');
+    assert.equal(L.inputVerdict('a'.repeat(59000)), 'send');   // sending stays allowed
+    s = st(s.cut, '');                             // sent or emptied
+    assert.deepEqual(s, {cut: false, kind: 'none'});
+    s = st(s.cut, 'hello');                        // a fresh text is not warned
+    assert.deepEqual(s, {cut: false, kind: 'none'});
+});
+
 test('whatever may have been cut or is over the limit is never sendable', () => {
     for (let n = L.MAX_SEND_BYTES - 2; n <= L.INPUT_LIMIT_BYTES + 5; n += 1) {
         const t = 'a'.repeat(n);
@@ -362,7 +394,15 @@ test('scan: an over-long text is refused with a notice and never cut or sent', (
     // each notice kind is wired to its own fixed text, and the text never claims
     // that nothing was cut (the box may have cut a paste before this text shrank)
     assert.ok(/kind === 'full'\)\s*this\._notice\.text = 'The box is full/.test(c));
+    assert.ok(/kind === 'cut-long'\)\s*this\._notice\.text = 'Anything pasted past the 64 KiB limit was cut and is not here\. Still too long/.test(c));
+    assert.ok(/kind === 'cut'\)\s*this\._notice\.text = 'Anything pasted past the 64 KiB limit was cut and is not here\. You can still send/.test(c));
     assert.ok(/kind === 'long'\)\s*this\._notice\.text = 'Too long to send/.test(c));
+    // the flag is kept from one change of the text to the next, starts false in
+    // every new panel, and Send never consults it (sending stays allowed)
+    assert.ok(c.includes('this._cut = state.cut;'));
+    assert.ok(c.includes('this._cut = false;'));
+    const sendBody = c.slice(c.indexOf('_send() {'));
+    assert.ok(!sendBody.slice(0, sendBody.indexOf('\n    }\n')).includes('_cut'));
     assert.ok(!/[Nn]othing was cut/.test(c));
 });
 

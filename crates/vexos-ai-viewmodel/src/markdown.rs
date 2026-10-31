@@ -43,8 +43,44 @@ pub struct Run {
     pub style: Style,
 }
 
+/// What a block is, for drawing it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BlockKind {
+    /// Also a quote or a raw HTML block: shown as text.
+    Paragraph,
+    Heading,
+    /// One list item. Its first run starts with the marker (`• ` or `3. `).
+    ListItem,
+    CodeBlock,
+    /// A table as monospace text: a header run and the body.
+    Table,
+    Rule,
+}
+
+/// One block of a reply: its kind, its list depth and its runs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Block {
+    pub kind: BlockKind,
+    /// How deeply a list item is nested (0 for the first level and for every
+    /// other kind of block), at most `MAX_INDENT`.
+    pub depth: usize,
+    pub runs: Vec<Run>,
+}
+
+/// `text` as blocks of literal text, for a front end that draws one widget per
+/// block. The same text and styles as [`markdown`], without the blank-line
+/// runs between blocks and without a list's indentation (that is `depth`).
+pub fn blocks(text: &str) -> Vec<Block> {
+    read(text).finish_blocks()
+}
+
 /// `text` as runs of literal text. Adjacent runs never share a style.
 pub fn markdown(text: &str) -> Vec<Run> {
+    read(text).finish()
+}
+
+/// Reads `text` once; the runs and the blocks are both built on the way.
+fn read(text: &str) -> Out<'_> {
     let mut out = Out {
         source: text,
         ..Out::default()
@@ -52,7 +88,7 @@ pub fn markdown(text: &str) -> Vec<Run> {
     for (event, range) in Parser::new_ext(text, Options::ENABLE_TABLES).into_offset_iter() {
         out.event(event, range);
     }
-    out.finish()
+    out
 }
 
 const TABLE: Style = Style {
@@ -166,6 +202,9 @@ struct Out<'a> {
     targets: Vec<Option<String>>,
     /// Just after a list marker: the item's first block stays on its line.
     after_marker: bool,
+    /// The blocks finished so far, and the one being built.
+    blocks: Vec<Block>,
+    open: Option<Block>,
 }
 
 impl Out<'_> {
@@ -178,12 +217,22 @@ impl Out<'_> {
         }
     }
 
+    /// Text of the reply: into the open block and into the flat runs.
     fn push(&mut self, text: &str, style: Style) {
         if text.is_empty() {
             return;
         }
         if let Some(cell) = self.table.as_mut().and_then(|t| t.cell.as_mut()) {
             cell.push_str(text);
+            return;
+        }
+        self.push_block(text, style);
+        self.push_flat(text, style);
+    }
+
+    /// Spacing between blocks: only the flat runs have it.
+    fn push_flat(&mut self, text: &str, style: Style) {
+        if text.is_empty() {
             return;
         }
         self.after_marker = false;
@@ -218,13 +267,68 @@ impl Out<'_> {
             return;
         }
         let missing = 2 - self.trailing_newlines().min(2);
-        self.push(&"\n".repeat(missing), Style::default());
+        self.push_flat(&"\n".repeat(missing), Style::default());
     }
 
     /// A new line, unless already at the start of one.
     fn line(&mut self) {
         if !self.runs.is_empty() && self.trailing_newlines() == 0 {
-            self.push("\n", Style::default());
+            self.push_flat("\n", Style::default());
+        }
+    }
+
+    /// Right after a list marker, in the item's own block: what starts here
+    /// stays in the item. (`after_marker` alone is still set after an item that
+    /// had nothing after its marker, when no block is open.)
+    fn at_item_start(&self) -> bool {
+        self.after_marker
+            && self
+                .open
+                .as_ref()
+                .is_some_and(|b| b.kind == BlockKind::ListItem)
+    }
+
+    /// Starts a block, finishing the one before it.
+    fn begin(&mut self, kind: BlockKind, depth: usize) {
+        self.end_block();
+        self.open = Some(Block {
+            kind,
+            depth,
+            runs: Vec::new(),
+        });
+    }
+
+    /// Finishes the open block: no newline at its end, and none if it is empty.
+    fn end_block(&mut self) {
+        let Some(mut block) = self.open.take() else {
+            return;
+        };
+        while let Some(last) = block.runs.last_mut() {
+            let kept = last.text.trim_end_matches('\n').len();
+            last.text.truncate(kept);
+            if !last.text.is_empty() {
+                break;
+            }
+            block.runs.pop();
+        }
+        if !block.runs.is_empty() {
+            self.blocks.push(block);
+        }
+    }
+
+    /// Text goes to the open block; with none open, a paragraph starts.
+    fn push_block(&mut self, text: &str, style: Style) {
+        let block = self.open.get_or_insert_with(|| Block {
+            kind: BlockKind::Paragraph,
+            depth: 0,
+            runs: Vec::new(),
+        });
+        match block.runs.last_mut() {
+            Some(last) if last.style == style => last.text.push_str(text),
+            _ => block.runs.push(Run {
+                text: text.to_owned(),
+                style,
+            }),
         }
     }
 
@@ -258,7 +362,9 @@ impl Out<'_> {
             Event::SoftBreak | Event::HardBreak => self.text("\n"),
             Event::Rule => {
                 self.block();
+                self.begin(BlockKind::Rule, 0);
                 self.push("———", Style::default());
+                self.end_block();
             }
             Event::TaskListMarker(done) => self.text(if done { "[x] " } else { "[ ] " }),
         }
@@ -266,14 +372,30 @@ impl Out<'_> {
 
     fn start(&mut self, tag: Tag) {
         match tag {
-            Tag::Paragraph | Tag::BlockQuote(_) | Tag::HtmlBlock => self.block(),
+            Tag::Paragraph | Tag::BlockQuote(_) | Tag::HtmlBlock => {
+                // The first paragraph of an item stays in the item's block.
+                let in_item = self.at_item_start();
+                self.block();
+                if !in_item {
+                    self.begin(BlockKind::Paragraph, 0);
+                }
+            }
             Tag::Heading { .. } => {
+                // Like a paragraph, one that opens an item stays in the item.
+                let in_item = self.at_item_start();
                 self.block();
                 self.heading = true;
+                if !in_item {
+                    self.begin(BlockKind::Heading, 0);
+                }
             }
             Tag::CodeBlock(_) => {
+                let in_item = self.at_item_start();
                 self.block();
                 self.code_block = true;
+                if !in_item {
+                    self.begin(BlockKind::CodeBlock, 0);
+                }
             }
             Tag::List(first) => {
                 if self.lists.is_empty() {
@@ -291,7 +413,9 @@ impl Out<'_> {
                     }
                     _ => "• ".to_owned(),
                 };
-                self.push(&format!("{}{marker}", "  ".repeat(depth)), Style::default());
+                self.begin(BlockKind::ListItem, depth);
+                self.push_flat(&format!("{}{marker}", "  ".repeat(depth)), Style::default());
+                self.push_block(&marker, Style::default());
                 self.after_marker = true;
             }
             Tag::Emphasis => self.italic += 1,
@@ -310,11 +434,15 @@ impl Out<'_> {
                 self.targets.push(Some(dest_url.into_string()));
             }
             Tag::Table(aligns) => {
+                let in_item = self.at_item_start();
                 self.block();
                 self.table = Some(Table {
                     aligns,
                     ..Table::default()
                 });
+                if !in_item {
+                    self.begin(BlockKind::Table, 0);
+                }
             }
             Tag::TableCell => {
                 if let Some(table) = self.table.as_mut() {
@@ -327,8 +455,19 @@ impl Out<'_> {
 
     fn end(&mut self, tag: TagEnd) {
         match tag {
-            TagEnd::Heading(_) => self.heading = false,
-            TagEnd::CodeBlock => self.code_block = false,
+            // Text after a block, inside the same item, is a new block: so
+            // every block ends at its closing tag.
+            TagEnd::Paragraph | TagEnd::BlockQuote(_) | TagEnd::HtmlBlock | TagEnd::Item => {
+                self.end_block();
+            }
+            TagEnd::Heading(_) => {
+                self.heading = false;
+                self.end_block();
+            }
+            TagEnd::CodeBlock => {
+                self.code_block = false;
+                self.end_block();
+            }
             TagEnd::List(_) => {
                 self.lists.pop();
             }
@@ -351,7 +490,10 @@ impl Out<'_> {
                     table.end_row(source);
                 }
             }
-            TagEnd::Table => self.show_table(),
+            TagEnd::Table => {
+                self.show_table();
+                self.end_block();
+            }
             _ => {}
         }
     }
@@ -370,6 +512,12 @@ impl Out<'_> {
         if let Some(Some(target)) = self.targets.pop() {
             self.push(&format!(" ({target})"), Style::default());
         }
+    }
+
+    fn finish_blocks(mut self) -> Vec<Block> {
+        self.show_table();
+        self.end_block();
+        self.blocks
     }
 
     fn finish(mut self) -> Vec<Run> {
@@ -699,5 +847,339 @@ mod tests {
     #[test]
     fn a_pipe_line_without_a_delimiter_row_is_not_a_table() {
         assert_plain("| a | b |\n| 1 | 2 |", "| a | b |\n| 1 | 2 |");
+    }
+
+    // Blocks.
+
+    fn block(kind: BlockKind, depth: usize, runs: Vec<Run>) -> Block {
+        Block { kind, depth, runs }
+    }
+
+    fn para(runs: Vec<Run>) -> Block {
+        block(BlockKind::Paragraph, 0, runs)
+    }
+
+    fn item(depth: usize, runs: Vec<Run>) -> Block {
+        block(BlockKind::ListItem, depth, runs)
+    }
+
+    #[test]
+    fn a_paragraph_keeps_its_styled_runs_and_soft_breaks() {
+        assert_eq!(
+            blocks("Hello **bold** and *it*"),
+            [para(vec![
+                run("Hello ", PLAIN),
+                run("bold", BOLD),
+                run(" and ", PLAIN),
+                run("it", ITALIC)
+            ])]
+        );
+        assert_eq!(blocks("a\nb"), [para(vec![run("a\nb", PLAIN)])]);
+        assert_eq!(
+            blocks("a\n\nb"),
+            [para(vec![run("a", PLAIN)]), para(vec![run("b", PLAIN)])]
+        );
+    }
+
+    #[test]
+    fn a_heading_is_its_own_block() {
+        assert_eq!(
+            blocks("# Title\n\ntext"),
+            [
+                block(BlockKind::Heading, 0, vec![run("Title", HEADING)]),
+                para(vec![run("text", PLAIN)])
+            ]
+        );
+    }
+
+    #[test]
+    fn list_items_are_blocks_with_their_marker_and_depth() {
+        assert_eq!(
+            blocks("- one\n- two"),
+            [
+                item(0, vec![run("• one", PLAIN)]),
+                item(0, vec![run("• two", PLAIN)])
+            ]
+        );
+        assert_eq!(
+            blocks("1. a\n2. b"),
+            [
+                item(0, vec![run("1. a", PLAIN)]),
+                item(0, vec![run("2. b", PLAIN)])
+            ]
+        );
+        assert_eq!(
+            blocks("- a\n  - b\n    - c\n- d"),
+            [
+                item(0, vec![run("• a", PLAIN)]),
+                item(1, vec![run("• b", PLAIN)]),
+                item(2, vec![run("• c", PLAIN)]),
+                item(0, vec![run("• d", PLAIN)])
+            ]
+        );
+        assert_eq!(
+            blocks("- [x] done\n- [ ] todo"),
+            [
+                item(0, vec![run("• [x] done", PLAIN)]),
+                item(0, vec![run("• [ ] todo", PLAIN)])
+            ]
+        );
+        assert_eq!(
+            blocks("- **b** rest"),
+            [item(
+                0,
+                vec![run("• ", PLAIN), run("b", BOLD), run(" rest", PLAIN)]
+            )]
+        );
+    }
+
+    #[test]
+    fn a_second_paragraph_in_an_item_is_its_own_block() {
+        assert_eq!(
+            blocks("- a\n\n  second\n- b"),
+            [
+                item(0, vec![run("• a", PLAIN)]),
+                para(vec![run("second", PLAIN)]),
+                item(0, vec![run("• b", PLAIN)])
+            ]
+        );
+    }
+
+    #[test]
+    fn code_blocks_hold_their_text_without_the_final_newline() {
+        let code = |text: &str| block(BlockKind::CodeBlock, 0, vec![run(text, CODE)]);
+        assert_eq!(blocks("```\nlet x = 1;\n```"), [code("let x = 1;")]);
+        assert_eq!(blocks("```rust\na\n\nb\n```"), [code("a\n\nb")]);
+        assert_eq!(blocks("    indented\n    more"), [code("indented\nmore")]);
+        assert_eq!(
+            blocks("before\n\n```\nx\n```\n\nafter"),
+            [
+                para(vec![run("before", PLAIN)]),
+                code("x"),
+                para(vec![run("after", PLAIN)])
+            ]
+        );
+    }
+
+    #[test]
+    fn text_after_a_code_block_or_heading_inside_an_item_is_a_new_block() {
+        let code = |text: &str| block(BlockKind::CodeBlock, 0, vec![run(text, CODE)]);
+        assert_eq!(
+            blocks(
+                "1. Run this:\n   ```\n   just build\n   ```\n   Then check the output.\n2. Next"
+            ),
+            [
+                item(0, vec![run("1. Run this:", PLAIN)]),
+                code("just build"),
+                para(vec![run("Then check the output.", PLAIN)]),
+                item(0, vec![run("2. Next", PLAIN)])
+            ]
+        );
+        assert_eq!(
+            blocks("- a\n  # Title\n  body text"),
+            [
+                item(0, vec![run("• a", PLAIN)]),
+                block(BlockKind::Heading, 0, vec![run("Title", HEADING)]),
+                para(vec![run("body text", PLAIN)])
+            ]
+        );
+    }
+
+    #[test]
+    fn an_item_that_starts_with_a_heading_or_code_keeps_its_bullet_with_it() {
+        assert_eq!(
+            blocks("- # Title\n  body text"),
+            [
+                item(0, vec![run("• ", PLAIN), run("Title", HEADING)]),
+                para(vec![run("body text", PLAIN)])
+            ]
+        );
+        assert_eq!(
+            blocks("- ```\n  code\n  ```\n- next"),
+            [
+                item(0, vec![run("• ", PLAIN), run("code", CODE)]),
+                item(0, vec![run("• next", PLAIN)])
+            ]
+        );
+    }
+
+    #[test]
+    fn a_block_after_an_empty_item_keeps_its_own_kind() {
+        let code = |text: &str| block(BlockKind::CodeBlock, 0, vec![run(text, CODE)]);
+        assert_eq!(
+            blocks("-\n# h"),
+            [
+                item(0, vec![run("• ", PLAIN)]),
+                block(BlockKind::Heading, 0, vec![run("h", HEADING)])
+            ]
+        );
+        assert_eq!(
+            blocks("1.\n```bash\nnix build\n```"),
+            [item(0, vec![run("1. ", PLAIN)]), code("nix build")]
+        );
+        // Text after an empty item is a paragraph of its own, also inside a list.
+        assert_eq!(
+            blocks("-\ntext"),
+            [
+                item(0, vec![run("• ", PLAIN)]),
+                para(vec![run("text", PLAIN)])
+            ]
+        );
+        assert_eq!(
+            blocks("- a\n\n  -\n  tail"),
+            [
+                item(0, vec![run("• a", PLAIN)]),
+                item(1, vec![run("• ", PLAIN)]),
+                para(vec![run("tail", PLAIN)])
+            ]
+        );
+    }
+
+    #[test]
+    fn an_item_that_starts_with_a_table_keeps_its_bullet_with_it() {
+        let table = "| a | b |\n|---|---|\n| 1 | 2 |";
+        let got = blocks(&format!("- {}", table.replace('\n', "\n  ")));
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!(got[0].kind, BlockKind::ListItem);
+        assert_eq!(got[0].runs[0], run("• ", PLAIN));
+        assert_eq!(got[0].runs[1..], markdown(table)[..]);
+    }
+
+    #[test]
+    fn a_table_is_one_block_with_the_runs_the_flat_output_has() {
+        let table = "| a | b |\n|---|---|\n| 1 | 22 |";
+        assert_eq!(blocks(table), [block(BlockKind::Table, 0, markdown(table))]);
+        let around = format!("intro\n\n{table}\n\noutro");
+        let got = blocks(&around);
+        assert_eq!(got.len(), 3);
+        assert_eq!(got[1].kind, BlockKind::Table);
+        assert_eq!(got[1].runs, markdown(table));
+    }
+
+    #[test]
+    fn a_rule_a_quote_and_raw_html_are_blocks_of_text() {
+        assert_eq!(
+            blocks("a\n\n---\n\nb"),
+            [
+                para(vec![run("a", PLAIN)]),
+                block(BlockKind::Rule, 0, vec![run("———", PLAIN)]),
+                para(vec![run("b", PLAIN)])
+            ]
+        );
+        assert_eq!(blocks("> quote"), [para(vec![run("quote", PLAIN)])]);
+        assert_eq!(
+            blocks("<script>alert(1)</script>\n\n**x** <b>y</b>"),
+            [
+                para(vec![run("<script>alert(1)</script>", PLAIN)]),
+                para(vec![run("x", BOLD), run(" <b>y</b>", PLAIN)])
+            ]
+        );
+    }
+
+    #[test]
+    fn links_and_images_are_text_followed_by_their_target() {
+        let b = blocks("[t](http://x) ![alt](http://y)");
+        assert_eq!(b.len(), 1);
+        let text: String = b[0].runs.iter().map(|r| r.text.as_str()).collect();
+        assert_eq!(text, "t (http://x) [image: alt] (http://y)");
+        let flat: String = markdown("[t](http://x) ![alt](http://y)")
+            .iter()
+            .map(|r| r.text.as_str())
+            .collect();
+        assert_eq!(text, flat);
+    }
+
+    #[test]
+    fn nothing_gives_no_blocks() {
+        assert!(blocks("").is_empty());
+        assert!(blocks("   \n\n  \n").is_empty());
+    }
+
+    const CORPUS: &[&str] = &[
+        "plain",
+        "a\n\nb\n\nc",
+        "# H1\n## H2\ntext **b** *i* `c`",
+        "- a\n- b\n  - c\n    - d\n- e",
+        "1. one\n2. two\n   - nested\n3. three",
+        "- a\n\n  second para\n\n  ```\n  code\n  ```\n- b",
+        "```\ncode\n```\n\n    indented\n\ntext",
+        "| a | b |\n|:--|--:|\n| 1 | 2 |\n| 3 |",
+        "text\n\n| h |\n|---|\n| x |\n\nmore",
+        "> quote\n> more\n\n> second",
+        "---\n\ntext\n\n***",
+        "[l](http://a) ![i](http://b) <http://c> <b>html</b>",
+        "- [x] done\n- [ ] todo\n- plain",
+        "<div>\nraw\n</div>\n\nafter",
+        "**bold *both* bold** and _it_ and ~~del~~",
+        "line one  \nline two\\\nline three",
+        "```\nunterminated",
+        "| unterminated | table",
+        "a\n- b\n- c\nd",
+        "text with \u{202e} and \u{0} controls\n\n- \u{1b}[31mred",
+    ];
+
+    /// The text and the styles, without spacing: what a front end draws.
+    fn essence(runs: &[Run]) -> (String, [String; 4]) {
+        let mut styles: [String; 4] = Default::default();
+        let mut all = String::new();
+        for run in runs {
+            let text: String = run.text.chars().filter(|c| !c.is_whitespace()).collect();
+            all.push_str(&text);
+            for (slot, on) in styles.iter_mut().zip([
+                run.style.bold,
+                run.style.italic,
+                run.style.code,
+                run.style.heading,
+            ]) {
+                if on {
+                    slot.push_str(&text);
+                }
+            }
+        }
+        (all, styles)
+    }
+
+    #[test]
+    fn the_blocks_carry_the_same_text_and_styles_as_the_flat_runs() {
+        for text in CORPUS {
+            let flat = markdown(text);
+            let all: Vec<Run> = blocks(text).into_iter().flat_map(|b| b.runs).collect();
+            assert_eq!(essence(&all), essence(&flat), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn blocks_have_no_empty_parts_and_no_blank_edges() {
+        for text in CORPUS {
+            for b in blocks(text) {
+                assert!(!b.runs.is_empty(), "{text:?}");
+                assert!(b.runs.iter().all(|r| !r.text.is_empty()), "{text:?}");
+                assert!(!b.runs[0].text.starts_with('\n'), "{text:?} {b:?}");
+                assert!(
+                    !b.runs.last().unwrap().text.ends_with('\n'),
+                    "{text:?} {b:?}"
+                );
+                assert!(
+                    b.runs.windows(2).all(|w| w[0].style != w[1].style),
+                    "{text:?} {b:?}"
+                );
+                assert!(b.depth <= MAX_INDENT);
+                if b.kind != BlockKind::ListItem {
+                    assert_eq!(b.depth, 0, "{text:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn deep_lists_stop_at_the_depth_cap_and_large_input_does_not_panic() {
+        let deep: String = (0..60)
+            .map(|i| format!("{}- x\n", "  ".repeat(i)))
+            .collect();
+        let b = blocks(&deep);
+        assert!(b.iter().all(|x| x.depth <= MAX_INDENT));
+        assert!(b.iter().any(|x| x.depth == MAX_INDENT));
+        let big = "- item **x** `y`\n\n".repeat(20_000);
+        assert!(blocks(&big).len() >= 20_000);
     }
 }

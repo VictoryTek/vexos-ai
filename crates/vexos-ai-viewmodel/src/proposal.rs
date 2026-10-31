@@ -7,6 +7,8 @@
 
 use serde_json::Value;
 
+use crate::escape::visible;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Proposal {
     Command(String),
@@ -18,6 +20,9 @@ pub enum Proposal {
     Plan(String),
     /// Anything else, as pretty-printed JSON.
     Other(String),
+    /// Stands in for a request too large to review: only its size, in bytes
+    /// after escaping. None of the request is kept.
+    TooLarge(usize),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -79,11 +84,65 @@ impl Proposal {
         }
         Proposal::Other(serde_json::to_string_pretty(raw).unwrap_or_default())
     }
+
+    /// How many bytes the proposal shows: its text, and a line break after
+    /// every diff line.
+    pub fn shown_bytes(&self) -> usize {
+        match self {
+            Proposal::Command(text) | Proposal::Plan(text) | Proposal::Other(text) => text.len(),
+            Proposal::Diff { path, lines } => {
+                path.len()
+                    + lines
+                        .iter()
+                        .map(|line| match line {
+                            DiffLine::Hunk(text)
+                            | DiffLine::Context(text)
+                            | DiffLine::Removed(text)
+                            | DiffLine::Added(text) => text.len() + 1,
+                        })
+                        .sum::<usize>()
+            }
+            Proposal::TooLarge(_) => 0,
+        }
+    }
+
+    /// The same proposal with every string made visible (see `escape`).
+    pub fn escaped(self) -> Proposal {
+        match self {
+            Proposal::Command(text) => Proposal::Command(visible(&text)),
+            Proposal::Plan(text) => Proposal::Plan(visible(&text)),
+            Proposal::Other(text) => Proposal::Other(visible(&text)),
+            Proposal::TooLarge(bytes) => Proposal::TooLarge(bytes),
+            Proposal::Diff { path, lines } => Proposal::Diff {
+                path: visible(&path),
+                lines: lines
+                    .into_iter()
+                    .map(|line| match line {
+                        DiffLine::Hunk(text) => DiffLine::Hunk(visible(&text)),
+                        DiffLine::Context(text) => DiffLine::Context(visible(&text)),
+                        DiffLine::Removed(text) => DiffLine::Removed(visible(&text)),
+                        DiffLine::Added(text) => DiffLine::Added(visible(&text)),
+                    })
+                    .collect(),
+            },
+        }
+    }
+}
+
+/// The lines of `text`, split on `\n` only, so a `\r` stays in its line and is
+/// shown; a final newline adds no empty line.
+fn split_lines(text: &str) -> Vec<&str> {
+    let mut lines: Vec<&str> = text.split('\n').collect();
+    if lines.last() == Some(&"") {
+        lines.pop();
+    }
+    lines
 }
 
 /// Lines of a unified diff, without its file headers.
 fn parse_unified(diff: &str) -> Vec<DiffLine> {
-    diff.lines()
+    split_lines(diff)
+        .into_iter()
         .filter_map(|line| {
             if line.starts_with("Index: ")
                 || line.starts_with("===")
@@ -113,8 +172,8 @@ const DIFF_LIMIT: usize = 1_000_000;
 
 /// A line diff of `old` against `new` (longest common subsequence).
 pub fn line_diff(old: &str, new: &str) -> Vec<DiffLine> {
-    let a: Vec<&str> = old.lines().collect();
-    let b: Vec<&str> = new.lines().collect();
+    let a = split_lines(old);
+    let b = split_lines(new);
     let removed = |l: &&str| DiffLine::Removed((*l).to_owned());
     let added = |l: &&str| DiffLine::Added((*l).to_owned());
     if a.len().saturating_mul(b.len()) > DIFF_LIMIT {
@@ -155,6 +214,110 @@ mod tests {
 
     fn s(text: &str) -> String {
         text.to_owned()
+    }
+
+    #[test]
+    fn a_carriage_return_stays_in_a_diff_line() {
+        // CRLF to LF is a change the card must show.
+        assert_eq!(
+            line_diff("a\r\nb", "a\nb"),
+            vec![Removed(s("a\r")), Added(s("a")), Context(s("b"))]
+        );
+        assert_eq!(line_diff("a\r\n", "a\r\n"), vec![Context(s("a\r"))]);
+        let raw = json!({ "file_path": "f", "old_string": "a\r\nb", "new_string": "a\nb" });
+        let Proposal::Diff { lines, .. } = Proposal::from_request(Some("edit"), &raw).escaped()
+        else {
+            panic!("not a diff")
+        };
+        assert_eq!(lines[0], Removed(s("a\\u{d}")));
+        let unified = json!({ "filepath": "f", "diff": "@@ -1 +1 @@\r\n-a\r\n+b\r\n" });
+        let Proposal::Diff { lines, .. } = Proposal::from_request(None, &unified).escaped() else {
+            panic!("not a diff")
+        };
+        assert_eq!(
+            lines,
+            vec![
+                Hunk(s("@@ -1 +1 @@\\u{d}")),
+                Removed(s("a\\u{d}")),
+                Added(s("b\\u{d}"))
+            ]
+        );
+    }
+
+    #[test]
+    fn lines_are_split_on_newlines_only_and_a_final_newline_adds_none() {
+        assert_eq!(line_diff("", ""), vec![]);
+        assert_eq!(line_diff("a", "a"), vec![Context(s("a"))]);
+        assert_eq!(line_diff("a\n", "a"), vec![Context(s("a"))]);
+        assert_eq!(line_diff("\n", ""), vec![Removed(s(""))]);
+        assert_eq!(
+            line_diff("a\n\n", "a\n"),
+            vec![Context(s("a")), Removed(s(""))]
+        );
+    }
+
+    #[test]
+    fn shown_bytes_counts_the_text_and_a_break_after_each_diff_line() {
+        assert_eq!(Proposal::Command(s("ls -l")).shown_bytes(), 5);
+        assert_eq!(Proposal::Plan(s("é日")).shown_bytes(), 5);
+        assert_eq!(Proposal::Other(s("{}")).shown_bytes(), 2);
+        assert_eq!(Proposal::TooLarge(99).shown_bytes(), 0);
+        assert_eq!(
+            Proposal::Diff {
+                path: s("/a"),
+                lines: vec![
+                    Hunk(s("@@")),
+                    Added(s("ab")),
+                    Removed(s("")),
+                    Context(s("é"))
+                ]
+            }
+            .shown_bytes(),
+            2 + (2 + 1) + (2 + 1) + 1 + (2 + 1)
+        );
+        assert_eq!(
+            Proposal::Diff {
+                path: s(""),
+                lines: vec![]
+            }
+            .shown_bytes(),
+            0
+        );
+    }
+
+    #[test]
+    fn every_string_of_a_proposal_is_made_visible() {
+        let hid = "x\u{202e}y";
+        let shown = r"x\u{202e}y";
+        assert_eq!(
+            Proposal::Command(s(hid)).escaped(),
+            Proposal::Command(s(shown))
+        );
+        assert_eq!(Proposal::Plan(s(hid)).escaped(), Proposal::Plan(s(shown)));
+        assert_eq!(Proposal::Other(s(hid)).escaped(), Proposal::Other(s(shown)));
+        assert_eq!(
+            Proposal::Diff {
+                path: s(hid),
+                lines: vec![
+                    Hunk(s(hid)),
+                    Context(s(hid)),
+                    Removed(s(hid)),
+                    Added(s(hid)),
+                    Added(s("plain")),
+                ]
+            }
+            .escaped(),
+            Proposal::Diff {
+                path: s(shown),
+                lines: vec![
+                    Hunk(s(shown)),
+                    Context(s(shown)),
+                    Removed(s(shown)),
+                    Added(s(shown)),
+                    Added(s("plain")),
+                ]
+            }
+        );
     }
 
     #[test]
