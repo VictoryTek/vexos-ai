@@ -122,8 +122,8 @@ The panel is drawn inside GNOME Shell with St widgets. A headless Rust helper ho
 ## 8. Phase F: Small cleanups in this repo
 
 - [ ] **F1** Markdown tables wider than the window lose alignment. Make them scroll or wrap sensibly in the front end that ships.
-- [ ] **F2** Search docs and comments for statements about removed features (accounts, autoswitch, usage probe and timer, rebuild button, agent picker, "never start a session from a notification") and fix or mark them superseded.
-- [ ] **F3** Make sure target/ scratch and download folders are gitignored. List anything the user should delete by hand.
+- [x] **F2** — done 2026-10-31: every code comment and the other specs already mark removed features; only `assistant_panel_spec.md` had no banner, so it got one (accounts, picker, OpenCode, rebuild button, usage cache). Original: Search docs and comments for statements about removed features (accounts, autoswitch, usage probe and timer, rebuild button, agent picker, "never start a session from a notification") and fix or mark them superseded.
+- [x] **F3** — done 2026-10-31: `/target` and `/result*` are gitignored; `spike/acp/out/` is ignored too (by its own rule). No `target/tools/dl` exists and no `/tmp/bats-run-*` or `/tmp/vexos-ai-spike-*` are left. Delete by hand if you want the space: `target/` (about 8.4 GB). Original: Make sure target/ scratch and download folders are gitignored. List anything the user should delete by hand.
 
 ---
 
@@ -166,6 +166,8 @@ For each item, write the full prompt here (with the scope rule, verification and
 
 ## 13. Log (newest first; one line per item touched)
 
+- 2026-10-31 F2 done: banner added to assistant_panel_spec.md.
+- 2026-10-31 F3 done: scratch folders are ignored; nothing to remove but `target/`.
 - 2026-10-31 E3 done: OpenCode removed (see item).
 - 2026-10-31 A4 decided: require extension, no GTK fallback.
 - 2026-10-31 A5 confirmed: end at close. A1 deferred by the user.

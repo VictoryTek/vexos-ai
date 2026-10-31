@@ -6,6 +6,18 @@ Builds on `docs/spec.md` (decided 2026-10-06). Phases 0 and 1 of that plan are
 done; its Phase 2 (Rust core) is next and is a prerequisite here.
 **Multi-account is deferred** (2026-10-24): the core uses the user's default Claude login and never sets or reads `CLAUDE_CONFIG_DIR`.
 
+> **Superseded in part (2026-10-31).** This is the original design; what shipped
+> differs. Treat these as history, not the plan: accounts (removed, 2026-10-27:
+> account rows, "Use", `account use`, `claude-accounts/`), the agent radio
+> items and agent switching (`pick` stays in the CLI, but the panel starts the
+> saved agent with no picker), OpenCode (removed), the "Run `just rebuild`"
+> button and its embedded VTE terminal (removed, 2026-10-29; applying changes
+> stays a terminal action), and usage read from `status --json` and a usage
+> cache (usage now comes from the agent's own `/usage`; see
+> `usage_display_spec.md`). The Quick Settings tile shows or hides the panel;
+> it has no account or usage menu. Current rules: `docs/contract.md` and
+> `VexOS AI assistant: remaining work plan.md`.
+
 ## 1. Request
 
 A native, polished UI for talking to the AI assistant about OS tasks, in place
