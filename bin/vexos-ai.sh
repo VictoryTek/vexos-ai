@@ -1,8 +1,7 @@
 # vexos-ai — VexOS AI assistant launcher (modules/ai.nix).
 #
-# Opens the user's chosen coding agent (Claude Code or OpenCode) in a terminal,
-# working in /etc/nixos, with the VexOS skills (files/ai/skills) installed in
-# ~/.claude/skills — both agents read that directory. Also owns the pieces
+# Opens Claude Code in a terminal, working in /etc/nixos, with the VexOS skills
+# (files/ai/skills) installed in ~/.claude/skills. Also owns the pieces
 # around it: first-run picker, theme sync, and "diagnose with AI" for crashes,
 # failed units and failed rebuilds. Claude always runs with its default
 # sign-in (~/.claude); the multiple-accounts feature is removed.
@@ -92,37 +91,35 @@ capture_state() { if [[ -e $CAPTURE_OFF_FILE ]]; then echo off; else echo on; fi
 
 # ── Picker ───────────────────────────────────────────────────────────────────
 
-# pick_agent [claude|opencode]. With a name it only validates and saves. With
-# none it asks (dialog, else terminal) and exits 4 when asking is not allowed.
+# pick_agent [claude]. With a name it only validates and saves. With none it
+# asks (dialog, else terminal) and exits 4 when asking is not allowed. Claude
+# Code is the only assistant; OpenCode was removed.
 pick_agent() {
   local choice=${1:-}
   if [[ -n $choice ]]; then
     case "$choice" in
-    claude | opencode) ;;
-    *) die_usage "unknown assistant '$choice' (use claude or opencode)" ;;
+    claude) ;;
+    *) die_usage "unknown assistant '$choice' (use claude)" ;;
     esac
   else
-    interactive_ok || die_needs_input "no assistant given (use: vexos-ai pick claude|opencode)"
+    interactive_ok || die_needs_input "no assistant given (use: vexos-ai pick claude)"
     if have_gui; then
       choice=$(zenity --list --radiolist --title="$TITLE" \
-        --text="Choose your AI assistant. You can change this later from the VexOS Assistant menu." \
+        --text="Choose your AI assistant." \
         --column="" --column="id" --column="Assistant" --column="About" \
         --hide-column=2 --print-column=2 --width=640 --height=260 \
-        TRUE claude "Claude Code" "Anthropic. Sign in with a Claude subscription or API key." \
-        FALSE opencode "OpenCode" "Open source. Claude, ChatGPT, local models and more.") || return 1
+        TRUE claude "Claude Code" "Anthropic. Sign in with a Claude subscription or API key.") || return 1
     else
-      read -r -p "Choose assistant [claude/opencode]: " choice
+      read -r -p "Choose assistant [claude]: " choice
     fi
     case "$choice" in
-    claude | opencode) ;;
+    claude) ;;
     *) echo "No assistant chosen." >&2; return 1 ;;
     esac
   fi
   mkdir -p "$CONF_DIR"
   printf '%s\n' "$choice" >"$AGENT_FILE"
 }
-
-agent_title() { if [[ $1 == claude ]]; then echo "Claude Code"; else echo "OpenCode"; fi; }
 
 # ── Launch ───────────────────────────────────────────────────────────────────
 
@@ -140,15 +137,11 @@ launch() {
   cd "$WORKDIR" 2>/dev/null || cd "$HOME"
 
   case "$agent" in
-  claude)
+  claude | opencode) # opencode: a value saved before OpenCode was removed
     command -v claude >/dev/null || die_missing "claude is not installed"
     if [[ -n $prompt ]]; then exec claude "$prompt"; else exec claude; fi
     ;;
-  opencode)
-    command -v opencode >/dev/null || die_missing "opencode is not installed"
-    if [[ -n $prompt ]]; then exec opencode --prompt "$prompt"; else exec opencode; fi
-    ;;
-  *) die "unknown assistant '$agent' in $AGENT_FILE (run: vexos-ai pick claude|opencode)" ;;
+  *) die "unknown assistant '$agent' in $AGENT_FILE (run: vexos-ai pick claude)" ;;
   esac
 }
 
@@ -161,7 +154,7 @@ launch() {
 status_json() {
   local agent reboot=false
   agent=$(default_agent)
-  [[ $agent == claude || $agent == opencode ]] || agent=""
+  [[ $agent == claude ]] || agent=""
   if [[ -e $CURRENT_SYSTEM/sw/bin/vexos-ai && ! -e $BOOTED_SYSTEM/sw/bin/vexos-ai ]]; then reboot=true; fi
 
   # -M: jq colours its output on a terminal, and this runs in VexPortal's VTE.
@@ -201,7 +194,6 @@ status_cmd() {
 # (modules/gnome-*.nix). Claude Code gets a matching custom theme, which it
 # hot-reloads from ~/.claude/themes/. A theme the user picked themselves is left
 # alone; only an unset theme or our own is (re)pointed at "custom:vexos".
-# OpenCode follows the terminal palette ("theme": "system", modules/ai.nix).
 
 accent_hex() {
   case "$1" in
@@ -212,7 +204,7 @@ accent_hex() {
 }
 
 theme_sync() {
-  local scheme accent base hex home="$HOME/.claude" settings tmp tui
+  local scheme accent base hex home="$HOME/.claude" settings tmp
   scheme=$(gsettings get org.gnome.desktop.interface color-scheme 2>/dev/null || echo "'prefer-dark'")
   accent=$(gsettings get org.gnome.desktop.interface accent-color 2>/dev/null || echo "'blue'")
   accent=${accent//\'/}
@@ -235,13 +227,6 @@ theme_sync() {
     echo '{ "theme": "custom:vexos" }' >"$settings"
   fi
 
-  # OpenCode keeps its theme in tui.json; "system" follows the terminal
-  # palette, so it tracks light/dark on its own. Only written when absent.
-  tui="${XDG_CONFIG_HOME:-$HOME/.config}/opencode/tui.json"
-  if [[ ! -e $tui ]]; then
-    mkdir -p "${tui%/*}"
-    jq -n '{ "$schema": "https://opencode.ai/tui.json", theme: "system" }' >"$tui"
-  fi
   echo "Claude Code theme: $base, accent $accent ($hex)"
 }
 
@@ -379,7 +364,7 @@ crash_watch() {
       [[ $exe == /* ]] && name=${exe##*/}             # comm is truncated to 15 chars
       name=${name##*/}
       [[ -n $name && $name != - && $name != . && $name != .. ]] || name=unknown
-      [[ $name == vexos-ai* || $name == claude || $name == opencode ]] && continue
+      [[ $name == vexos-ai* || $name == claude ]] && continue
       [[ -e $MUTE_DIR/$name ]] && continue
 
       now=$(date +%s)
@@ -404,7 +389,7 @@ welcome() {
   action=$(notify-send -a "$TITLE" -i utilities-terminal \
     --action=setup="Set up" --wait \
     "Set up your AI assistant" \
-    "Let Claude Code or OpenCode help you change and troubleshoot VexOS." 2>/dev/null || true)
+    "Let Claude Code help you change and troubleshoot VexOS." 2>/dev/null || true)
   [[ $action == setup ]] && pick_agent && in_new_terminal
 }
 
@@ -415,7 +400,7 @@ Usage: vexos-ai [--non-interactive] [--json] [command]
   (none)                    open your AI assistant in a terminal (in /etc/nixos)
   --prompt "<text>"         open it with a task
   prompt <text…>            the same, words joined
-  pick [claude|opencode]    choose the assistant (no argument: ask)
+  pick [claude]             choose the assistant (no argument: ask)
   status [--json] [--refresh]   state; --refresh is accepted and ignored
   diagnose [unit|rebuild]   collect logs (or reproduce a failed rebuild) and ask what is wrong
   crash <pid> [comm exe sig]  diagnose a core dump (see: coredumpctl list)
@@ -462,9 +447,9 @@ case "$cmd" in
   launch "$*"
   ;;
 pick)
-  [[ $# -le 1 ]] || die_usage "usage: vexos-ai pick [claude|opencode]"
+  [[ $# -le 1 ]] || die_usage "usage: vexos-ai pick [claude]"
   pick_agent "${1:-}" || exit 1
-  say "Assistant set to $(agent_title "$(default_agent)")."
+  say "Assistant set to Claude Code."
   finish
   ;;
 status) status_cmd "$@" ;;

@@ -351,7 +351,7 @@ fn the_panel_cannot_write_or_switch_the_agent_choice() {
     assert_eq!(main.matches("saved_agent(").count(), 1);
     // No switcher, and no agent named by the panel: it only passes on what
     // the reader returned.
-    assert!(!main.contains("Agent::Claude") && !main.contains("Agent::OpenCode"));
+    assert!(!main.contains("Agent::Claude"));
     assert!(!main.contains("Choose an agent") && !main.contains("Start a session"));
     // The conversation page uses a Stack (empty page or list); a switcher
     // between agents would be a StackSwitcher or a dropdown.

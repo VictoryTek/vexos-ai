@@ -1,4 +1,4 @@
-# NixOS module for the VexOS AI assistant: Claude Code and OpenCode, taught how
+# NixOS module for the VexOS AI assistant: Claude Code, taught how
 # VexOS works and fenced off from applying changes. The agent edits /etc/nixos
 # side-files and dry-builds; the user runs `just rebuild`.
 #
@@ -7,10 +7,10 @@
 # programs.vexos-ai.enable — the same split as vex-vpn.
 #
 # What it installs:
-#   - claude-code + opencode (packages are options; vexos-nix passes unstable)
+#   - claude-code (the package is an option; vexos-nix passes unstable)
 #   - vexos-ai: launcher, first-run picker, theme sync, "diagnose with AI"
 #   - the VexOS skills at /etc/vexos/ai/skills, linked into ~/.claude/skills
-#     (Claude Code and OpenCode read it) and ~/.agents/skills (the generic spot)
+#     (Claude Code reads it) and ~/.agents/skills (the generic spot)
 #   - system-wide (managed) agent policy: never apply (switch/boot/rebuild
 #     denied), always ask (no auto-approving modes); see nix/policy.nix
 #   - user services: crash watcher, theme watcher, welcome
@@ -31,7 +31,7 @@ let
 
   # The panel drives the agents over ACP; these versions were tested live
   # (assistant_panel_spike_results.md). 26.05's claude-agent-acp is 0.36.1.
-  minimum = { claudeAcp = "0.88.0"; opencode = "1.19.0"; };
+  minimum = { claudeAcp = "0.88.0"; };
 
   # The panel runs the pinned agents, whatever else is on the user's PATH.
   panel = pkgs.symlinkJoin {
@@ -41,7 +41,7 @@ let
     # D-Bus activation (the Shell extension) must start the wrapped panel too.
     postBuild = ''
       wrapProgram $out/bin/vexos-ai-panel \
-        --prefix PATH : ${lib.makeBinPath [ cfg.claudeAcpPackage cfg.opencodePackage ]}
+        --prefix PATH : ${lib.makeBinPath [ cfg.claudeAcpPackage ]}
       service=$out/share/dbus-1/services/io.github.victorytek.VexosAssistant.service
       rm $service
       printf '%s\n' '[D-BUS Service]' 'Name=io.github.victorytek.VexosAssistant' \
@@ -56,7 +56,7 @@ let
     let etc = config.environment.etc; in
     etc ? ${path} && etc.${path}.enable && etc.${path}.text == text;
 
-  # The system profile on PATH: these services launch claude/opencode, the
+  # The system profile on PATH: these services launch claude, the
   # terminal (xdg-terminal-exec) and vexos-ai itself by name.
   userService = description: script: {
     inherit description;
@@ -68,8 +68,13 @@ let
   };
 in
 {
+  imports = [
+    (lib.mkRemovedOptionModule [ "programs" "vexos-ai" "opencodePackage" ]
+      "OpenCode was removed from vexos-ai; delete this setting.")
+  ];
+
   options.programs.vexos-ai = {
-    enable = lib.mkEnableOption "the VexOS AI assistant (Claude Code or OpenCode)";
+    enable = lib.mkEnableOption "the VexOS AI assistant (Claude Code)";
 
     claudePackage = lib.mkOption {
       type = lib.types.package;
@@ -81,22 +86,15 @@ in
       '';
     };
 
-    opencodePackage = lib.mkOption {
-      type = lib.types.package;
-      default = pkgs.opencode;
-      defaultText = lib.literalExpression "pkgs.opencode";
-      description = "OpenCode package.";
-    };
-
     enablePanel = lib.mkOption {
       type = lib.types.bool;
       default = cfg.enable;
       defaultText = lib.literalExpression "config.programs.vexos-ai.enable";
       description = ''
         The assistant panel (vexos-ai-panel) and its desktop entry. It needs
-        the managed agent policy that `enable` installs, and agents at least
-        as new as the ones it was tested with (claude-agent-acp
-        ${minimum.claudeAcp}, opencode ${minimum.opencode}).
+        the managed agent policy that `enable` installs, and an agent adapter at least
+        as new as the one it was tested with (claude-agent-acp
+        ${minimum.claudeAcp}).
       '';
     };
 
@@ -129,7 +127,6 @@ in
   config = lib.mkMerge [ (lib.mkIf cfg.enable {
     environment.systemPackages = [
       cfg.claudePackage
-      cfg.opencodePackage
       package
     ];
 
@@ -138,8 +135,8 @@ in
 
     # One link per skill (not the whole directory) so the user's own skills in
     # ~/.claude/skills are left alone. L+ only replaces the link itself.
-    # OpenCode reads ~/.claude/skills too; ~/.agents/skills is the generic
-    # location other agents use, so the skills are linked there as well.
+    # ~/.agents/skills is the generic location other agents use, so the
+    # skills are linked there as well.
     systemd.user.tmpfiles.rules = lib.concatMap
       (dir: map (s: "L+ %h/${dir}/${s} - - - - /etc/vexos/ai/skills/${s}") skills)
       [ ".claude/skills" ".agents/skills" ];
@@ -147,7 +144,6 @@ in
     # ── Agent policy ─────────────────────────────────────────────────────────
     # Never apply, always ask: see nix/policy.nix.
     environment.etc."claude-code/managed-settings.d/50-vexos.json".text = builtins.toJSON policy.claude;
-    environment.etc."opencode/opencode.json".text = builtins.toJSON policy.opencode;
 
     # ── User services ────────────────────────────────────────────────────────
     # `vexos-ai crash-capture off` creates the flag file; the unit then does not
@@ -174,16 +170,8 @@ in
         message = "programs.vexos-ai.enablePanel needs Claude's managed policy at /etc/claude-code/managed-settings.d/50-vexos.json, as nix/policy.nix renders it.";
       }
       {
-        assertion = managed "opencode/opencode.json" (builtins.toJSON policy.opencode);
-        message = "programs.vexos-ai.enablePanel needs OpenCode's managed policy at /etc/opencode/opencode.json, as nix/policy.nix renders it.";
-      }
-      {
         assertion = lib.versionAtLeast (lib.getVersion cfg.claudeAcpPackage) minimum.claudeAcp;
         message = "programs.vexos-ai.claudeAcpPackage is ${lib.getVersion cfg.claudeAcpPackage}; the panel needs ${minimum.claudeAcp} or later. Pass the nixpkgs-unstable build (pkgs.unstable.claude-agent-acp).";
-      }
-      {
-        assertion = lib.versionAtLeast (lib.getVersion cfg.opencodePackage) minimum.opencode;
-        message = "programs.vexos-ai.opencodePackage is ${lib.getVersion cfg.opencodePackage}; the panel needs ${minimum.opencode} or later. Pass the nixpkgs-unstable build (pkgs.unstable.opencode).";
       }
     ];
 

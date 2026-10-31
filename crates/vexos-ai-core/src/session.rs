@@ -376,30 +376,14 @@ impl Inner {
         let sid = self.session_id();
         let start = self.agent.start_mode();
         let failed = |e: Error| Error::ModePin(e.to_string());
-        match self.agent {
-            Agent::Claude => {
-                let (_, ack) = self
-                    .request_at(
-                        "session/set_mode",
-                        json!({ "sessionId": sid, "modeId": start }),
-                    )
-                    .await
-                    .map_err(failed)?;
-                Ok(ack)
-            }
-            Agent::OpenCode => {
-                let params = json!({ "sessionId": sid, "configId": MODE_OPTION, "value": start });
-                let (result, ack) = self
-                    .request_at("session/set_config_option", params)
-                    .await
-                    .map_err(failed)?;
-                let report = mode_report(&result["configOptions"]);
-                if report != ModeReport::Mode(start) {
-                    return Err(Error::ModePin(format!("agent reports {report:?}")));
-                }
-                Ok(ack)
-            }
-        }
+        let (_, ack) = self
+            .request_at(
+                "session/set_mode",
+                json!({ "sessionId": sid, "modeId": start }),
+            )
+            .await
+            .map_err(failed)?;
+        Ok(ack)
     }
 
     fn on_incoming(self: &Arc<Self>, message: Incoming) {

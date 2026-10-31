@@ -1,8 +1,7 @@
-/// The two agents VexOS supports. Each runs as an ACP agent on stdio.
+/// The agent VexOS supports. It runs as an ACP agent on stdio.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Agent {
     Claude,
-    OpenCode,
 }
 
 /// How an agent is launched. Public so callers and tests can see exactly what
@@ -14,8 +13,7 @@ pub struct AgentCommand {
     pub env: &'static [(&'static str, &'static str)],
 }
 
-/// The ACP config option both agents report their mode through (OpenCode: its
-/// agent choice).
+/// The ACP config option Claude can also report its mode through.
 pub(crate) const MODE_OPTION: &str = "mode";
 
 impl Agent {
@@ -25,13 +23,10 @@ impl Agent {
     }
 
     /// The modes a session may be in. Claude: `default` asks for every action
-    /// that needs approval; `plan` cannot edit at all. OpenCode: only `build`,
-    /// the built-in agent the managed policy covers; custom agents run their own
-    /// rules and get around the managed denies.
+    /// that needs approval; `plan` cannot edit at all.
     pub(crate) fn allowed_modes(self) -> &'static [&'static str] {
         match self {
             Agent::Claude => &["default", "plan"],
-            Agent::OpenCode => &["build"],
         }
     }
 
@@ -42,11 +37,6 @@ impl Agent {
                 program: "claude-agent-acp",
                 args: &[],
                 env: &[("CLAUDE_AGENT_ACP_PROTOCOL", "v1")],
-            },
-            Agent::OpenCode => AgentCommand {
-                program: "opencode",
-                args: &["acp"],
-                env: &[],
             },
         }
     }

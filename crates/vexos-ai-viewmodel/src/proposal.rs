@@ -2,8 +2,8 @@
 //! read from the request's `rawInput`. Shapes recorded live (spike results,
 //! "Plan-exit live check"): Claude `Bash` `{command}`, `Edit`
 //! `{file_path, old_string, new_string}`, `MultiEdit` `{file_path, edits}`,
-//! `Write` `{file_path, content}`, `ExitPlanMode` `{plan}`; OpenCode `bash`
-//! `{command}`, `edit` `{filepath, diff}` (unified).
+//! `Write` `{file_path, content}`, `ExitPlanMode` `{plan}`. A unified `{filepath,
+//! diff}` shape, recorded from the removed OpenCode, is still parsed.
 
 use serde_json::Value;
 

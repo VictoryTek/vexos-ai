@@ -127,32 +127,12 @@ fn claude_session(current: &str) -> Value {
         { "id": "default" }, { "id": "acceptEdits" }, { "id": "plan" }, { "id": "auto" } ] } })
 }
 
-fn opencode_options(current: &str) -> Value {
-    json!([{ "id": "mode", "category": "mode", "currentValue": current,
-             "options": [{ "value": "build" }, { "value": "plan" }, { "value": "yolo" }] }])
-}
-
 /// A Claude session that is up and pinned.
 async fn claude() -> (Session, Events, Fake) {
     let (start, mut fake) = begin(Agent::Claude, config());
     handshake(&mut fake, claude_session("default")).await;
     let set = fake.expect("session/set_mode").await;
     fake.reply(&set, json!({})).await;
-    let (session, events) = start.await.unwrap().unwrap();
-    (session, events, fake)
-}
-
-/// An OpenCode session that is up and pinned.
-async fn opencode() -> (Session, Events, Fake) {
-    let (start, mut fake) = begin(Agent::OpenCode, config());
-    handshake(
-        &mut fake,
-        json!({ "sessionId": "s1", "configOptions": opencode_options("build") }),
-    )
-    .await;
-    let set = fake.expect("session/set_config_option").await;
-    fake.reply(&set, json!({ "configOptions": opencode_options("build") }))
-        .await;
     let (session, events) = start.await.unwrap().unwrap();
     (session, events, fake)
 }
@@ -212,24 +192,6 @@ async fn claude_is_reset_even_when_it_already_reports_default() {
 }
 
 #[tokio::test]
-async fn opencode_is_reset_to_build_even_when_a_project_made_a_custom_agent_the_default() {
-    let (start, mut fake) = begin(Agent::OpenCode, config());
-    handshake(
-        &mut fake,
-        json!({ "sessionId": "s1", "configOptions": opencode_options("yolo") }),
-    )
-    .await;
-    let set = fake.expect("session/set_config_option").await;
-    assert_eq!(
-        set["params"],
-        json!({ "sessionId": "s1", "configId": "mode", "value": "build" })
-    );
-    fake.reply(&set, json!({ "configOptions": opencode_options("build") }))
-        .await;
-    start.await.unwrap().unwrap();
-}
-
-#[tokio::test]
 async fn a_failed_claude_reset_aborts_the_session() {
     let (start, mut fake) = begin(Agent::Claude, config());
     handshake(&mut fake, claude_session("acceptEdits")).await;
@@ -240,21 +202,6 @@ async fn a_failed_claude_reset_aborts_the_session() {
         fake.next().await.is_none(),
         "the core must close the connection"
     );
-}
-
-#[tokio::test]
-async fn an_opencode_reset_that_does_not_take_aborts_the_session() {
-    let (start, mut fake) = begin(Agent::OpenCode, config());
-    handshake(
-        &mut fake,
-        json!({ "sessionId": "s1", "configOptions": opencode_options("yolo") }),
-    )
-    .await;
-    let set = fake.expect("session/set_config_option").await;
-    fake.reply(&set, json!({ "configOptions": opencode_options("yolo") }))
-        .await;
-    assert!(matches!(start.await.unwrap(), Err(Error::ModePin(_))));
-    assert!(fake.next().await.is_none());
 }
 
 #[tokio::test]
@@ -300,24 +247,6 @@ async fn a_failed_mid_session_reset_aborts_and_refuses_prompts() {
     assert!(fake.next().await.is_none());
 }
 
-#[tokio::test]
-async fn opencode_switching_to_a_custom_agent_mid_session_is_reset() {
-    let (start, mut fake) = begin(Agent::OpenCode, config());
-    handshake(
-        &mut fake,
-        json!({ "sessionId": "s1", "configOptions": opencode_options("build") }),
-    )
-    .await;
-    let set = fake.expect("session/set_config_option").await;
-    fake.reply(&set, json!({ "configOptions": opencode_options("build") }))
-        .await;
-    let (_session, _events) = start.await.unwrap().unwrap();
-
-    fake.update(json!({ "sessionUpdate": "config_option_update", "configOptions": opencode_options("yolo") })).await;
-    let set = fake.expect("session/set_config_option").await;
-    assert_eq!(set["params"]["value"], "build");
-}
-
 // 1b. Mode reports and the allow-list -----------------------------------------
 
 #[tokio::test]
@@ -328,15 +257,6 @@ async fn claude_reporting_a_mode_through_the_config_option_is_reset() {
         .await;
     let set = fake.expect("session/set_mode").await;
     assert_eq!(set["params"]["modeId"], "default");
-}
-
-#[tokio::test]
-async fn opencode_reporting_a_mode_through_current_mode_update_is_reset() {
-    let (_session, _events, mut fake) = opencode().await;
-    fake.update(json!({ "sessionUpdate": "current_mode_update", "currentModeId": "yolo" }))
-        .await;
-    let set = fake.expect("session/set_config_option").await;
-    assert_eq!(set["params"]["value"], "build");
 }
 
 #[tokio::test]
@@ -387,15 +307,6 @@ async fn leaving_plan_for_auto_resets_to_default_not_plan() {
         .await;
     let set = fake.expect("session/set_mode").await;
     assert_eq!(set["params"]["modeId"], "default");
-}
-
-#[tokio::test]
-async fn opencode_plan_is_not_allowed() {
-    let (_session, _events, mut fake) = opencode().await;
-    fake.update(json!({ "sessionUpdate": "config_option_update", "configOptions": opencode_options("plan") }))
-        .await;
-    let set = fake.expect("session/set_config_option").await;
-    assert_eq!(set["params"]["value"], "build");
 }
 
 #[tokio::test]
@@ -524,8 +435,6 @@ fn mode_update(mode: &str) -> Value {
 async fn the_start_mode_is_shown_once_pinned() {
     let (_session, mut events, mut fake) = claude().await;
     assert_eq!(modes_shown(&mut fake, &mut events, 100).await, ["default"]);
-    let (_session, mut events, mut fake) = opencode().await;
-    assert_eq!(modes_shown(&mut fake, &mut events, 100).await, ["build"]);
 }
 
 #[tokio::test]
@@ -560,15 +469,13 @@ async fn disallowed_and_unreadable_reports_are_never_shown() {
 
 #[tokio::test]
 async fn an_acknowledged_reset_shows_the_start_mode() {
-    let (_session, mut events, mut fake) = opencode().await;
-    assert_eq!(modes_shown(&mut fake, &mut events, 100).await, ["build"]);
-    fake.update(json!({ "sessionUpdate": "config_option_update", "configOptions": opencode_options("yolo") }))
-        .await;
-    let set = fake.expect("session/set_config_option").await;
+    let (_session, mut events, mut fake) = claude().await;
+    assert_eq!(modes_shown(&mut fake, &mut events, 100).await, ["default"]);
+    fake.update(mode_update("acceptEdits")).await;
+    let set = fake.expect("session/set_mode").await;
     assert!(modes_shown(&mut fake, &mut events, 101).await.is_empty());
-    fake.reply(&set, json!({ "configOptions": opencode_options("build") }))
-        .await;
-    assert_eq!(modes_shown(&mut fake, &mut events, 102).await, ["build"]);
+    fake.reply(&set, json!({})).await;
+    assert_eq!(modes_shown(&mut fake, &mut events, 102).await, ["default"]);
 }
 
 #[tokio::test]
@@ -850,11 +757,6 @@ fn launch_commands_carry_no_approval_overrides() {
     assert_eq!(claude.program, "claude-agent-acp");
     assert!(claude.args.is_empty());
     assert_eq!(claude.env, [("CLAUDE_AGENT_ACP_PROTOCOL", "v1")]);
-
-    let opencode = Agent::OpenCode.command();
-    assert_eq!(opencode.program, "opencode");
-    assert_eq!(opencode.args, ["acp"]);
-    assert!(opencode.env.is_empty());
 }
 
 #[tokio::test]

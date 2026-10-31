@@ -30,7 +30,6 @@ impl Decider for Session {
 pub fn agent_label(agent: Agent) -> &'static str {
     match agent {
         Agent::Claude => "Claude",
-        Agent::OpenCode => "OpenCode",
     }
 }
 
@@ -41,20 +40,20 @@ pub const AGENT_FILE: &str = "vexos/ai/agent";
 /// Longest part of the choice file that is read.
 const MAX_CHOICE_BYTES: u64 = 64;
 
-/// The agent a choice file names: its first line, exactly `claude` or
-/// `opencode`. No trimming and no case folding, as in the CLI.
+/// The agent a choice file names: its first line, exactly `claude`. A
+/// leftover `opencode` (removed) names nothing. No trimming and no case
+/// folding, as in the CLI.
 pub fn parse_agent(bytes: &[u8]) -> Option<Agent> {
     let line = bytes.split(|&b| b == b'\n').next().unwrap_or_default();
     match line {
         b"claude" => Some(Agent::Claude),
-        b"opencode" => Some(Agent::OpenCode),
         _ => None,
     }
 }
 
 /// The saved agent, read-only. A missing, unreadable, unknown or empty choice
 /// is Claude. It returns the enum only: the stored text never reaches a
-/// command line, it just selects one of the two fixed launch configurations.
+/// command line, it just selects the one fixed launch configuration.
 pub fn saved_agent(path: &Path) -> Agent {
     let read = || -> Option<Agent> {
         // A FIFO or device could block the window's start.
@@ -461,16 +460,9 @@ impl Conversation {
         self.hidden == Some(true)
     }
 
-    /// The usage line is shown: only Claude has the command.
-    pub fn offers_usage_check(&self) -> bool {
-        self.agent == Agent::Claude
-    }
-
     /// Why a click on the usage line would do nothing now, if it would.
     pub fn usage_disabled(&self) -> Option<Disabled> {
-        if !self.offers_usage_check() {
-            Some(Disabled::OpenCode)
-        } else if matches!(self.state, State::Starting | State::Ended(_)) {
+        if matches!(self.state, State::Starting | State::Ended(_)) {
             Some(Disabled::NotReady)
         } else if self.hidden.is_some() {
             Some(Disabled::Loading)
@@ -527,7 +519,7 @@ impl Conversation {
         let disabled = self.usage_disabled();
         let (wide, narrow) = self.shown().labels(now);
         UsageButton {
-            visible: self.offers_usage_check(),
+            visible: true,
             enabled: disabled.is_none() && self.can_send(),
             wide,
             narrow,
@@ -536,8 +528,7 @@ impl Conversation {
     }
 
     fn shown(&self) -> Shown {
-        let launch_ahead =
-            self.state == State::Starting && self.offers_usage_check() && self.usage_on_launch;
+        let launch_ahead = self.state == State::Starting && self.usage_on_launch;
         if self.hidden.is_some() || launch_ahead {
             return Shown::Loading;
         }
@@ -572,7 +563,7 @@ impl Conversation {
         if self.state == State::Starting && self.started && self.mode.is_some() {
             self.state = State::Ready;
             self.ready.get_or_insert_with(Instant::now);
-            if self.offers_usage_check() && self.usage_on_launch {
+            if self.usage_on_launch {
                 self.launch_due = true;
             }
         }
@@ -997,16 +988,12 @@ mod tests {
 
     #[test]
     fn the_empty_page_names_the_agent_and_goes_with_the_first_item() {
-        let mut c = Conversation::new(Agent::OpenCode);
-        assert_eq!(c.empty_state(), Some(Empty::Starting("OpenCode")));
+        let mut c = Conversation::new(Agent::Claude).usage_on_launch(false);
+        assert_eq!(c.empty_state(), Some(Empty::Starting("Claude")));
         c.started();
-        assert_eq!(c.empty_state(), Some(Empty::Starting("OpenCode")));
-        c.apply(Event::Mode("build".into()));
-        assert_eq!(c.empty_state(), Some(Empty::Ready("OpenCode")));
-        assert_eq!(
-            Conversation::new(Agent::Claude).empty_state(),
-            Some(Empty::Starting("Claude"))
-        );
+        assert_eq!(c.empty_state(), Some(Empty::Starting("Claude")));
+        c.apply(Event::Mode("default".into()));
+        assert_eq!(c.empty_state(), Some(Empty::Ready("Claude")));
         c.apply(Event::AgentText("hi".into()));
         assert_eq!(c.empty_state(), None);
     }
@@ -1413,10 +1400,10 @@ mod tests {
 
     #[test]
     fn one_prompt_at_a_time_and_only_while_ready() {
-        let mut c = Conversation::new(Agent::OpenCode);
+        let mut c = Conversation::new(Agent::Claude).usage_on_launch(false);
         assert_eq!(c.send(&Outgoing("hi".into())), None);
         c.started();
-        c.apply(Event::Mode("build".into()));
+        c.apply(Event::Mode("default".into()));
         assert_eq!(c.send(&Outgoing("   ".into())), None);
         assert_eq!(c.send(&Outgoing("hi".into())), Some(Sent::Shown(0)));
         assert_eq!(c.send(&Outgoing("again".into())), None);
@@ -1445,7 +1432,6 @@ mod tests {
     #[test]
     fn check_usage_sends_exactly_slash_usage_through_the_normal_path() {
         let mut c = ready();
-        assert!(c.offers_usage_check());
         let out = c.check_usage().expect("enabled");
         assert_eq!(out.text(), "/usage");
         assert_eq!(c.send(&out), Some(Sent::Shown(0)));
@@ -1461,17 +1447,6 @@ mod tests {
             c.items()[1],
             Item::Agent("## Usage\n**5-hour limit** — **12%**".into())
         );
-    }
-
-    #[test]
-    fn check_usage_is_not_offered_for_opencode() {
-        let mut c = Conversation::new(Agent::OpenCode);
-        c.started();
-        c.apply(Event::Mode("build".into()));
-        assert!(c.can_send());
-        assert!(!c.offers_usage_check());
-        assert!(!c.can_check_usage());
-        assert_eq!(c.check_usage(), None);
     }
 
     #[test]
@@ -1675,13 +1650,7 @@ mod tests {
     }
 
     #[test]
-    fn no_launch_for_opencode_or_with_the_setting_off() {
-        let mut c = Conversation::new(Agent::OpenCode);
-        c.started();
-        c.apply(Event::Mode("build".into()));
-        assert_eq!(c.take_launch_usage(), None);
-        assert!(!c.usage_button(Instant::now()).visible);
-
+    fn no_launch_with_the_setting_off() {
         let mut c = launching(false);
         assert_eq!(c.take_launch_usage(), None);
         assert_eq!(label(&c), "Usage: unknown");
@@ -1902,9 +1871,6 @@ mod tests {
         assert!(!c.usage_button(now).enabled);
         c.apply(Event::Closed);
         assert_eq!(c.usage_disabled(), Some(Disabled::NotReady));
-        let c = Conversation::new(Agent::OpenCode);
-        assert_eq!(c.usage_disabled(), Some(Disabled::OpenCode));
-        assert!(!c.usage_button(now).visible);
     }
 
     /// The real adapter's reset text has U+202F before "PM". The label gets
@@ -1957,8 +1923,8 @@ mod tests {
         c.apply(Event::Mode("default".into()));
         assert!(c.can_send());
 
-        let mut c = Conversation::new(Agent::OpenCode);
-        c.apply(Event::Mode("build".into()));
+        let mut c = Conversation::new(Agent::Claude).usage_on_launch(false);
+        c.apply(Event::Mode("default".into()));
         assert!(!c.can_send());
         c.started();
         assert!(c.can_send());
@@ -1979,7 +1945,6 @@ mod tests {
     #[test]
     fn the_agent_is_never_called_claude_code() {
         assert_eq!(agent_label(Agent::Claude), "Claude");
-        assert_eq!(agent_label(Agent::OpenCode), "OpenCode");
     }
 
     // The agent from settings --------------------------------------------------
@@ -2001,13 +1966,15 @@ mod tests {
     }
 
     #[test]
-    fn the_choice_is_exactly_one_of_two_values() {
+    fn the_choice_is_exactly_claude() {
         assert_eq!(parse_agent(b"claude"), Some(Agent::Claude));
         assert_eq!(parse_agent(b"claude\n"), Some(Agent::Claude));
-        assert_eq!(parse_agent(b"opencode"), Some(Agent::OpenCode));
-        assert_eq!(parse_agent(b"opencode\n"), Some(Agent::OpenCode));
+        // OpenCode was removed: a leftover value names nothing.
+        assert_eq!(parse_agent(b"opencode"), None);
+        assert_eq!(parse_agent(b"opencode\n"), None);
         // The first line only, as `head -n 1`.
-        assert_eq!(parse_agent(b"opencode\nclaude"), Some(Agent::OpenCode));
+        assert_eq!(parse_agent(b"claude\nopencode"), Some(Agent::Claude));
+        assert_eq!(parse_agent(b"opencode\nclaude"), None);
         assert_eq!(parse_agent(b"claude\nrm -rf"), Some(Agent::Claude));
         for bad in [
             &b"Claude"[..],
@@ -2046,7 +2013,7 @@ mod tests {
         assert_eq!(saved_agent(&fixture("claude", b"claude\n")), Agent::Claude);
         assert_eq!(
             saved_agent(&fixture("opencode", b"opencode\n")),
-            Agent::OpenCode
+            Agent::Claude
         );
     }
 
@@ -2054,12 +2021,9 @@ mod tests {
     fn a_huge_choice_file_is_read_in_part_and_judged_by_its_first_line() {
         let mut junk = vec![b'x'; 1 << 20];
         assert_eq!(saved_agent(&fixture("huge-junk", &junk)), Agent::Claude);
-        let mut open = b"opencode\n".to_vec();
-        open.append(&mut junk);
-        assert_eq!(
-            saved_agent(&fixture("huge-opencode", &open)),
-            Agent::OpenCode
-        );
+        let mut first = b"claude\n".to_vec();
+        first.append(&mut junk);
+        assert_eq!(saved_agent(&fixture("huge-claude", &first)), Agent::Claude);
         // No line break within the limit: not a value.
         let long = [b"opencode".as_slice(), &[b' '; 100]].concat();
         assert_eq!(saved_agent(&fixture("long-line", &long)), Agent::Claude);
@@ -2094,7 +2058,7 @@ mod tests {
 
     #[test]
     fn the_stored_value_never_reaches_a_command() {
-        let known = [Agent::Claude.command(), Agent::OpenCode.command()];
+        let known = [Agent::Claude.command()];
         for hostile in [
             "opencode --yolo",
             "claude; rm -rf ~",
@@ -2127,18 +2091,6 @@ mod tests {
     }
 
     #[test]
-    fn an_opencode_session_from_the_file_hides_the_usage_button() {
-        let agent = saved_agent(&fixture("opencode-session", b"opencode\n"));
-        assert_eq!(agent, Agent::OpenCode);
-        let mut c = Conversation::new(agent);
-        assert!(!c.usage_button(Instant::now()).visible);
-        c.started();
-        c.apply(Event::Mode("build".into()));
-        assert!(!c.usage_button(Instant::now()).visible);
-        assert!(c.take_launch_usage().is_none());
-    }
-
-    #[test]
     fn starting_keeps_the_input_off_and_says_so() {
         let mut c = Conversation::new(Agent::Claude);
         assert!(!c.can_send());
@@ -2158,10 +2110,6 @@ mod tests {
         c.apply(Event::Mode("default".into()));
         assert!(c.can_send());
         assert_eq!(c.starting_note(true), None);
-        let open = Conversation::new(Agent::OpenCode)
-            .starting_note(false)
-            .unwrap();
-        assert!(open.contains("Starting OpenCode"));
     }
 
     #[test]

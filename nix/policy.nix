@@ -1,4 +1,4 @@
-# The assistant's safety policy, as the two managed agent configs that
+# The assistant's safety policy, as the managed Claude Code config that
 # nix/module.nix installs. Kept apart from the module so `checks.policy` can
 # assert it without evaluating a NixOS system.
 #
@@ -29,13 +29,6 @@ let
   fileTools = [ "Edit" "Write" "MultiEdit" "NotebookEdit" ];
   fileCommands = [ "mkdir" "touch" "rm" "rmdir" "mv" "cp" "sed" ];
   asked = fileTools ++ map (c: "Bash(${c} *)") fileCommands;
-
-  # OpenCode allows every tool by default and uses the last matching rule.
-  # "*" sorts first in builtins.toJSON, so the denies after it win.
-  opencodePermission = {
-    edit = "ask";
-    bash = { "*" = "ask"; } // lib.genAttrs (map (c: "${c}*") denied) (_: "deny");
-  };
 in
 {
   inherit denied asked;
@@ -55,20 +48,5 @@ in
       deny = map (c: "Bash(${c} *)") denied;
       ask = asked;
     };
-  };
-
-  # OpenCode: system-wide managed config, loaded after the user's own. An
-  # agent's own permission rules are evaluated after the global ones, so the
-  # same rules are repeated for each built-in agent that runs tools; otherwise
-  # a user's `agent.build.permission.bash."*" = "allow"` would outrank them.
-  # A custom agent's own rules still outrank them and cannot be reached from
-  # here, so sessions start in build, never in an agent a project names.
-  opencode = {
-    "$schema" = "https://opencode.ai/config.json";
-    autoupdate = false; # updated by Nix with the rest of the system
-    default_agent = "build";
-    permission = opencodePermission;
-    agent = lib.genAttrs [ "build" "general" "plan" "explore" ]
-      (_: { permission = opencodePermission; });
   };
 }

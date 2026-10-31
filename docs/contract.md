@@ -35,7 +35,7 @@ replaces it (Phase 2): `tests/contract/*.bats` runs unchanged against both.
 | 0 | ok | |
 | 1 | runtime failure | corrupt `agent` file |
 | 2 | usage error: bad argv or value | unknown agent, unknown command, a removed command (`account …`, `panel`, `usage`) |
-| 3 | not found | `claude` or `opencode` not installed |
+| 3 | not found | `claude` not installed |
 | 4 | needs interaction, and none is allowed | `pick` with no agent and `--non-interactive`, or with no terminal or display |
 | 5 | busy | reserved: nothing returns it now. It was `account remove` or `rename` while a session used the account |
 
@@ -45,7 +45,7 @@ replaces it (Phase 2): `tests/contract/*.bats` runs unchanged against both.
 vexos-ai                                  open the assistant (in /etc/nixos)
 vexos-ai --prompt "<text>"                … with a task
 vexos-ai prompt <text…>                   same, words joined with spaces
-vexos-ai pick [claude|opencode]           set the agent; no argument → ask
+vexos-ai pick [claude]                    set the agent; no argument → ask
 vexos-ai status [--json] [--refresh]      state; --refresh is accepted and ignored
 vexos-ai crash-mute                       list
 vexos-ai crash-mute <prog> [on|off]       default on
@@ -117,7 +117,7 @@ reads the files below directly and keeps working.
 
 | Path | Format |
 |---|---|
-| `$XDG_CONFIG_HOME/vexos/ai/agent` | `claude` or `opencode` |
+| `$XDG_CONFIG_HOME/vexos/ai/agent` | `claude`. A leftover `opencode` (OpenCode was removed) launches Claude and shows as `null` in `status --json` |
 | `…/crash-ignore/<prog>` | empty file per muted program |
 | `…/crash-capture-off` | flag file. The crash-watch unit has `ConditionPathExists=!%h/.config/vexos/ai/crash-capture-off` (systemd cannot see an `XDG_CONFIG_HOME` override) |
 
@@ -166,8 +166,7 @@ they edit or run commands. That is a guardrail. What to know:
   server-managed settings, VexOS's file policy is skipped, and nothing here can
   detect that. Check `/status` → "Setting sources" inside Claude Code.
 - Every session **starts** asking: the policy sets Claude's `defaultMode` to
-  `default` and OpenCode's `default_agent` to `build`, which outrank user,
-  project and local settings.
+  `default`, which outranks user, project and local settings.
 - Claude **always asks before writing a file** (`Edit`, `Write`, `MultiEdit`,
   `NotebookEdit`) **or running** `mkdir`, `touch`, `rm`, `rmdir`, `mv`, `cp` or
   `sed`, whatever the mode. These are managed `ask` rules, and an ask rule holds
@@ -178,20 +177,14 @@ they edit or run commands. That is a guardrail. What to know:
   `acceptEdits` and "Yes, and don't ask again" no longer skip the prompt for
   those tools and commands. That includes read-only `sed -n`; other read-only
   commands such as `ls` and `cat` still run without asking.
-- One route is **not closed**, and needs a deliberate user action. Managed
-  config has no lock for it. **OpenCode custom agents**: an agent defined with
-  its own `allow` rules (in `.opencode/agents/`, a project `opencode.json` or
-  `~/.config/opencode/`) gets the global rules first and its own after them.
-  Once the user selects it (Tab in the TUI, `--agent`, or a client's mode
-  choice), it bypasses the managed denies too: `nixos-rebuild switch` runs
-  unasked. The assistant core (`crates/vexos-ai-core`) keeps OpenCode on
-  `build` and offers no other agent, so the route doesn't apply there. The
-  OpenCode terminal agent is unchanged.
+- **OpenCode was removed.** Its one open route (a custom agent the user
+  selects, which bypassed the managed denies) no longer exists here. Claude
+  Code is the only assistant, and no OpenCode policy is installed.
 
 ## Testing it
 
 `tests/contract/*.bats` is the executable form of this document: black-box, a
-fake `HOME`, fake system profiles, and stub `claude`, `opencode`,
+fake `HOME`, fake system profiles, and stub `claude`,
 `curl`, `systemctl`, `zenity`, `xdg-terminal-exec`, `notify-send` and `gsettings`
 first on `PATH`. The stubs log their calls, so "never opens a dialog" is an
 assertion; the `curl` stub is a tripwire that fails and logs if anything calls
@@ -204,8 +197,8 @@ nix develop -c env VEXOS_AI_BIN=<path to a vexos-ai built without zenity,
   libnotify, xdg-terminal-exec in its runtime inputs> bats tests/contract
 ```
 
-By hand, `claude` and `opencode` must not be on `PATH`: the tests install their
-stubs only where they want an agent, and a test that expects "not installed"
+By hand, `claude` must not be on `PATH`: the tests install its
+stub only where they want an agent, and a test that expects "not installed"
 would otherwise start the real one.
 
 (`packages.<system>.default.passthru.mkScript [ … ]` builds that variant. The

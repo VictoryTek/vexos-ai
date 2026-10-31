@@ -1,5 +1,5 @@
 {
-  description = "vexos-ai — AI assistant (Claude Code / OpenCode) for VexOS";
+  description = "vexos-ai — AI assistant (Claude Code) for VexOS";
 
   inputs = {
     # Same branch as vexos-nix; consumers override with
@@ -45,7 +45,6 @@
         policy = let
           policy = import ./nix/policy.nix { inherit (nixpkgs) lib; };
           claude = pkgs.writeText "claude.json" (builtins.toJSON policy.claude);
-          opencode = pkgs.writeText "opencode.json" (builtins.toJSON policy.opencode);
         in pkgs.runCommand "vexos-ai-policy" { nativeBuildInputs = [ pkgs.jq ]; } ''
           check() { jq -e "$2" "$1" >/dev/null || { echo "policy check failed: $2 ($1)"; exit 1; }; }
 
@@ -59,24 +58,11 @@
                    "Bash(mv *)" "Bash(cp *)" "Bash(sed *)"; do
             check ${claude} ".permissions.ask | index(\"$r\") != null"
           done
-          check ${opencode} '.default_agent == "build"'
           for c in "nixos-rebuild switch" "nixos-rebuild boot" "nixos-rebuild test" \
                    "just rebuild" "just switch" "just update" "just update-all" "nix flake check"; do
             for p in "" "sudo " "pkexec "; do
               check ${claude} ".permissions.deny | index(\"Bash($p$c *)\") != null"
-              for scope in .permission .agent.build.permission .agent.general.permission \
-                           .agent.plan.permission .agent.explore.permission; do
-                check ${opencode} "$scope.bash[\"$p$c*\"] == \"deny\""
-              done
             done
-          done
-
-          # OpenCode uses the last matching rule: "*" must come first and only ask.
-          for scope in .permission .agent.build.permission .agent.general.permission \
-                       .agent.plan.permission .agent.explore.permission; do
-            check ${opencode} "$scope.edit == \"ask\""
-            check ${opencode} "($scope.bash | keys_unsorted[0]) == \"*\" and $scope.bash[\"*\"] == \"ask\""
-            check ${opencode} "[$scope.bash | to_entries[] | select(.key != \"*\") | .value] | all(. == \"deny\")"
           done
           touch $out
         '';
@@ -177,7 +163,6 @@
           '';
           agents = {
             claudePackage = stub "claude" "2.1.300";
-            opencodePackage = stub "opencode" "1.19.0";
             claudeAcpPackage = stub "claude-agent-acp" "0.88.0";
           };
           eval = settings: (nixpkgs.lib.nixosSystem {
@@ -228,15 +213,11 @@
               programs.vexos-ai.enable = true;
               environment.etc."claude-code/managed-settings.d/50-vexos.json".enable = lib.mkForce false;
             };
-            "no panel with a changed OpenCode policy" = refused "OpenCode's managed policy" {
-              programs.vexos-ai.enable = true;
-              environment.etc."opencode/opencode.json".text = lib.mkForce "{}";
-            };
             "no panel with 26.05's claude-agent-acp" = refused "claudeAcpPackage is 0.36.1" {
               programs.vexos-ai = { enable = true; claudeAcpPackage = lib.mkForce (stub "claude-agent-acp" "0.36.1"); };
             };
-            "no panel with 26.05's opencode" = refused "opencodePackage is 1.15.10" {
-              programs.vexos-ai = { enable = true; opencodePackage = lib.mkForce (stub "opencode" "1.15.10"); };
+            "the removed opencodePackage option is refused" = refused "OpenCode was removed" {
+              programs.vexos-ai = { enable = true; opencodePackage = stub "opencode" "1.19.0"; };
             };
           };
         in pkgs.runCommand "vexos-ai-module" { } ''
@@ -247,7 +228,6 @@
           '') cases)}
           ${lib.optionalString (panel != null) ''
             grep -q '${agents.claudeAcpPackage}/bin' ${panel}/bin/vexos-ai-panel \
-              && grep -q '${agents.opencodePackage}/bin' ${panel}/bin/vexos-ai-panel \
               && echo 'ok   the panel runs the pinned agents first on PATH' \
               || { echo 'FAIL the panel runs the pinned agents first on PATH'; failed=1; }
             # The panel reads and writes the extension's `window-mode` key, so it must

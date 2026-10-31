@@ -1,6 +1,6 @@
 # vexos-ai-panel — the assistant's GTK4/libadwaita window (crates/vexos-ai-panel).
-# It runs claude-agent-acp or opencode from PATH, like the CLI finds its
-# agents. Not installed by nix/module.nix yet.
+# It runs claude-agent-acp from PATH, like the CLI finds its
+# agent. Not installed by nix/module.nix yet.
 { lib, rustPlatform, pkg-config, wrapGAppsHook4, makeDesktopItem, copyDesktopItems
 , glib, gtk4, libadwaita, dconf }:
 

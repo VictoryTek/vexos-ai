@@ -1,7 +1,7 @@
 //! Live smoke test driver (spike, not product): drives a real agent through the
 //! public `Session` API and prints what the UI would see, one JSON line each.
 //!
-//!   smoke --agent claude|opencode --cwd DIR [--spawn | --tee DIR]
+//!   smoke --cwd DIR [--spawn | --tee DIR]
 //!         [--approve SUBSTR]... [--watch FILE]... < prompts (one per line)
 //!
 //! Every permission request is denied unless its title contains an --approve
@@ -41,13 +41,6 @@ fn parse() -> Args {
     while let Some(flag) = it.next() {
         let mut value = || it.next().unwrap_or_else(|| panic!("{flag} needs a value"));
         match flag.as_str() {
-            "--agent" => {
-                args.agent = if value() == "opencode" {
-                    Agent::OpenCode
-                } else {
-                    Agent::Claude
-                }
-            }
             "--cwd" => args.cwd = value().into(),
             "--spawn" => args.spawn = true,
             "--tee" => args.tee = Some(value().into()),

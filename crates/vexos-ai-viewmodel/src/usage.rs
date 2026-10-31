@@ -118,7 +118,6 @@ pub fn freshness(at: Instant, now: Instant) -> String {
 /// Why the usage line can't be clicked now.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Disabled {
-    OpenCode,
     NotReady,
     Loading,
     TurnRunning,
@@ -129,7 +128,6 @@ pub enum Disabled {
 /// [`crate::Conversation::check_usage`] and nowhere else.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UsageButton {
-    /// Hidden for OpenCode, which has no `/usage`.
     pub visible: bool,
     pub enabled: bool,
     pub wide: String,
@@ -142,7 +140,6 @@ pub const CLICK_TOOLTIP: &str = "Click to show the full usage report in the chat
 pub fn tooltip(disabled: Option<Disabled>) -> &'static str {
     match disabled {
         None => CLICK_TOOLTIP,
-        Some(Disabled::OpenCode) => "OpenCode has no usage report",
         Some(Disabled::NotReady) => "Not available: the session is not ready",
         Some(Disabled::Loading) => "Not available while usage is loading",
         Some(Disabled::TurnRunning) => "Not available while a turn is running",
@@ -390,7 +387,6 @@ mod tests {
             (Disabled::Loading, "usage is loading"),
             (Disabled::TurnRunning, "a turn is running"),
             (Disabled::ApprovalWaiting, "an approval is waiting"),
-            (Disabled::OpenCode, "OpenCode"),
         ] {
             assert!(tooltip(Some(why)).contains(text), "{why:?}");
         }

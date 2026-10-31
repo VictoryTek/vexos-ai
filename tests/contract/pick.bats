@@ -5,10 +5,6 @@ load helpers
 setup() { common_setup; }
 
 @test "pick <agent> saves the choice, prints one line, exits 0" {
-  run vexos pick opencode
-  [ "$status" -eq 0 ]
-  [ "$output" = "Assistant set to OpenCode." ]
-  [ "$(cat "$CONF/agent")" = opencode ]
   run vexos pick claude
   [ "$status" -eq 0 ]
   [ "$output" = "Assistant set to Claude Code." ]
@@ -17,9 +13,9 @@ setup() { common_setup; }
 
 @test "pick <agent> with a terminal AND a display open nothing (VexPortal's VTE)" {
   skip_without_pty
-  WAYLAND_DISPLAY=wayland-0 run_tty pick opencode
+  WAYLAND_DISPLAY=wayland-0 run_tty pick claude
   [ "$status" -eq 0 ]
-  [ "$(cat "$CONF/agent")" = opencode ]
+  [ "$(cat "$CONF/agent")" = claude ]
   nothing_opened
 }
 
@@ -43,8 +39,17 @@ setup() { common_setup; }
   [ "$(cat "$CONF/agent")" = claude ]
 }
 
+@test "pick opencode is a usage error: it was removed" {
+  set_file "$CONF/agent" claude
+  run --separate-stderr vexos pick opencode
+  [ "$status" -eq 2 ]
+  [ -z "$output" ]
+  [ "$stderr" = "vexos-ai: unknown assistant 'opencode' (use claude)" ]
+  [ "$(cat "$CONF/agent")" = claude ]
+}
+
 @test "pick with too many arguments is a usage error" {
-  run vexos pick claude opencode
+  run vexos pick claude claude
   [ "$status" -eq 2 ]
 }
 
@@ -69,9 +74,9 @@ setup() { common_setup; }
 }
 
 @test "pick with no argument falls back to the dialog when there is a display" {
-  WAYLAND_DISPLAY=wayland-0 STUB_ZENITY_ANSWER=opencode run vexos pick
+  WAYLAND_DISPLAY=wayland-0 STUB_ZENITY_ANSWER=claude run vexos pick
   [ "$status" -eq 0 ]
-  [ "$(cat "$CONF/agent")" = opencode ]
+  [ "$(cat "$CONF/agent")" = claude ]
   [ "$(calls zenity.log)" -eq 1 ]
 }
 

@@ -26,14 +26,20 @@ setup() { common_setup; }
 }
 
 @test "status reflects the saved agent and mutes" {
-  set_file "$CONF/agent" opencode
+  set_file "$CONF/agent" claude
   mkdir -p "$CONF/crash-ignore"
   touch "$CONF/crash-ignore/firefox" "$CONF/crash-ignore/steam"
   touch "$CONF/crash-capture-off"
   run vexos status --json
   [ "$status" -eq 0 ]
-  jqe '.agent == "opencode"'
+  jqe '.agent == "claude"'
   jqe '.crash == {capture: false, muted: ["firefox", "steam"]}'
+}
+
+@test "an agent file left by the removed OpenCode is null" {
+  set_file "$CONF/agent" opencode
+  run vexos status --json
+  jqe '.agent == null'
 }
 
 @test "a garbage agent file is null" {

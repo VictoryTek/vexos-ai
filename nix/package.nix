@@ -2,10 +2,10 @@
 # for the VexOS AI assistant. Installed by nix/module.nix
 # (programs.vexos-ai.enable); see bin/vexos-ai.sh for the commands.
 #
-# claude-code and opencode themselves are NOT runtime inputs: the module
-# installs them system-wide so they can also be run directly, and vexos-ai
-# finds them on PATH. nixos-rebuild, systemctl, journalctl and coredumpctl
-# come from the running system for the same reason.
+# claude-code itself is NOT a runtime input: the module installs it
+# system-wide so it can also be run directly, and vexos-ai finds it on PATH.
+# nixos-rebuild, systemctl, journalctl and coredumpctl come from the running
+# system for the same reason.
 { lib, writeShellApplication, makeDesktopItem, symlinkJoin
 , coreutils, findutils, gnugrep, jq, zenity, libnotify, glib, xdg-terminal-exec }:
 
@@ -33,10 +33,9 @@ let
     # Reached from the quick settings toggle or a keybind, not the app grid.
     noDisplay = true;
     categories = [ "System" "Utility" ];
-    keywords = [ "AI" "Claude" "OpenCode" "assistant" "help" "diagnose" ];
+    keywords = [ "AI" "Claude" "assistant" "help" "diagnose" ];
     actions = {
       diagnose = { name = "Diagnose a problem"; exec = "vexos-ai diagnose"; };
-      pick = { name = "Change AI tool"; exec = "vexos-ai pick"; };
     };
   };
 in

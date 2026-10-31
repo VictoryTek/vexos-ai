@@ -1,6 +1,6 @@
 # vexos-ai
 
-The VexOS AI assistant: Claude Code or OpenCode, taught how VexOS works
+The VexOS AI assistant: Claude Code, taught how VexOS works
 (`skills/`), fenced off from applying changes and kept asking before it acts
 (managed policy, `nix/policy.nix`), with a
 launcher, theme sync and "diagnose with AI".
@@ -14,7 +14,7 @@ install-only (`programs.vexos-ai.enable`).
 | Output | |
 |---|---|
 | `packages.<system>.default` | the `vexos-ai` command + desktop entry |
-| `nixosModules.default` | `programs.vexos-ai.{enable,claudePackage,opencodePackage}` |
+| `nixosModules.default` | `programs.vexos-ai.{enable,claudePackage}` |
 | `overlays.default` | `pkgs.vexos-ai` |
 
 ## Layout

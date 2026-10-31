@@ -112,7 +112,7 @@ The panel is drawn inside GNOME Shell with St widgets. A headless Rust helper ho
 
 - [ ] **E1 USER** Read `crates/vexos-ai-viewmodel/src/composer.rs` once. It decides what the panel can send. Claude Code: first write a short reading guide (which functions matter, what to look for) in `.github/docs/subagent_docs/composer_reading_guide.md`.
 - [ ] **E2** Test the ask rules against MultiEdit, NotebookEdit and wrapper commands (`timeout touch`, `env touch`, `nice touch`) in the spike harness. Report which ask or are denied and which slip through.
-- [ ] **E3** (needs A6) If OpenCode is dropped: remove it from the panel, the module, the contract and the tests (map first). If kept: document the custom-agent route as accepted in docs/contract.md.
+- [x] **E3** — done 2026-10-31: OpenCode removed from CLI, module, policy, core, view-model, contract and tests; `pick` kept (claude only), a leftover `opencode` agent file launches Claude and shows null in status; `programs.vexos-ai.opencodePackage` is now a removed option with a clear error. Handoffs X2/X4/X5 below. (original text:) If OpenCode is dropped: remove it from the panel, the module, the contract and the tests (map first). If kept: document the custom-agent route as accepted in docs/contract.md.
 - [ ] **E4** Independent review of the send gate: composer.rs, check_usage, the source scans, and the helper's Send and Decide paths if Phase B ran. Use a fresh reviewer subagent with no prior context and ask it to try to find a path that sends text without a user click.
 - [ ] **E5** Policy denies show "failed" because the core cannot tell them apart. Check whether the adapter exposes anything that lets the panel say "denied by policy". Do not guess. Report only.
 - [ ] **E6 DECISION** Event::Usage (context-window line). Core change, additive, numbers only. Recommended: skip.
@@ -152,18 +152,21 @@ For each item, write the full prompt here (with the scope rule, verification and
 
 - [ ] **X1 VexPortal repo** Small cleanup: CLAUDE.md says no preflight script exists but one does; five older drift items (`_service-info`, `beszel`, `clean`, `rust-repair`, `static-ip`) need a look; the dialog text "Your sign-ins are kept either way" may be dead; one test (`reads_this_user_without_erroring`) has no assertion.
 - [ ] **X2 vexos-nix repo** (needs A7) Add vexos-ai to the Daily workflow with a pre-push eval of a few variants, or a PR route.
+- [ ] **X4 vexos-nix repo** (needs E3, same commit as the lock bump) Remove `opencodePackage` from `modules/ai.nix` (it is now a removed option and errors), and drop any OpenCode wording, tests or `opencode` package pin. Prompt still to be written.
+- [ ] **X5 VexPortal repo** (needs E3) Remove `opencode` from the assistant catalog and the `pick` call. `vexos-ai pick opencode` now exits 2. Prompt still to be written.
 - [ ] **X3 vexos-nix repo** (needs Phase B) If the Shell-native panel ships: the enabled-extensions handling and any new module option wiring.
 
 ---
 
 ## 12. Things the user deletes by hand
 
-`~/.claude/plans/` old plan files. `~/.local/share/vexos/ai/claude-accounts/`. `/tmp/bats-run-*` and `/tmp/vexos-ai-spike-*`. `target/` scratch folders. `target/tools/dl/`.
+`~/.claude/plans/` old plan files. `~/.local/share/vexos/ai/claude-accounts/`. `/tmp/bats-run-*` and `/tmp/vexos-ai-spike-*`. `target/` scratch folders. `target/tools/dl/`. `~/.config/opencode/` (the old theme file `tui.json` and anything else OpenCode left).
 
 ---
 
 ## 13. Log (newest first; one line per item touched)
 
+- 2026-10-31 E3 done: OpenCode removed (see item).
 - 2026-10-31 A4 decided: require extension, no GTK fallback.
 - 2026-10-31 A5 confirmed: end at close. A1 deferred by the user.
 - 2026-10-31 A5 researched (Omarchy is on-demand, no resident process); awaiting final answer.

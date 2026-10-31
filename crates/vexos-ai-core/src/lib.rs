@@ -1,9 +1,9 @@
-//! The VexOS assistant core: runs Claude Code or OpenCode over the Agent Client
+//! The VexOS assistant core: runs Claude Code over the Agent Client
 //! Protocol (ACP) and keeps the safety rules of `nix/policy.nix` true for every
 //! session it owns.
 //!
-//! - Every session starts in Claude `default` or OpenCode `build`. A mode
-//!   report outside the allow-list (Claude `default`/`plan`, OpenCode `build`),
+//! - Every session starts in Claude `default`. A mode
+//!   report outside the allow-list (Claude `default`/`plan`),
 //!   or one that can't be read, resets it; a failed reset aborts the session.
 //!   There is no API to choose a mode or agent; [`Event::Mode`] reports the
 //!   mode the core has confirmed, read-only.

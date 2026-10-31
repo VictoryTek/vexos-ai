@@ -40,15 +40,14 @@ setup() { common_setup; }
   [ "$status" -eq 2 ]
 }
 
-@test "opencode gets --prompt <text>" {
+@test "an agent file left by the removed OpenCode launches claude" {
   skip_without_pty
   install_agents
   set_file "$CONF/agent" opencode
   run_tty prompt hello there
   [ "$status" -eq 0 ]
-  [ "$(grep -c '^arg=' "$STUB_LOG/opencode.log")" -eq 2 ]
-  grep -qx 'arg=--prompt' "$STUB_LOG/opencode.log"
-  grep -qx 'arg=hello there' "$STUB_LOG/opencode.log"
+  grep -qx 'argc=1' "$STUB_LOG/claude.log"
+  grep -qx 'arg=hello there' "$STUB_LOG/claude.log"
 }
 
 @test "claude runs with its default config, even with an old account pointer left" {
@@ -95,9 +94,6 @@ setup() { common_setup; }
   set_file "$CONF/agent" claude
   run_tty
   [ "$status" -eq 3 ]
-  set_file "$CONF/agent" opencode
-  run_tty
-  [ "$status" -eq 3 ]
 }
 
 @test "a corrupt agent file is a failure (1) with a pointer to pick" {
@@ -132,7 +128,7 @@ setup() { common_setup; }
   run --separate-stderr vexos pick emacs
   [ "$status" -eq 2 ]
   [ -z "$output" ]
-  [ "$stderr" = "vexos-ai: unknown assistant 'emacs' (use claude or opencode)" ]
+  [ "$stderr" = "vexos-ai: unknown assistant 'emacs' (use claude)" ]
 }
 
 @test "the VexPortal recipes never open a dialog or a terminal, with a TTY and a display" {

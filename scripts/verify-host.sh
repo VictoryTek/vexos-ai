@@ -17,7 +17,6 @@ apps=/run/current-system/sw/share/applications
 desktop=io.github.victorytek.VexosAssistant.desktop
 # The versions the panel was tested with; nix/module.nix asserts the same.
 min_acp=0.88.0
-min_opencode=1.19.0
 
 failures=0
 pass() { printf 'PASS  %s\n' "$1"; }
@@ -35,7 +34,7 @@ store_version() {
 }
 
 # ── Managed policy ────────────────────────────────────────────────────────────
-# expected_policy claude|opencode: the JSON nix/policy.nix renders.
+# expected_policy claude: the JSON nix/policy.nix renders.
 expected_policy() {
   local lib
   if [ -n "${VEXOS_NIXPKGS-}" ]; then lib="import ${VEXOS_NIXPKGS}/lib"; else lib="import <nixpkgs/lib>"; fi
@@ -75,7 +74,6 @@ check_policy() {
 }
 
 check_policy claude claude-code/managed-settings.d/50-vexos.json
-check_policy opencode opencode/opencode.json
 
 # ── Programs on PATH (located, never run) ────────────────────────────────────
 # check_program NAME [MIN]: on PATH, and at least MIN by its store path.
@@ -102,7 +100,6 @@ check_program() {
 
 check_program vexos-ai-panel
 check_program claude-agent-acp "$min_acp"
-check_program opencode "$min_opencode"
 
 # The panel puts the pinned agents first on its own PATH (nix/module.nix).
 if panel=$(command -v vexos-ai-panel) && acp=$(command -v claude-agent-acp); then

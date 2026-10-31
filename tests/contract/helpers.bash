@@ -2,7 +2,7 @@
 # Shared setup for the black-box contract tests (see docs/contract.md).
 #
 # Every test runs the real `vexos-ai` under a fake HOME with stub programs
-# (claude, opencode, curl, systemctl, zenity, xdg-terminal-exec, notify-send,
+# (claude, curl, systemctl, zenity, xdg-terminal-exec, notify-send,
 # gsettings) first on PATH. The stubs log how they were called, so a test can
 # assert that nothing opened a dialog or a terminal window, or called curl
 # (the curl stub is a tripwire: vexos-ai makes no network request).
@@ -35,9 +35,9 @@ common_setup() {
   mkdir -p "$bin"
   cp "$BATS_TEST_DIRNAME"/stubs/* "$bin"/
   chmod +x "$bin"/*
-  # claude and opencode are "installed" only by tests that want them.
+  # claude is "installed" only by tests that want them.
   mkdir -p "$BATS_TEST_TMPDIR/agents"
-  mv "$bin/claude" "$bin/opencode" "$BATS_TEST_TMPDIR/agents/"
+  mv "$bin/claude" "$BATS_TEST_TMPDIR/agents/"
   export PATH="$bin:$PATH"
 
   # Fake system profiles; the script reads them from these.

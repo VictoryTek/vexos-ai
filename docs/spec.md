@@ -1,5 +1,8 @@
 # vexos-ai: refined, robust, GNOME-native — spec
 
+> **2026-10-31: OpenCode was removed.** Claude Code is the only assistant. Every OpenCode
+> statement below is history and superseded; `docs/contract.md` is current.
+
 Status: **decided 2026-10-06** (A: VexPortal deep link · B: Rust, Phase 1 in bash ·
 C: both agents ask · D: top-bar extension last). Phases 0 and 1 done; Phase 2 next.
 
