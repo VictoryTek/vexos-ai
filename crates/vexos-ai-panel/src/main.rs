@@ -315,6 +315,7 @@ impl Ui {
         let send = gtk::Button::builder()
             .label("Send")
             .sensitive(false)
+            .focus_on_click(false)
             .build();
         send.add_css_class("suggested-action");
         send.add_css_class("vexos-send");

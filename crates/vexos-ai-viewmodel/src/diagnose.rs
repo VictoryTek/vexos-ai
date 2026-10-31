@@ -47,11 +47,13 @@ impl Excerpt {
     }
 }
 
-/// Characters that can hide or reorder text on screen.
+/// Characters that can hide or reorder text on screen, or carry text that
+/// shows as nothing (tag characters, variation selectors).
 fn is_invisible(c: char) -> bool {
     matches!(c,
-        '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
-        | '\u{061C}' | '\u{FEFF}')
+        '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2064}'
+        | '\u{2066}'..='\u{2069}' | '\u{061C}' | '\u{180B}'..='\u{180F}' | '\u{FE00}'..='\u{FE0F}'
+        | '\u{FEFF}' | '\u{E0000}'..='\u{E007F}' | '\u{E0100}'..='\u{E01EF}')
 }
 
 /// Drops terminal escape sequences and carriage returns; replaces other
@@ -486,6 +488,29 @@ mod tests {
             d.contains("5 control or invisible characters replaced"),
             "{d}"
         );
+    }
+
+    #[test]
+    fn hidden_text_carriers_are_replaced() {
+        // One from each range: word joiner, tag letter (an ASCII "A" that
+        // shows as nothing), variation selectors, Mongolian selector.
+        let hidden = [
+            '\u{2060}',
+            '\u{2064}',
+            '\u{E0041}',
+            '\u{E007F}',
+            '\u{FE0F}',
+            '\u{E0100}',
+            '\u{180B}',
+        ];
+        let raw: String = hidden.iter().map(|c| format!("a{c}")).collect();
+        let e = excerpt(raw.as_bytes());
+        assert_eq!(e.text, "a\u{FFFD}".repeat(hidden.len()));
+        assert_eq!(e.replaced, hidden.len());
+        // Visible text, accents and emoji are left alone.
+        let plain = excerpt("caf\u{e9} \u{1F600} \u{4e2d}\u{6587}".as_bytes());
+        assert_eq!(plain.text, "caf\u{e9} \u{1F600} \u{4e2d}\u{6587}");
+        assert_eq!(plain.replaced, 0);
     }
 
     #[test]

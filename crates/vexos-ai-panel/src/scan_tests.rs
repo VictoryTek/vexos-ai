@@ -585,6 +585,20 @@ fn the_panel_has_no_way_to_rebuild_the_system() {
 }
 
 #[test]
+fn a_click_never_leaves_send_focused() {
+    // A focused Send is activated by Enter or Space, and unlike Enter in the
+    // input it sends a draft that has not been edited.
+    let main = code(MAIN);
+    let from = main
+        .find("let send = gtk::Button::builder()")
+        .expect("the send button");
+    let builder = &main[from..];
+    let builder = &builder[..builder.find(".build();").expect("its build")];
+    assert!(builder.contains(".focus_on_click(false)"), "{builder}");
+    assert!(!main.contains("set_focus_on_click(true)"));
+}
+
+#[test]
 fn send_fills_the_input_row_with_a_fixed_class() {
     let main = code(MAIN);
     assert!(main.contains("send.add_css_class(\"vexos-send\");"));
