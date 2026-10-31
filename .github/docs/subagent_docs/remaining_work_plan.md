@@ -76,7 +76,7 @@ Spec and spike. ACP core with mode pinning. View-model and GTK panel. GNOME exte
 
 The panel is drawn inside GNOME Shell with St widgets. A headless Rust helper holds the session and the safety rules. Read `shell_native_panel_spec.md` fully before B1.
 
-- [~] **B1** — done 2026-10-31 as a PROPOSAL: the note is read (sections 3 to 9 and "Phase 0 results") and B2 onward is expanded below. Waiting for the user's approval; nothing from B2 on is started. Order below is the order of work. Every item is Tier 3 unless it says otherwise (Tier 3 = plan, wait for approval, independent reviewer, mutation-check any safety test).
+- [x] **B1** — done 2026-10-31: the note is read (sections 3 to 9 and "Phase 0 results"), B2 onward is expanded below, and the user APPROVED it with these notes. (1) The `ui` switch holds only two fixed values, read from the app's own settings file (`$XDG_CONFIG_HOME/vexos-ai/panel.conf`, the file `PanelSettings` in `usage.rs` already parses); any other value means the old panel; the agent and the extension never set it. (4) A `Send` over 60,000 bytes is refused with a notice and never truncated. (5) An oversized approval card is denied at once and never shows a shortened command. (6) No `diagnose-*` actions on the helper. (7) The helper reads `usage_on_launch` from the settings file itself and nothing about it crosses the bus; the D-Bus crate choice stays with the user in B4a. B13: ask the user first; they lean toward keeping the GTK window as a fallback for a few weeks (this would change A4, so settle it then). Original wording of the proposal follows. Order below is the order of work. Open question for B5a/B6b: the extension has to learn the `ui` value, and its source scans forbid file reads, so decide who reads `panel.conf` (an exception limited to that one file in `extension.js`, or the helper-less launcher) before building. Every item is Tier 3 unless it says otherwise (Tier 3 = plan, wait for approval, independent reviewer, mutation-check any safety test).
 
   **Where this list differs from the note (user to approve with the list):**
   1. The note's `ui` setting (`window` default, `shell`) comes back as a TEMPORARY dev switch: the GTK panel stays installed and untouched until B13, then the switch and the GTK panel go (A4: the extension is required, no fallback).
@@ -245,7 +245,7 @@ Work only inside this repository's directory. Do not read or write other repos, 
 
 ## 13. Log (newest first; one line per item touched)
 
-- 2026-10-31 A1, A2, A3, A9 decided and marked done. B1 expanded (proposal, awaiting approval); B10 superseded by A4.
+- 2026-10-31 B1 approved with notes on items 1, 4, 5, 6, 7 and B13 (see item). A1, A2, A3, A9 decided and marked done. B1 expanded; B10 superseded by A4.
 - 2026-10-31 A1 reported by the user: opens fast, typing normal, no slide (same as the GTK window, C2). A2 is now ready for the user's decision.
 - 2026-10-31 E4 closed (#3 skipped, revisit for H2; #4 skipped, revisit if the GTK panel stays main; #5 kept). E6 closed: skipped.
 - 2026-10-31 E4: findings #1 and #2 fixed (review PASS, preflight 0); #3 explained, no change; #4 and #5 open.
