@@ -110,7 +110,7 @@ The panel is drawn inside GNOME Shell with St widgets. A headless Rust helper ho
 
 ## 7. Phase E: Safety and testing
 
-- [ ] **E1 USER** Read `crates/vexos-ai-viewmodel/src/composer.rs` once. It decides what the panel can send. Claude Code: first write a short reading guide (which functions matter, what to look for) in `.github/docs/subagent_docs/composer_reading_guide.md`.
+- [~] **E1 USER** (reading guide written 2026-10-31: `.github/docs/subagent_docs/composer_reading_guide.md`; waiting for the user to read composer.rs) Read `crates/vexos-ai-viewmodel/src/composer.rs` once. It decides what the panel can send. Claude Code: first write a short reading guide (which functions matter, what to look for) in `.github/docs/subagent_docs/composer_reading_guide.md`.
 - [ ] **E2** Test the ask rules against MultiEdit, NotebookEdit and wrapper commands (`timeout touch`, `env touch`, `nice touch`) in the spike harness. Report which ask or are denied and which slip through.
 - [x] **E3** — done 2026-10-31: OpenCode removed from CLI, module, policy, core, view-model, contract and tests; `pick` kept (claude only), a leftover `opencode` agent file launches Claude and shows null in status; `programs.vexos-ai.opencodePackage` is now a removed option with a clear error. Handoffs X2/X4/X5 below. (original text:) If OpenCode is dropped: remove it from the panel, the module, the contract and the tests (map first). If kept: document the custom-agent route as accepted in docs/contract.md.
 - [ ] **E4** Independent review of the send gate: composer.rs, check_usage, the source scans, and the helper's Send and Decide paths if Phase B ran. Use a fresh reviewer subagent with no prior context and ask it to try to find a path that sends text without a user click.
@@ -150,10 +150,60 @@ The panel is drawn inside GNOME Shell with St widgets. A headless Rust helper ho
 
 For each item, write the full prompt here (with the scope rule, verification and one commit message), tell the user which repo it belongs to, and wait for them to report back.
 
-- [ ] **X1 VexPortal repo** Small cleanup: CLAUDE.md says no preflight script exists but one does; five older drift items (`_service-info`, `beszel`, `clean`, `rust-repair`, `static-ip`) need a look; the dialog text "Your sign-ins are kept either way" may be dead; one test (`reads_this_user_without_erroring`) has no assertion.
-- [ ] **X2 vexos-nix repo** (needs A7) Add vexos-ai to the Daily workflow with a pre-push eval of a few variants, or a PR route.
-- [ ] **X4 vexos-nix repo** (needs E3, same commit as the lock bump) Remove `opencodePackage` from `modules/ai.nix` (it is now a removed option and errors), and drop any OpenCode wording, tests or `opencode` package pin. Prompt still to be written.
-- [ ] **X5 VexPortal repo** (needs E3) Remove `opencode` from the assistant catalog and the `pick` call. `vexos-ai pick opencode` now exits 2. Prompt still to be written.
+**Paste the "Common rules" block first, then one prompt, into a Claude Code session opened in the other repo.** Written 2026-10-31. After the session finishes, tell me what it reported.
+
+<details><summary>Common rules (prepend to every prompt)</summary>
+
+```
+Work only inside this repository's directory. Do not read or write other repos, ~/.claude, ~/.config, dconf or /etc, and never read credential files or tokens. Do not run nixos-rebuild, just rebuild/switch/update, nix flake update, nix flake check, nix-collect-garbage, or anything with sudo. Do not run git add, commit, push or stash: I commit with GitHub Desktop. Read this repo's CLAUDE.md first and follow it where it does not conflict with these rules; if it asks for something these rules forbid, say what you skipped. Do one task at a time, read the files before changing them, and change only what the task needs. Verify with this repo's own build and test commands (run only what applies, report exit codes, and write "-" for anything you did not run). Do not call anything done unless it ran. If something contradicts the task, stop and tell me. Finish with ONE commit message in this repo's commit format that covers every uncommitted change, and keep the report short and in plain language.
+```
+
+</details>
+
+- [ ] **X1 VexPortal repo** Small cleanup.
+
+  ```
+  Task: small cleanup in VexPortal. Check each item first and fix only what is true.
+  1. CLAUDE.md says no preflight script exists, but one does. Fix the statement (and any command list that should name it).
+  2. Five older drift items need a look: `_service-info`, `beszel`, `clean`, `rust-repair`, `static-ip`. For each, find what drifted (a name, a recipe or a doc that no longer matches the code or the vexos-nix justfile). Report what you found; fix it only if the fix is mechanical and obvious, otherwise list it for me.
+  3. The dialog text "Your sign-ins are kept either way" may be dead since the Claude accounts feature was removed from vexos-ai. Find where it is shown. If nothing can show it any more, remove it; if something still can, leave it and say why.
+  4. The test `reads_this_user_without_erroring` has no assertion. Add a meaningful one (what does "without erroring" mean for that function?), or if it cannot assert anything real, say so and tell me what to do.
+  Verify with this repo's preflight script and test command.
+  ```
+
+- [ ] **X2 vexos-nix repo** (A7 decided: yes, with an eval gate) Add vexos-ai to the Daily workflow.
+
+  ```
+  Task: add the vexos-ai flake input to this repo's "Daily workflow" (the justfile recipes the user runs every day, such as the "Up" / update recipe), with an evaluation gate.
+  Context: vexos-ai is an install-only flake consumed as an input; this repo pins the same nixos-26.05 revision. Updating the input should be a deliberate step: `nix flake update vexos-ai`, then commit and push. The user wants a gate that evaluates a few host variants before anything is pushed, so a vexos-ai change cannot break a host unnoticed.
+  First read: the justfile, how the Daily/Up flow works now, how other inputs are updated, and how `dry-build` is used. Then propose the smallest change in chat before editing: which recipe changes, which variants are evaluated (pick a few that cover different roles, e.g. one desktop role with the AI feature on, one without), and what happens when the gate fails. Wait for my yes before you edit.
+  Rules: never run `just rebuild|switch|update|update-all`; validate with `dry-build` only. Do not change flake.lock yourself.
+  ```
+
+- [ ] **X4 vexos-nix repo** (E3 done) Follow vexos-ai dropping OpenCode.
+
+  ```
+  Task: vexos-ai removed OpenCode (2026-10-31). Claude Code is the only assistant. `programs.vexos-ai.opencodePackage` is now a removed option: setting it fails evaluation with "OpenCode was removed from vexos-ai; delete this setting."
+  In this repo:
+  1. In modules/ai.nix (and anywhere else it appears), delete the `opencodePackage` setting and any `pkgs.unstable.opencode` use made only for it.
+  2. Remove OpenCode wording, tests, docs or package pins that no longer apply. Search the whole repo for "opencode" case-insensitively and list each hit with what you did.
+  3. Do not touch the feature toggle, role gating or the pkgs.unstable choice for Claude packages.
+  The flake.lock bump to the new vexos-ai revision is a separate, user-run step (`nix flake update vexos-ai`). Do not run it. This change must land together with that bump, because until the lock is bumped the old vexos-ai still expects the option.
+  Verify with `dry-build` for a few host variants (AI feature on and off). Never rebuild or switch.
+  ```
+
+- [ ] **X5 VexPortal repo** (E3 done) Follow vexos-ai dropping OpenCode.
+
+  ```
+  Task: vexos-ai removed OpenCode (2026-10-31). `vexos-ai pick opencode` now exits 2 with "unknown assistant 'opencode' (use claude)". `vexos-ai pick claude` still works, and `status --json` is unchanged (schema 1). An old `opencode` value in ~/.config/vexos/ai/agent now shows as `agent: null` in status and launches Claude.
+  In this repo:
+  1. Remove opencode from the assistant catalog and from every place VexPortal offers or calls `vexos-ai pick opencode`.
+  2. Make the UI and code cope with `agent == null` (nothing chosen) and with Claude as the only choice, without a leftover one-item picker that looks broken (decide the simplest honest UI: for example just show Claude, or keep a "set up" action that runs `vexos-ai pick claude`).
+  3. Update tests that mention opencode, and any docs.
+  The contract this relies on is docs/contract.md in the vexos-ai repo (argv, exit codes, `status --json`). Do not read that repo; the facts above are all you need.
+  Verify with this repo's preflight script and tests.
+  ```
+
 - [ ] **X3 vexos-nix repo** (needs Phase B) If the Shell-native panel ships: the enabled-extensions handling and any new module option wiring.
 
 ---
@@ -166,6 +216,7 @@ For each item, write the full prompt here (with the scope rule, verification and
 
 ## 13. Log (newest first; one line per item touched)
 
+- 2026-10-31 E1: reading guide written (user still to read). X1, X2, X4, X5: handoff prompts written.
 - 2026-10-31 F2 done: banner added to assistant_panel_spec.md.
 - 2026-10-31 F3 done: scratch folders are ignored; nothing to remove but `target/`.
 - 2026-10-31 E3 done: OpenCode removed (see item).
