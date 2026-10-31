@@ -44,6 +44,18 @@ M=[
  ('logic.js','export const MAX_BYTES = 16 * 1024;','export const MAX_BYTES = 64 * 1024;'),
  ('extension.js','global.stage.disconnect(id);','void id;'),
  ('extension.js','Main.wm.removeKeybinding(SHORTCUT);','void SHORTCUT;'),
+ ('logic.js','export const MAX_SEND_BYTES = 60000;','export const MAX_SEND_BYTES = 61000;'),
+ ('logic.js','export const INPUT_LIMIT_BYTES = 65534;','export const INPUT_LIMIT_BYTES = 65500;'),
+ ('logic.js','const INPUT_FULL_BYTES = INPUT_LIMIT_BYTES - 3;','const INPUT_FULL_BYTES = INPUT_LIMIT_BYTES - 4;'),
+ ('logic.js','if (n >= INPUT_FULL_BYTES)','if (n > INPUT_FULL_BYTES)'),
+ ("logic.js","return n > MAX_SEND_BYTES ? 'long' : 'none';","return n >= MAX_SEND_BYTES ? 'long' : 'none';"),
+ ('extension.js','this._showCursor();\n        this._showInputNotice();','this._showCursor();'),
+ ('extension.js',"if (kind === 'full')","if (false)"),
+ ('extension.js',"else if (kind === 'long')","else if (false)"),
+ ('extension.js','Shorten the text to send it.','Nothing was cut. Shorten the text to send it.'),
+ ('extension.js',"if (verdict === 'too-long') {","if (false) {"),
+ ('extension.js','this._showInputNotice();\n            return;','this._showInputNotice();'),
+ ('extension.js',"this._addRow({role: 'you', kind: 'text', text: ct.text});","this._addRow({role: 'you', kind: 'text', text: ct.text.slice(0, 60000)});"),
 ]
 
 

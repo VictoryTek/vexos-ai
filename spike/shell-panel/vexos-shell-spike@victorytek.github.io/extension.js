@@ -277,6 +277,22 @@ export default class SpikeExtension extends Extension {
         const line = this._lineHeight();
         this._inputScroll.height = Logic.inputHeight(natural, line + pad, line * Logic.INPUT_MAX_LINES + pad);
         this._showCursor();
+        this._showInputNotice();
+    }
+
+    // A text over the send limit, or so long that the entry may have cut a paste,
+    // gets a visible notice as soon as it is in the box, not only at Send.
+    _showInputNotice() {
+        const kind = Logic.inputNotice(this._entry.clutter_text.text);
+        if (kind === 'full')
+            this._notice.text = 'The box is full (about 64 KiB). Anything pasted past that was cut and is not here. Too long to send (limit 60,000 bytes).';
+        else if (kind === 'long')
+            this._notice.text = 'Too long to send (limit 60,000 bytes). Shorten the text to send it.';
+        else {
+            this._notice.hide();
+            return;
+        }
+        this._notice.show();
     }
 
     // Keeps the cursor's line inside the visible part of the input box. The
@@ -312,8 +328,8 @@ export default class SpikeExtension extends Extension {
         if (verdict === 'empty')
             return;
         if (verdict === 'too-long') {
-            this._notice.text = 'Too long to send (limit 72 KiB). The text stays in the box.';
-            this._notice.show();
+            // The text stays in the box, untouched.
+            this._showInputNotice();
             return;
         }
         this._notice.hide();

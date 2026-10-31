@@ -151,6 +151,33 @@ test('inputVerdict: empty, send, too-long, and the exact boundary', () => {
     assert.equal(L.inputVerdict('日'.repeat(L.MAX_SEND_BYTES / 3 + 1)), 'too-long');
 });
 
+test('inputNotice: none, too long, and full (the entry may have cut a paste)', () => {
+    assert.equal(L.inputNotice(''), 'none');
+    assert.equal(L.inputNotice(undefined), 'none');
+    assert.equal(L.inputNotice('hi'), 'none');
+    assert.equal(L.inputNotice('a'.repeat(L.MAX_SEND_BYTES)), 'none');
+    assert.equal(L.inputNotice('a'.repeat(L.MAX_SEND_BYTES + 1)), 'long');
+    assert.equal(L.inputNotice('a'.repeat(65530)), 'long');
+    assert.equal(L.inputNotice('a'.repeat(65531)), 'full');
+    assert.equal(L.inputNotice('a'.repeat(65534)), 'full');
+    // the entry keeps whole characters, so 3 and 4 byte text stops a few bytes short
+    assert.equal(L.inputNotice('日'.repeat(21843)), 'long');   // 65529 bytes
+    assert.equal(L.inputNotice('日'.repeat(21844)), 'full');   // 65532 bytes
+    assert.equal(L.inputNotice('😀'.repeat(16383)), 'full');   // 65532 bytes
+    assert.equal(L.inputNotice('😀'.repeat(15000)), 'none');   // exactly 60000 bytes
+    assert.equal(L.inputNotice('😀'.repeat(15001)), 'long');
+});
+
+test('whatever may have been cut or is over the limit is never sendable', () => {
+    for (let n = L.MAX_SEND_BYTES - 2; n <= L.INPUT_LIMIT_BYTES + 5; n += 1) {
+        const t = 'a'.repeat(n);
+        if (L.inputNotice(t) !== 'none')
+            assert.equal(L.inputVerdict(t), 'too-long', String(n));
+        else
+            assert.equal(L.inputVerdict(t), 'send', String(n));
+    }
+});
+
 test('utf8Length matches Buffer.byteLength', () => {
     for (const s of ['', 'a', 'é', '日', '😀', 'a😀日é\n'])
         assert.equal(L.utf8Length(s), bytes(s), s);
@@ -222,7 +249,10 @@ test('constants: the stated caps and slide', () => {
     assert.ok(L.MAX_BYTES + 100 < 65535);
     assert.equal(L.MAX_LINES, 2000);
     assert.equal(L.MAX_ROWS, 200);
-    assert.equal(L.MAX_SEND_BYTES, 72 * 1024);
+    assert.equal(L.MAX_SEND_BYTES, 60000);
+    assert.equal(L.INPUT_LIMIT_BYTES, 65534);
+    // a text the entry may have cut (near its limit) must always be too long to send
+    assert.ok(L.MAX_SEND_BYTES < L.INPUT_LIMIT_BYTES - 3);
     assert.equal(L.INPUT_MAX_LINES, 8);
 });
 
@@ -314,6 +344,26 @@ test('scan: the only widget text comes from capText, visible or fixed strings', 
     }
     assert.ok(!/\.text = (?!'|result|''|ct\.text)/.test(c.replace(/this\._notice\.text = '[^']*'/g, '')),
         'only fixed strings are assigned to .text');
+});
+
+test('scan: an over-long text is refused with a notice and never cut or sent', () => {
+    const c = code(read('extension.js'));
+    // the notice is refreshed on every change of the text
+    const changed = c.slice(c.indexOf('_inputChanged() {'));
+    assert.ok(changed.slice(0, changed.indexOf('\n    }\n')).includes('this._showInputNotice();'));
+    // _send returns on 'too-long' before it adds a row
+    const send = c.slice(c.indexOf('_send() {'));
+    const body = send.slice(0, send.indexOf('\n    }\n'));
+    assert.ok(body.indexOf("verdict === 'too-long'") > 0 &&
+        body.indexOf("verdict === 'too-long'") < body.indexOf('_addRow'));
+    assert.ok(/too-long[^]*?return;[^]*?_addRow/.test(body));
+    // nothing shortens the text in the box
+    assert.ok(!/ct\.text\.(slice|substring|substr)\(|(ct|clutter_text)\.set_text\(|ct\.text = ct\.text/.test(c));
+    // each notice kind is wired to its own fixed text, and the text never claims
+    // that nothing was cut (the box may have cut a paste before this text shrank)
+    assert.ok(/kind === 'full'\)\s*this\._notice\.text = 'The box is full/.test(c));
+    assert.ok(/kind === 'long'\)\s*this\._notice\.text = 'Too long to send/.test(c));
+    assert.ok(!/[Nn]othing was cut/.test(c));
 });
 
 test('scan: nothing outside the spike names its uuid (never packaged or enabled)', () => {

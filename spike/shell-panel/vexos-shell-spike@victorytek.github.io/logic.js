@@ -9,7 +9,16 @@ export const MAX_BYTES = 16 * 1024;
 export const MAX_LINES = 2000;
 export const MAX_RAW = 256 * 1024;    // code units looked at before escaping
 export const MAX_ROWS = 200;
-export const MAX_SEND_BYTES = 72 * 1024;
+// A send is refused above this, never cut. It is below what the entry can hold
+// (INPUT_LIMIT_BYTES), so a paste that the entry cut is always too long to send.
+export const MAX_SEND_BYTES = 60000;
+// Measured in the nested shell (GNOME Shell 50.5): the entry's text buffer keeps
+// at most this many bytes, whole characters only, and drops the rest of a paste
+// without a word.
+export const INPUT_LIMIT_BYTES = 65534;
+// The longest whole character is 4 bytes, so a text this close to the limit may
+// have lost its tail.
+const INPUT_FULL_BYTES = INPUT_LIMIT_BYTES - 3;
 export const MAX_INPUT_CHARS = 72 * 1024;
 export const INPUT_MAX_LINES = 8;
 
@@ -112,6 +121,17 @@ export function inputVerdict(text) {
     if (text.length > MAX_SEND_BYTES || utf8Length(text) > MAX_SEND_BYTES)
         return 'too-long';
     return 'send';
+}
+
+// What to tell the user about the text in the box: 'none', 'long' (over the
+// send limit) or 'full' (so near the entry's limit that a paste may have been cut).
+export function inputNotice(text) {
+    if (typeof text !== 'string')
+        return 'none';
+    const n = utf8Length(text);
+    if (n >= INPUT_FULL_BYTES)
+        return 'full';
+    return n > MAX_SEND_BYTES ? 'long' : 'none';
 }
 
 const num = (v, d = 0) => Number.isFinite(v) ? v : d;
