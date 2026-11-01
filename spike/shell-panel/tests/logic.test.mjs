@@ -310,7 +310,7 @@ test('scan: logic.js and fake.js import nothing', () => {
 
 test('scan: only known imports in extension.js', () => {
     const imports = [...read('extension.js').matchAll(/^import .* from '([^']+)';$/gm)].map(m => m[1]).sort();
-    assert.deepEqual(imports, ['./fake.js', './logic.js', 'gi://Clutter', 'gi://GLib', 'gi://GObject',
+    assert.deepEqual(imports, ['./fake.js', './logic.js', 'gi://Clutter', 'gi://Cogl', 'gi://GLib', 'gi://GObject',
         'gi://Meta', 'gi://Pango', 'gi://Shell', 'gi://St',
         'resource:///org/gnome/shell/extensions/extension.js',
         'resource:///org/gnome/shell/ui/main.js'].sort());
@@ -404,6 +404,45 @@ test('scan: an over-long text is refused with a notice and never cut or sent', (
     const sendBody = c.slice(c.indexOf('_send() {'));
     assert.ok(!sendBody.slice(0, sendBody.indexOf('\n    }\n')).includes('_cut'));
     assert.ok(!/[Nn]othing was cut/.test(c));
+});
+
+test('scan: Enter sends only through the text activate signal, which runs after the input method', () => {
+    // Clutter binds Enter (no modifier) to `activate` inside the text's own key
+    // handling, after the input method has had the key. A key-press handler on
+    // the text would see Enter first, before the input method, and could send
+    // in the middle of a composition.
+    const c = code(read('extension.js'));
+    assert.ok(c.includes('activatable: true'));
+    assert.ok(!c.includes('activatable: false'));
+    assert.ok(c.includes("ct.connect('activate', this._guard(() => this._activate()));"));
+    assert.ok(!c.includes("'key-press-event'"));
+    assert.ok(!/KEY_Return|KEY_KP_Enter|KEY_ISO_Enter/.test(c));
+    // and `_activate` has one caller: the signal handler, after the input method
+    assert.equal(c.match(/this\._activate\(\)/g).length, 1);
+    // _send has one caller, _activate, which does not send while a composition shows
+    assert.equal(c.match(/this\._send\(\)/g).length, 1);
+    const fn = c.slice(c.indexOf('_activate() {'));
+    const body = fn.slice(0, fn.indexOf('\n    }\n'));
+    const guard = body.indexOf('this._entry.clutter_text.has_preedit()');
+    assert.ok(guard > 0 && guard < body.indexOf('this._send()'), body);
+    assert.ok(/if \(this\._entry\.clutter_text\.has_preedit\(\)\)\s*return;/.test(body), body);
+});
+
+test('constants: the selection colours are fixed hex strings', () => {
+    assert.equal(L.SELECTION_BG, '#3584e4');
+    assert.equal(L.SELECTION_FG, '#ffffff');
+});
+
+test('scan: every selectable label gets readable selection colours', () => {
+    // St.Label ignores the CSS selection colours, and the default is a white
+    // block with light text, so they are set on the text itself.
+    const c = code(read('extension.js'));
+    const selectable = c.match(/selectable: true/g).length;
+    assert.equal(c.match(/selection_color: /g)?.length, selectable);
+    assert.equal(c.match(/selected_text_color: /g)?.length, selectable);
+    assert.ok(c.includes("import Cogl from 'gi://Cogl';"));
+    assert.ok(c.includes('selection_color: Cogl.Color.from_string(Logic.SELECTION_BG)[1]'));
+    assert.ok(c.includes('selected_text_color: Cogl.Color.from_string(Logic.SELECTION_FG)[1]'));
 });
 
 test('scan: nothing outside the spike names its uuid (never packaged or enabled)', () => {

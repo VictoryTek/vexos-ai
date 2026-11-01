@@ -650,3 +650,5 @@ on a real screen in the VM first (smoothness, IME, grab with real shortcuts and
 extensions, lock), because everything above is from a headless shell. The main
 cost in section 11 is unchanged: a native crash in the Shell ends the session,
 and nothing here reduces that.
+
+**After Phase 0 (2026-10-31).** Undo in the input is not supported, by decision (plan item B2c): the input has no undo and no context menu, and nothing in Phase B adds either. The selected-text colour was fixed (B2b), and Enter now goes through the text's `activate` signal, after the input method (B2e); both are recorded in `remaining_work_plan.md`.

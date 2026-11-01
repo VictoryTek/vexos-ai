@@ -10,6 +10,7 @@
 // All text is set with plain `.text`; markup is never enabled.
 
 import Clutter from 'gi://Clutter';
+import Cogl from 'gi://Cogl';
 import GLib from 'gi://GLib';
 import GObject from 'gi://GObject';
 import Meta from 'gi://Meta';
@@ -241,7 +242,7 @@ export default class SpikeExtension extends Extension {
             hint_text: 'Enter sends, Shift+Enter adds a line'});
         const ct = this._entry.clutter_text;
         ct.set({single_line_mode: false, line_wrap: true, line_wrap_mode: Pango.WrapMode.WORD_CHAR,
-            ellipsize: Pango.EllipsizeMode.NONE, activatable: false,
+            ellipsize: Pango.EllipsizeMode.NONE, activatable: true,
             max_length: Logic.MAX_INPUT_CHARS});
         // The St.Entry sits in a vertical box (a scrollable) inside a scroll
         // view whose height follows the text up to a cap.
@@ -255,7 +256,7 @@ export default class SpikeExtension extends Extension {
 
         ct.connect('text-changed', this._guard(() => this._inputChanged()));
         ct.connect('cursor-changed', this._guard(() => this._showCursor()));
-        ct.connect('key-press-event', this._guard((_actor, event) => this._entryKey(event)));
+        ct.connect('activate', this._guard(() => this._activate()));
     }
 
     _lineHeight() {
@@ -319,15 +320,16 @@ export default class SpikeExtension extends Extension {
             top + line + node.get_padding(St.Side.BOTTOM) + node.get_border_width(St.Side.BOTTOM));
     }
 
-    _entryKey(event) {
-        const sym = event.get_key_symbol();
-        if (sym !== Clutter.KEY_Return && sym !== Clutter.KEY_KP_Enter)
-            return Clutter.EVENT_PROPAGATE;
-        // Shift+Enter: let the text add its newline. Enter alone sends.
-        if (event.get_state() & Clutter.ModifierType.SHIFT_MASK)
-            return Clutter.EVENT_PROPAGATE;
+    // Enter. Clutter binds it (without a modifier) to the text's `activate`
+    // signal inside its own key handling, which runs after the input method has
+    // had the key: while an input method composes it takes Enter to commit the
+    // composition, and `activate` does not fire. A key-press handler on the text
+    // would see Enter first. Shift+Enter has no binding: the text adds its newline.
+    _activate() {
+        // A composition is still shown: do not send.
+        if (this._entry.clutter_text.has_preedit())
+            return;
         this._send();
-        return Clutter.EVENT_STOP;
     }
 
     // "Send" in the spike only adds the text as a row. Nothing leaves the Shell.
@@ -365,7 +367,9 @@ export default class SpikeExtension extends Extension {
             style_class: kind === 'code' ? 'spike-code' : 'spike-text'});
         label.clutter_text.set({selectable: true, reactive: true, line_wrap: true,
             line_wrap_mode: kind === 'code' ? Pango.WrapMode.CHAR : Pango.WrapMode.WORD_CHAR,
-            ellipsize: Pango.EllipsizeMode.NONE});
+            ellipsize: Pango.EllipsizeMode.NONE,
+            selection_color: Cogl.Color.from_string(Logic.SELECTION_BG)[1],
+            selected_text_color: Cogl.Color.from_string(Logic.SELECTION_FG)[1]});
         row.add_child(label);
         const copy = new St.Button({label: 'Copy', style_class: 'button spike-button',
             can_focus: true, x_align: Clutter.ActorAlign.START});

@@ -2,6 +2,11 @@
 // imports, so node can test it. Nothing here touches a widget.
 
 export const SLIDE_MS = 250;
+// Selected text in a reply: St.Label does not read the CSS selection colours, and
+// Clutter's default is a white block with light text, so these are set on the
+// label's text (the GNOME accent blue with white text).
+export const SELECTION_BG = '#3584e4';
+export const SELECTION_FG = '#ffffff';
 // One message as displayed. The note proposed 64 KiB, but a St.Label paints only
 // part of a long text (see the Phase 0 results), and Clutter's text buffer holds
 // at most 65535 bytes, which would also cut off the "shortened" mark.

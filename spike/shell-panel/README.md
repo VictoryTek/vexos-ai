@@ -85,9 +85,9 @@ in the VM, not on a machine you are working on.
    `Enter` adds a row and the chat scrolls to the bottom. Try your own keyboard
    layout and, if you use one, an input method (IME): compose a character, and
    press Enter to commit the composition: it must **not** send the message (a
-   known risk: Enter is handled before the input method sees it). `Ctrl+Z` is expected to do nothing.
+   Enter now goes through the text's `activate` signal, after the input method; a real input method is untested, so this is the check). Undo is not supported, by decision (B2c, 2026-10-31): `Ctrl+Z` does nothing and that is expected. `Ctrl+Enter` does nothing and `Alt+Enter` adds a line.
 4. Replies: drag over a reply to select it; double-click a word; press Copy and
-   paste elsewhere. Note: selected text may be unreadable (white on light).
+   paste elsewhere. The selected text must be readable (blue with white text; it was white on a light block before the B2b fix).
 5. Grab: with the panel open, type: the keys go to the panel, not the window
    behind. Close with `Super+F10`; keys go to the window again and focus is
    where it was. Open a terminal and an app first and check which one has
