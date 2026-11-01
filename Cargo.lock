@@ -784,6 +784,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "vexos-ai-helper"
+version = "0.1.0"
+dependencies = [
+ "gio",
+ "glib",
+]
+
+[[package]]
 name = "vexos-ai-panel"
 version = "0.1.0"
 dependencies = [

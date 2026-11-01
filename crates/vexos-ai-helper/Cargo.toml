@@ -1,0 +1,24 @@
+[package]
+name = "vexos-ai-helper"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT"
+description = "VexOS assistant helper: a session D-Bus service that only the GNOME Shell may call"
+
+[dependencies]
+gio = "0.22"
+glib = "0.22"
+
+[features]
+# Builds the test-only caller program (testing/fakecaller.rs). Off in a release.
+testing = []
+
+[[bin]]
+name = "vexos-ai-helper"
+path = "src/main.rs"
+
+[[bin]]
+name = "vexos-ai-helper-fakecaller"
+path = "testing/fakecaller.rs"
+required-features = ["testing"]

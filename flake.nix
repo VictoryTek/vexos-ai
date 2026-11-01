@@ -114,6 +114,30 @@
           installPhase = "touch $out";
         };
 
+        # The helper (crates/vexos-ai-helper): who may call it and what a call may
+        # carry, tested on a private bus where each scenario starts a real
+        # dbus-daemon, plus clippy. It needs glib and dbus, which the portable
+        # core above does not, so it is a check of its own.
+        helper = let
+          crate = [ "-p" "vexos-ai-helper" ];
+        in pkgs.rustPlatform.buildRustPackage {
+          pname = "vexos-ai-helper";
+          version = "0.1.0";
+          src = pkgs.lib.fileset.toSource {
+            root = ./.;
+            fileset = pkgs.lib.fileset.unions [ ./Cargo.toml ./Cargo.lock ./crates ];
+          };
+          cargoLock.lockFile = ./Cargo.lock;
+          cargoBuildFlags = crate;
+          # `testing` builds the test-only caller program, never in a release.
+          cargoTestFlags = crate ++ [ "--features" "testing" ];
+          nativeBuildInputs = [ pkgs.pkg-config pkgs.clippy ];
+          buildInputs = [ pkgs.glib ];
+          nativeCheckInputs = [ pkgs.dbus ];
+          postCheck = "cargo clippy --offline --all-targets ${toString crate} --features testing -- -D warnings";
+          installPhase = "touch $out";
+        };
+
         # The GTK window (crates/vexos-ai-panel) builds, and passes clippy. It
         # has no tests: its rules are in the view-model, tested above.
         panel = self.packages.${pkgs.stdenv.hostPlatform.system}.vexos-ai-panel.overrideAttrs (old: {

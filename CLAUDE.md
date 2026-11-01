@@ -13,12 +13,13 @@ Test (one check at a time; use `x86_64-linux` unless you have an aarch64 builder
 - `nix build .#checks.x86_64-linux.policy` (the safety policy in `nix/policy.nix`: never apply, always ask)
 - `nix build .#checks.x86_64-linux.contract` (the bats suite in `tests/contract/` against the CLI under stubs; verifies `docs/contract.md`)
 - `nix build .#checks.x86_64-linux.core` (ACP core and view-model tests, plus clippy)
+- `nix build .#checks.x86_64-linux.helper` (the D-Bus helper: its rules, and its tests on a private `dbus-daemon`, plus clippy)
 - `nix build .#checks.x86_64-linux.panel` (the GTK panel builds and passes clippy)
 - `nix build .#checks.x86_64-linux.module` (the NixOS module's assertions)
 - `nix build .#checks.x86_64-linux.extension` (the GNOME Shell extension as built)
 - `nix develop -c cargo fmt --all --check`
 
-Preflight (final gate): `scripts/preflight.sh` (package build, the six checks above, module eval, rustfmt)
+Preflight (final gate): `scripts/preflight.sh` (package build, the seven checks above, module eval, rustfmt)
 Fast verify (also run by the Stop hook): `scripts/preflight.sh`
 
 ## Repository
@@ -26,7 +27,7 @@ Fast verify (also run by the Stop hook): `scripts/preflight.sh`
 - Key directories:
   - `bin/` — `vexos-ai.sh`, the launcher and helpers; embedded into the package by `nix/package.nix`
   - `nix/` — `package.nix` (shellchecked CLI + desktop entry), `module.nix` (`programs.vexos-ai`), `policy.nix` (managed agent safety policy), `panel.nix`, `extension.nix`
-  - `crates/` — Rust workspace: `vexos-ai-core` (ACP client), `vexos-ai-viewmodel` (panel rules, no GTK), `vexos-ai-panel` (GTK4 window)
+  - `crates/` — Rust workspace: `vexos-ai-core` (ACP client), `vexos-ai-viewmodel` (panel rules, no GTK), `vexos-ai-helper` (headless D-Bus helper: who may call it, and what a call may carry), `vexos-ai-panel` (GTK4 window)
   - `extension/` — the GNOME Shell extension
   - `skills/` — agent skills (`vexos`, `vexos-diagnose`) linked into `~/.claude/skills` and `~/.agents/skills`
   - `docs/` — `contract.md` (argv, exit codes and `status --json` for callers such as VexPortal) and `spec.md` (roadmap and decisions)
@@ -47,7 +48,7 @@ Fast verify (also run by the Stop hook): `scripts/preflight.sh`
 - `nix/policy.nix` is the assistant's safety policy, asserted by `checks.policy`: agents must never be able to apply a configuration (`nixos-rebuild switch|boot|test`, `just rebuild|switch|update|update-all`) or run `nix flake check`, and must always ask before acting (no Claude auto or bypass mode). Any change to `nix/policy.nix` must keep `checks.policy` in `flake.nix` in step with it
 - Validate with `nix build` here and `dry-build` in vexos-nix; never `nixos-rebuild switch|boot` from automation
 - `docs/contract.md` is a public contract for callers (VexPortal, the GNOME panel, tests); `tests/contract/*.bats` must keep passing unchanged against `bin/vexos-ai.sh` and its planned Rust replacement. A change to argv, exit codes or `status --json` is a contract change and needs `docs/contract.md` and the Bats suite updated together
-- Which check covers which change: `nix build` for `bin/vexos-ai.sh` or `nix/package.nix`; the module `nix eval` for `nix/module.nix` or `flake.nix`; `checks.policy` for `nix/policy.nix` or the `policy` check; `checks.contract` for `bin/vexos-ai.sh`, `docs/contract.md` or `tests/contract/`; `checks.core`/`checks.panel` for `crates/`; `checks.extension` for `extension/`
+- Which check covers which change: `nix build` for `bin/vexos-ai.sh` or `nix/package.nix`; the module `nix eval` for `nix/module.nix` or `flake.nix`; `checks.policy` for `nix/policy.nix` or the `policy` check; `checks.contract` for `bin/vexos-ai.sh`, `docs/contract.md` or `tests/contract/`; `checks.core`/`checks.helper`/`checks.panel` for `crates/`; `checks.extension` for `extension/`
 - Context7 documents libraries, not nixpkgs or NixOS options; for nixpkgs packages and NixOS options use the `nixos` MCP server (`mcp__nixos__nix`) as the authoritative source
 
 ## Forbidden commands

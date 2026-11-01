@@ -11,16 +11,22 @@
 //! decodes to exactly one input.
 
 /// Characters that hide, reorder or break text on screen without drawing
-/// anything: soft hyphen, combining grapheme joiner, bidi marks, joiners and
-/// zero-width spaces, line and paragraph separators, word joiner and the
-/// invisible operators, deprecated format controls, variation selectors, the
-/// byte order mark, interlinear annotation marks and tag characters.
+/// anything, or that look like a space but are not one: soft hyphen, combining
+/// grapheme joiner, bidi marks, joiners and zero-width spaces, line and
+/// paragraph separators, word joiner and the invisible operators, deprecated
+/// format controls, variation selectors, the byte order mark, interlinear
+/// annotation marks, tag characters, the four Hangul fillers (which look like a
+/// space but do not split words) and the other default-ignorable characters
+/// that GTK and the Shell draw as nothing. Ordinary Hangul and CJK letters are
+/// not in it.
 pub(crate) fn is_hidden(c: char) -> bool {
     matches!(c,
-        '\u{AD}' | '\u{34F}' | '\u{61C}' | '\u{180B}'..='\u{180F}' | '\u{200B}'..='\u{200F}'
+        '\u{AD}' | '\u{34F}' | '\u{61C}' | '\u{115F}' | '\u{1160}' | '\u{17B4}'..='\u{17B5}'
+        | '\u{180B}'..='\u{180F}' | '\u{200B}'..='\u{200F}'
         | '\u{2028}' | '\u{2029}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{206F}'
-        | '\u{FE00}'..='\u{FE0F}' | '\u{FEFF}' | '\u{FFF9}'..='\u{FFFB}'
-        | '\u{E0000}'..='\u{E007F}' | '\u{E0100}'..='\u{E01EF}')
+        | '\u{3164}' | '\u{FE00}'..='\u{FE0F}' | '\u{FEFF}' | '\u{FFA0}'
+        | '\u{FFF0}'..='\u{FFFB}' | '\u{1BCA0}'..='\u{1BCA3}' | '\u{1D173}'..='\u{1D17A}'
+        | '\u{E0000}'..='\u{E0FFF}')
 }
 
 /// A character shown as its code: a control other than newline and tab, or a
@@ -141,6 +147,23 @@ mod tests {
         '\u{e007f}',
         '\u{e0100}',
         '\u{e01ef}',
+        // look-alike spaces and more default-ignorable characters (E7)
+        '\u{115f}',
+        '\u{1160}',
+        '\u{3164}',
+        '\u{ffa0}',
+        '\u{17b4}',
+        '\u{17b5}',
+        '\u{1bca0}',
+        '\u{1bca3}',
+        '\u{1d173}',
+        '\u{1d17a}',
+        '\u{fff0}',
+        '\u{fff8}',
+        '\u{e0080}',
+        '\u{e00ff}',
+        '\u{e01f0}',
+        '\u{e0fff}',
     ];
 
     /// Just outside each range: visible, so left alone.
@@ -166,11 +189,21 @@ mod tests {
         '\u{fe10}',
         '\u{fefe}',
         '\u{ff00}',
-        '\u{fff8}',
         '\u{fffc}',
-        '\u{e0080}',
-        '\u{e00ff}',
-        '\u{e01f0}',
+        '\u{17b3}',
+        '\u{17b6}',
+        '\u{1bc9f}',
+        '\u{1bca4}',
+        '\u{1d172}',
+        '\u{1d17b}',
+        '\u{ffef}',
+        '\u{e1000}',
+        '\u{115e}',
+        '\u{1161}',
+        '\u{3163}',
+        '\u{3165}',
+        '\u{ff9f}',
+        '\u{ffa1}',
         'é',
         '日',
         '😀',
@@ -194,6 +227,51 @@ mod tests {
         assert_eq!(visible("a\nb\tc"), "a\nb\tc");
         assert_eq!(visible("héllo wörld 日本語 😀"), "héllo wörld 日本語 😀");
         assert_eq!(visible(""), "");
+    }
+
+    #[test]
+    fn a_look_alike_space_is_shown_so_a_command_reads_as_it_runs() {
+        // The gap between a and b looks like a space but is a Hangul filler.
+        assert_eq!(visible("cp a\u{3164}b /dst"), r"cp a\u{3164}b /dst");
+        assert_eq!(
+            visible("a\u{115f}b\u{1160}c\u{ffa0}d"),
+            r"a\u{115f}b\u{1160}c\u{ffa0}d"
+        );
+    }
+
+    #[test]
+    fn ordinary_hangul_and_cjk_letters_are_left_alone() {
+        for text in [
+            "한국어",
+            "안녕하세요 세계",
+            "\u{1100}\u{1161}\u{11a8}",
+            "ㄱㅏㅣ ㅥ",
+            "\u{ffa1}\u{ffa2}\u{ffc2}",
+            "日本語 中文 漢字",
+            "ひらがな カタカナ ｶﾀｶﾅ",
+            "mixed 한글 and 中文 and 日本語 text",
+        ] {
+            assert_eq!(visible(text), text, "{text}");
+        }
+        // every Hangul syllable and CJK ideograph, and every jamo, compatibility
+        // jamo and halfwidth jamo except the four fillers, is not hidden
+        let fillers = ['\u{115f}', '\u{1160}', '\u{3164}', '\u{ffa0}'];
+        let letters = ('\u{ac00}'..='\u{d7a3}')
+            .chain('\u{4e00}'..='\u{9fff}')
+            .chain('\u{3400}'..='\u{4dbf}')
+            .chain('\u{3040}'..='\u{30ff}')
+            .chain('\u{1100}'..='\u{11ff}')
+            .chain('\u{3131}'..='\u{318e}')
+            .chain('\u{ffa1}'..='\u{ffdc}');
+        for c in letters {
+            if fillers.contains(&c) {
+                continue;
+            }
+            assert!(!is_hidden(c), "{:x}", c as u32);
+        }
+        for c in fillers {
+            assert!(is_hidden(c), "{:x}", c as u32);
+        }
     }
 
     #[test]

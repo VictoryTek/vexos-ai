@@ -1,0 +1,28 @@
+<node>
+  <interface name="io.github.victorytek.VexosAssistant.Helper1">
+    <method name="Open"/>
+    <method name="Close"/>
+    <method name="Edited">
+      <arg type="s" name="text" direction="in"/>
+    </method>
+    <method name="Send">
+      <arg type="s" name="text" direction="in"/>
+      <arg type="s" name="via" direction="in"/>
+    </method>
+    <method name="Cancel"/>
+    <method name="CheckUsage"/>
+    <method name="DraftChoice">
+      <arg type="s" name="choice" direction="in"/>
+    </method>
+    <method name="DraftDiscard"/>
+    <method name="Decide">
+      <arg type="t" name="generation" direction="in"/>
+      <arg type="t" name="request" direction="in"/>
+      <arg type="s" name="choice" direction="in"/>
+    </method>
+    <method name="Shown">
+      <arg type="t" name="generation" direction="in"/>
+      <arg type="t" name="request" direction="in"/>
+    </method>
+  </interface>
+</node>

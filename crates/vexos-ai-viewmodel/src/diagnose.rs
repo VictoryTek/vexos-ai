@@ -494,6 +494,10 @@ mod tests {
             '\u{FE0F}',
             '\u{E0100}',
             '\u{180B}',
+            '\u{3164}',
+            '\u{115F}',
+            '\u{E0FFF}',
+            '\u{FFF8}',
         ];
         let raw: String = hidden.iter().map(|c| format!("a{c}")).collect();
         let e = excerpt(raw.as_bytes());
@@ -503,6 +507,10 @@ mod tests {
         let plain = excerpt("caf\u{e9} \u{1F600} \u{4e2d}\u{6587}".as_bytes());
         assert_eq!(plain.text, "caf\u{e9} \u{1F600} \u{4e2d}\u{6587}");
         assert_eq!(plain.replaced, 0);
+        // Ordinary Hangul and CJK letters too.
+        let letters = excerpt("한국어 \u{1100}\u{1161} ㄱㅏ 日本語".as_bytes());
+        assert_eq!(letters.text, "한국어 \u{1100}\u{1161} ㄱㅏ 日本語");
+        assert_eq!(letters.replaced, 0);
     }
 
     #[test]
