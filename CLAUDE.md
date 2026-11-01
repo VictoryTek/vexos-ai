@@ -97,7 +97,9 @@ Plan mode: for Tier 3, and before any new feature or design decision with real t
 - Do not call work finished until the build and tests have actually run and you have reported the real output. Never write "passes" for something you did not run.
 - After a scripted or multi-file edit, confirm it applied (`git diff`) before running checks. Formatters can change lines between your edit and the check.
 - Final gate: run the preflight command; the exit code must be 0. If none exists, run the build and test commands instead, say so, and offer to create a preflight script (do not create it unasked). A failure means the work is not finished.
-- A Stop hook (`.claude/hooks/verify.sh`) re-runs the fast verify command when files have changed and blocks finishing on failure. Treat its report as a failed verification: fix it and re-run.
+- A Stop hook (`.claude/hooks/verify.sh`) runs the fast verify command once for each distinct state of the working tree and blocks finishing on a failure. It reports a failure briefly, once: the same failing state is not blocked a second time. Treat its report as a failed verification: fix the cause and re-run.
+- When a Stop hook reports a failure, fix the cause. Never repeat or replace the final report or the commit message because of it: they are saved in `target/last-report.md` and `target/commit-message.txt`. If there is nothing to fix, answer in one sentence.
+- If a hook fails only because new files are untracked, its whole message is: `Stage the new files (VS Code Source Control, click +), then say continue.` Reply with that one line and stop. No explanation, no repeated report, no workaround, and no git write command.
 - Mechanical bugs in tooling or scripts that block a check (a shell error, a typo, a broken path) are fixed without asking, reported in one line, and listed in the commit message. Anything that changes behaviour still needs the user.
 - If your first attempt at a bug fix fails, stop and re-plan before the next attempt (plan mode for Tier 3, a revised plan in chat for Tier 2). Do not stack more edits on an approach that did not work.
 - Do not create spec, plan, or review files in the repository unless asked.
@@ -141,6 +143,8 @@ For Tier 2 and Tier 3, research comes before the plan, and the plan shows what y
 Every change that modifies files ends with a commit message, however small (a one-line typo fix included). It is the last thing in your reply. You never run `git commit`; the user does.
 
 The user commits all changed files at once, so give exactly **one** commit message covering every uncommitted change in the working tree, including work from earlier tasks that has not been committed yet. Never split the work into several messages.
+
+After finishing an item, always write the final report and the commit message to `target/last-report.md` and `target/commit-message.txt` before you reply (`target/` is ignored by git). Your reply then carries the same report and message.
 
 Format, ready to paste into `git commit`:
 
