@@ -789,6 +789,10 @@ version = "0.1.0"
 dependencies = [
  "gio",
  "glib",
+ "serde_json",
+ "tokio",
+ "vexos-ai-core",
+ "vexos-ai-viewmodel",
 ]
 
 [[package]]

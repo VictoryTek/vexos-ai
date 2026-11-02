@@ -69,6 +69,10 @@ pub enum Call {
         generation: u64,
         request: u64,
     },
+    /// Not a method: an `Edited` the helper refused (too long, or too many), so
+    /// the handler knows the input holds text it has not seen. Built by the bus
+    /// layer after the caller check, never by [`Call::parse`].
+    EditLost,
 }
 
 /// The arguments of a call, as the bus layer read them: strings and numbers in
@@ -99,6 +103,7 @@ impl Call {
             Call::DraftDiscard => "DraftDiscard",
             Call::Decide { .. } => "Decide",
             Call::Shown { .. } => "Shown",
+            Call::EditLost => "EditLost",
         }
     }
 

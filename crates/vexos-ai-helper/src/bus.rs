@@ -5,7 +5,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gio::prelude::*;
 use gio::{
@@ -18,6 +18,7 @@ use glib::{MainLoop, SourceId, Variant, VariantDict, VariantTy};
 
 use crate::gate::{ArgError, Args, Call, Gate, Identity, LookupFailure};
 use crate::peers::{Credentials, identify};
+use crate::rate::Limiter;
 
 pub const BUS_NAME: &str = "io.github.victorytek.VexosAssistant.Helper";
 pub const OBJECT_PATH: &str = "/io/github/victorytek/VexosAssistant/Helper";
@@ -46,12 +47,16 @@ pub struct Config {
     pub own_uid: u32,
     /// How long the helper waits for an accepted `Open` before it exits.
     pub open_timeout: Duration,
+    /// The time the rate limits are counted in.
+    pub clock: Rc<dyn Fn() -> Instant>,
 }
 
 /// What an accepted call answers with. No call returns a value yet.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Reply {
     Done,
+    /// The reply is sent and flushed, then the helper exits.
+    DoneThenExit,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -62,15 +67,11 @@ pub enum HandlerError {
 /// Receives a call that passed the gate.
 pub trait Handler {
     fn handle(&self, call: Call) -> Result<Reply, HandlerError>;
-}
 
-/// The handler until a session is wired in: every call is answered `NotReady`.
-pub struct NotWired;
-
-impl Handler for NotWired {
-    fn handle(&self, _call: Call) -> Result<Reply, HandlerError> {
-        Err(HandlerError::NotReady)
-    }
+    /// The owner of `org.gnome.Shell` went away or changed. Ends the session
+    /// (denying what is pending) and returns `true`, and then the helper exits;
+    /// with no session it returns `false` and the helper carries on.
+    fn shell_gone(&self) -> bool;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -79,8 +80,10 @@ pub enum Exit {
     NoOpen,
     /// The name was lost, or the bus went away.
     NameLost,
-    /// Asked to stop.
+    /// Asked to stop: the session was closed.
     Quit,
+    /// The GNOME Shell went away while a session was open.
+    ShellGone,
 }
 
 #[derive(Debug)]
@@ -104,6 +107,7 @@ impl Ender {
             Exit::NoOpen => 1,
             Exit::NameLost => 2,
             Exit::Quit => 3,
+            Exit::ShellGone => 4,
         };
         if self
             .code
@@ -119,6 +123,7 @@ impl Ender {
             1 => Some(Exit::NoOpen),
             2 => Some(Exit::NameLost),
             3 => Some(Exit::Quit),
+            4 => Some(Exit::ShellGone),
             _ => None,
         }
     }
@@ -132,6 +137,8 @@ struct State {
     owner_from_signal: Cell<bool>,
     ender: Arc<Ender>,
     timer: RefCell<Option<SourceId>>,
+    limiter: RefCell<Limiter>,
+    clock: Rc<dyn Fn() -> Instant>,
 }
 
 /// Dropping it drops the connection, which releases the name.
@@ -165,6 +172,8 @@ impl Helper {
                 main_loop: MainLoop::new(None, false),
             }),
             timer: RefCell::new(None),
+            limiter: RefCell::new(Limiter::default()),
+            clock: config.clock.clone(),
         });
         {
             let ender = state.ender.clone();
@@ -183,12 +192,17 @@ impl Helper {
                 Some(SHELL_NAME),
                 DBusSignalFlags::NONE,
                 move |signal| {
-                    if let Some((name, _old, new)) =
+                    if let Some((name, old, new)) =
                         signal.parameters.get::<(String, String, String)>()
                         && name == SHELL_NAME
                     {
                         state.owner_from_signal.set(true);
                         *state.shell_owner.borrow_mut() = (!new.is_empty()).then_some(new);
+                        // A Shell that had the name and no longer does: the
+                        // panel is gone. A session ends, and then so does the helper.
+                        if !old.is_empty() && state.handler.shell_gone() {
+                            state.finish(Exit::ShellGone);
+                        }
                     }
                 },
             )
@@ -340,6 +354,11 @@ impl State {
                 return;
             }
             Err(ArgError::TooLong) => {
+                // An over-long `Edited` leaves the input holding text the
+                // handler never saw; it must know. A `Send` leaves it as it was.
+                if method == "Edited" {
+                    let _ = self.handler.handle(Call::EditLost);
+                }
                 invocation.return_dbus_error(&error("TooLong"), "The text is too long.");
                 return;
             }
@@ -351,8 +370,22 @@ impl State {
         if matches!(call, Call::Open) {
             self.cancel_timer();
         }
+        let allowed = self.limiter.borrow_mut().allow(call.name(), (self.clock)());
+        if !allowed {
+            if matches!(call, Call::Edited(_)) {
+                let _ = self.handler.handle(Call::EditLost);
+            }
+            invocation.return_dbus_error(&error("TooFast"), "Too many calls.");
+            return;
+        }
         match self.handler.handle(call) {
             Ok(Reply::Done) => invocation.return_value(Some(&().to_variant())),
+            Ok(Reply::DoneThenExit) => {
+                invocation.return_value(Some(&().to_variant()));
+                // The reply must be on the wire before the process ends.
+                let _ = conn.flush_future().await;
+                self.finish(Exit::Quit);
+            }
             Err(HandlerError::NotReady) => {
                 invocation.return_dbus_error(&error("NotReady"), "The helper is not ready.");
             }
@@ -406,16 +439,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn until_a_session_is_wired_in_every_call_is_not_ready() {
-        assert_eq!(NotWired.handle(Call::Open), Err(HandlerError::NotReady));
-        assert_eq!(NotWired.handle(Call::Cancel), Err(HandlerError::NotReady));
-    }
-
-    #[test]
     fn the_error_names_are_under_the_helper_prefix() {
         assert_eq!(
             error("NotReady"),
             "io.github.victorytek.VexosAssistant.Error.NotReady"
+        );
+        assert_eq!(
+            error("TooFast"),
+            "io.github.victorytek.VexosAssistant.Error.TooFast"
         );
     }
 }

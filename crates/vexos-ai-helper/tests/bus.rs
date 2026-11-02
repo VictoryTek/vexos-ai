@@ -7,7 +7,7 @@
 //! this one test's thread; each is named in the output and a failure in one
 //! does not hide the others.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::future::Future;
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
@@ -25,14 +25,19 @@ use vexos_ai_helper::bus::{
 };
 use vexos_ai_helper::gate::{Call, Choice, METHODS, Placement, Via};
 use vexos_ai_helper::peers::own_uid;
+use vexos_ai_helper::service::{Service, Settings};
 
 #[path = "../testing/calls.rs"]
 mod calls;
+#[allow(dead_code)]
+#[path = "../testing/fake_agent.rs"]
+mod fake_agent;
 
 const ACCESS_DENIED: &str = "org.freedesktop.DBus.Error.AccessDenied";
 const NOT_READY: &str = "io.github.victorytek.VexosAssistant.Error.NotReady";
 const TOO_LONG: &str = "io.github.victorytek.VexosAssistant.Error.TooLong";
 const INVALID: &str = "io.github.victorytek.VexosAssistant.Error.InvalidArgument";
+const TOO_FAST: &str = "io.github.victorytek.VexosAssistant.Error.TooFast";
 
 // A private bus.
 
@@ -144,6 +149,33 @@ async fn own_name(conn: &DBusConnection, name: &str) {
     );
 }
 
+/// Becomes the owner of `name` and lets another connection take it over.
+async fn own_name_replaceably(conn: &DBusConnection, name: &str) {
+    request_name(conn, name, 1).await;
+}
+
+/// Takes `name` from a replaceable owner, in one step.
+async fn replace_name(conn: &DBusConnection, name: &str) {
+    request_name(conn, name, 2).await;
+}
+
+async fn request_name(conn: &DBusConnection, name: &str, flags: u32) {
+    let reply = conn
+        .call_future(
+            Some("org.freedesktop.DBus"),
+            "/org/freedesktop/DBus",
+            "org.freedesktop.DBus",
+            "RequestName",
+            Some(&(name, flags).to_variant()),
+            None,
+            DBusCallFlags::NONE,
+            5000,
+        )
+        .await
+        .expect("RequestName");
+    assert_eq!(reply.get::<(u32,)>(), Some((1,)), "not the owner of {name}");
+}
+
 async fn release_name(conn: &DBusConnection, name: &str) {
     conn.call_future(
         Some("org.freedesktop.DBus"),
@@ -198,12 +230,26 @@ async fn call_at(
 #[derive(Default)]
 struct Recorder {
     calls: RefCell<Vec<Call>>,
+    /// `Close` answers with a reply and then the helper exits.
+    exit_on_close: Cell<bool>,
+    /// Whether there is a session for `shell_gone` to end.
+    has_session: Cell<bool>,
+    gone: Cell<usize>,
 }
 
 impl Handler for Recorder {
     fn handle(&self, call: Call) -> Result<Reply, HandlerError> {
+        let close = call == Call::Close;
         self.calls.borrow_mut().push(call);
+        if close && self.exit_on_close.get() {
+            return Ok(Reply::DoneThenExit);
+        }
         Err(HandlerError::NotReady)
+    }
+
+    fn shell_gone(&self) -> bool {
+        self.gone.set(self.gone.get() + 1);
+        self.has_session.get()
     }
 }
 
@@ -230,17 +276,34 @@ fn config(bus: &TestBus, programs: &[String], open_timeout: Duration) -> Config 
         programs: programs.to_vec(),
         own_uid: uid(),
         open_timeout,
+        clock: Rc::new(Instant::now),
     }
 }
 
 const LONG: Duration = Duration::from_secs(120);
 
 fn start(bus: &TestBus, programs: &[String]) -> (Rc<Helper>, Rc<Recorder>) {
+    start_with(bus, programs, Rc::new(Instant::now))
+}
+
+fn start_with(
+    bus: &TestBus,
+    programs: &[String],
+    clock: Rc<dyn Fn() -> Instant>,
+) -> (Rc<Helper>, Rc<Recorder>) {
     let recorder = Rc::new(Recorder::default());
     let handler: Rc<dyn Handler> = recorder.clone();
-    let helper =
-        run(Helper::start(config(bus, programs, LONG), handler)).expect("the helper starts");
+    let mut config = config(bus, programs, LONG);
+    config.clock = clock;
+    let helper = run(Helper::start(config, handler)).expect("the helper starts");
     (Rc::new(helper), recorder)
+}
+
+/// A clock that stands still until the test moves it.
+fn stopped_clock() -> (Rc<Cell<Instant>>, Rc<dyn Fn() -> Instant>) {
+    let now = Rc::new(Cell::new(Instant::now()));
+    let reader = now.clone();
+    (now, Rc::new(move || reader.get()))
 }
 
 /// Runs a caller program that calls every method, while the helper (on this
@@ -453,6 +516,8 @@ fn nobody_owning_the_shell_name_refuses_everything_and_the_owner_is_followed() {
         assert_eq!(call(&second, "Open", None).await, Err(NOT_READY.to_owned()));
     });
     assert_eq!(*recorder.calls.borrow(), [Call::Open, Call::Open]);
+    // Only the release was the Shell going away: a name taken after it is not.
+    assert_eq!(recorder.gone.get(), 1);
 }
 
 fn a_shell_that_owned_its_name_before_the_helper_started_is_found() {
@@ -520,7 +585,12 @@ fn wrong_arguments_never_reach_the_handler() {
             Err(NOT_READY.to_owned())
         );
     });
-    assert_eq!(*recorder.calls.borrow(), [Call::Edited(at_limit)]);
+    // Nothing wrong reached the handler as a call. The over-long `Edited` told
+    // it the input changed (`EditLost`); the text itself did not arrive.
+    assert_eq!(
+        *recorder.calls.borrow(),
+        [Call::EditLost, Call::Edited(at_limit)]
+    );
 }
 
 fn an_error_never_carries_what_the_caller_sent() {
@@ -825,6 +895,338 @@ fn the_helper_exits_when_the_bus_goes_away() {
     assert_eq!(helper.run(), Exit::NameLost);
 }
 
+// How often, and what the handler is told about what it did not get.
+
+fn each_method_has_its_rate_and_the_stranger_does_not_use_it_up() {
+    let bus = TestBus::start();
+    let (now, clock) = stopped_clock();
+    let (_helper, recorder) = start_with(&bus, &[this_program()], clock);
+    let send = || ("hi", "button").to_variant();
+    run(async {
+        let shell = connect(&bus.address).await;
+        own_name(&shell, SHELL_NAME).await;
+        // A stranger's calls are refused before the limit sees them.
+        let stranger = connect(&bus.address).await;
+        for _ in 0..5 {
+            assert_eq!(
+                call(&stranger, "Send", Some(send())).await,
+                Err(ACCESS_DENIED.to_owned())
+            );
+        }
+        // Send: 2 per second.
+        for n in 0..2 {
+            assert_eq!(
+                call(&shell, "Send", Some(send())).await,
+                Err(NOT_READY.to_owned()),
+                "send {n}"
+            );
+        }
+        assert_eq!(
+            call(&shell, "Send", Some(send())).await,
+            Err(TOO_FAST.to_owned())
+        );
+        // DraftChoice: 2. Decide: 5. Edited: 10. Shown: 10.
+        for (method, limit, params) in [
+            ("DraftChoice", 2, ("keep",).to_variant()),
+            ("Decide", 5, (1u64, 2u64, "deny-once").to_variant()),
+            ("Edited", 10, ("hi",).to_variant()),
+            ("Shown", 10, (1u64, 2u64).to_variant()),
+        ] {
+            for n in 0..limit {
+                assert_eq!(
+                    call(&shell, method, Some(params.clone())).await,
+                    Err(NOT_READY.to_owned()),
+                    "{method} {n}"
+                );
+            }
+            assert_eq!(
+                call(&shell, method, Some(params.clone())).await,
+                Err(TOO_FAST.to_owned()),
+                "{method} over its limit"
+            );
+        }
+        // The other methods have no limit.
+        for method in ["Open", "Cancel", "CheckUsage", "DraftDiscard", "Close"] {
+            for _ in 0..12 {
+                assert_eq!(
+                    call(&shell, method, None).await,
+                    Err(NOT_READY.to_owned()),
+                    "{method}"
+                );
+            }
+        }
+        // A second later the window is open again.
+        now.set(now.get() + Duration::from_secs(1));
+        assert_eq!(
+            call(&shell, "Send", Some(send())).await,
+            Err(NOT_READY.to_owned())
+        );
+    });
+    let calls = recorder.calls.borrow();
+    let sends = calls.iter().filter(|c| c.name() == "Send").count();
+    assert_eq!(sends, 3, "two, then one a second later");
+    // Only the refused Edited told the handler it lost an edit.
+    assert_eq!(calls.iter().filter(|c| **c == Call::EditLost).count(), 1);
+}
+
+fn an_edit_the_helper_refused_is_reported_to_the_handler() {
+    let bus = TestBus::start();
+    let (_helper, recorder) = start(&bus, &[this_program()]);
+    let too_long = "a".repeat(60_001);
+    run(async {
+        let shell = connect(&bus.address).await;
+        own_name(&shell, SHELL_NAME).await;
+        // Over the limit: refused, and the handler learns the input changed.
+        assert_eq!(
+            call(&shell, "Edited", Some((too_long.as_str(),).to_variant())).await,
+            Err(TOO_LONG.to_owned())
+        );
+        // A refused Send is not a lost edit: the text stays in the input.
+        assert_eq!(
+            call(
+                &shell,
+                "Send",
+                Some((too_long.as_str(), "button").to_variant())
+            )
+            .await,
+            Err(TOO_LONG.to_owned())
+        );
+        // Wrong types never reach the handler at all.
+        assert!(
+            call(&shell, "Edited", Some((1u64,).to_variant()))
+                .await
+                .is_err()
+        );
+        // A stranger's refused Edited tells it nothing.
+        let stranger = connect(&bus.address).await;
+        assert_eq!(
+            call(&stranger, "Edited", Some((too_long.as_str(),).to_variant())).await,
+            Err(ACCESS_DENIED.to_owned())
+        );
+    });
+    assert_eq!(*recorder.calls.borrow(), [Call::EditLost]);
+}
+
+fn close_replies_and_then_the_helper_exits() {
+    let bus = TestBus::start();
+    let (helper, recorder) = start(&bus, &[this_program()]);
+    recorder.exit_on_close.set(true);
+    let reply = Rc::new(RefCell::new(None));
+    let slot = reply.clone();
+    let address = bus.address.clone();
+    MainContext::default().spawn_local(async move {
+        let shell = connect(&address).await;
+        own_name(&shell, SHELL_NAME).await;
+        *slot.borrow_mut() = Some(call(&shell, "Close", None).await);
+        glib::timeout_future(Duration::from_secs(5)).await;
+    });
+    let quitter = helper.clone();
+    let backstop = glib::timeout_add_local_once(Duration::from_secs(10), move || quitter.quit());
+    let began = Instant::now();
+    assert_eq!(helper.run(), Exit::Quit);
+    assert!(
+        began.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        began.elapsed()
+    );
+    // The process ends here: the helper and its connection are gone before the
+    // caller reads anything, so the reply had to be on the wire already.
+    backstop.remove();
+    drop(helper);
+    run(async {
+        for _ in 0..100 {
+            if reply.borrow().is_some() {
+                break;
+            }
+            glib::timeout_future(Duration::from_millis(20)).await;
+        }
+    });
+    assert_eq!(*reply.borrow(), Some(Ok(())));
+    assert_eq!(*recorder.calls.borrow(), [Call::Close]);
+}
+
+fn the_shell_going_away_ends_a_helper_that_has_a_session() {
+    for takeover in [false, true] {
+        let bus = TestBus::start();
+        let (helper, recorder) = start(&bus, &[this_program()]);
+        recorder.has_session.set(true);
+        let address = bus.address.clone();
+        MainContext::default().spawn_local(async move {
+            let shell = connect(&address).await;
+            if takeover {
+                // Another process takes the name over at once: the old Shell
+                // is gone too.
+                let other = connect(&address).await;
+                own_name_replaceably(&shell, SHELL_NAME).await;
+                replace_name(&other, SHELL_NAME).await;
+                glib::timeout_future(Duration::from_secs(5)).await;
+                drop(other);
+            } else {
+                own_name(&shell, SHELL_NAME).await;
+                release_name(&shell, SHELL_NAME).await;
+                glib::timeout_future(Duration::from_secs(5)).await;
+            }
+        });
+        let quitter = helper.clone();
+        glib::timeout_add_local_once(Duration::from_secs(10), move || quitter.quit());
+        let began = Instant::now();
+        assert_eq!(helper.run(), Exit::ShellGone, "takeover {takeover}");
+        assert!(began.elapsed() < Duration::from_secs(5));
+        assert_eq!(recorder.gone.get(), 1, "takeover {takeover}");
+    }
+}
+
+fn the_shell_going_away_with_no_session_leaves_the_helper_running() {
+    let bus = TestBus::start();
+    let (helper, recorder) = start(&bus, &[this_program()]);
+    let address = bus.address.clone();
+    MainContext::default().spawn_local(async move {
+        let shell = connect(&address).await;
+        own_name(&shell, SHELL_NAME).await;
+        release_name(&shell, SHELL_NAME).await;
+        glib::timeout_future(Duration::from_millis(800)).await;
+    });
+    let quitter = helper.clone();
+    glib::timeout_add_local_once(Duration::from_millis(600), move || quitter.quit());
+    assert_eq!(helper.run(), Exit::Quit);
+    assert_eq!(recorder.gone.get(), 1, "asked once, said no");
+}
+
+fn calls_reach_the_handler_in_the_order_they_were_sent() {
+    let bus = TestBus::start();
+    // Each reading of this clock is a second later, so no limit applies.
+    let ticks = Rc::new(Cell::new(Instant::now()));
+    let clock: Rc<dyn Fn() -> Instant> = {
+        let ticks = ticks.clone();
+        Rc::new(move || {
+            ticks.set(ticks.get() + Duration::from_secs(1));
+            ticks.get()
+        })
+    };
+    let (_helper, recorder) = start_with(&bus, &[this_program()], clock);
+    let context = MainContext::default();
+    let shell = run(async {
+        let shell = connect(&bus.address).await;
+        own_name(&shell, SHELL_NAME).await;
+        shell
+    });
+    let pending = Rc::new(Cell::new(0usize));
+    let mut expected = Vec::new();
+    // All 100 calls are on the wire before any answer is read.
+    for n in 0..50 {
+        let text = format!("text {n}");
+        for (method, params) in [
+            ("Edited", (text.as_str(),).to_variant()),
+            ("Send", (text.as_str(), "button").to_variant()),
+        ] {
+            pending.set(pending.get() + 1);
+            let done = pending.clone();
+            shell.call(
+                Some(BUS_NAME),
+                OBJECT_PATH,
+                INTERFACE,
+                method,
+                Some(&params),
+                None,
+                DBusCallFlags::NONE,
+                5000,
+                None::<&gio::Cancellable>,
+                move |_| done.set(done.get() - 1),
+            );
+        }
+        expected.push(Call::Edited(text.clone()));
+        expected.push(Call::Send {
+            text,
+            via: Via::Button,
+        });
+    }
+    let began = Instant::now();
+    while pending.get() > 0 {
+        context.iteration(true);
+        assert!(began.elapsed() < Duration::from_secs(30), "no answers");
+    }
+    assert_eq!(*recorder.calls.borrow(), expected);
+}
+
+fn the_real_service_sits_behind_the_front_door() {
+    let bus = TestBus::start();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let fake = fake_agent::FakeStarter::new(runtime.handle().clone());
+    let service = Rc::new(Service::new(
+        runtime.handle().clone(),
+        Box::new(fake.clone()),
+        Settings {
+            agent: vexos_ai_core::Agent::Claude,
+            usage_on_launch: false,
+        },
+    ));
+    let handler: Rc<dyn Handler> = service.clone();
+    let helper = Rc::new(
+        run(Helper::start(
+            config(&bus, &[this_program()], LONG),
+            handler,
+        ))
+        .expect("starts"),
+    );
+    let results = Rc::new(RefCell::new(Vec::new()));
+    let log = results.clone();
+    let address = bus.address.clone();
+    let watched = service.clone();
+    let seen = fake.seen.clone();
+    MainContext::default().spawn_local(async move {
+        let shell = connect(&address).await;
+        own_name(&shell, SHELL_NAME).await;
+        let stranger = connect(&address).await;
+        let push =
+            |name: &'static str, result: Result<(), String>| log.borrow_mut().push((name, result));
+        push("open", call(&shell, "Open", None).await);
+        for _ in 0..500 {
+            if watched
+                .conversation()
+                .as_ref()
+                .is_some_and(|c| c.can_send())
+            {
+                break;
+            }
+            glib::timeout_future(Duration::from_millis(10)).await;
+        }
+        // The stranger cannot send; the Shell can, and the agent gets its text.
+        let send = ("hello there", "button").to_variant();
+        push(
+            "stranger",
+            call(&stranger, "Send", Some(send.clone())).await,
+        );
+        push("send", call(&shell, "Send", Some(send)).await);
+        for _ in 0..500 {
+            if !seen.prompts().is_empty() {
+                break;
+            }
+            glib::timeout_future(Duration::from_millis(10)).await;
+        }
+        // Nothing can approve yet.
+        let decide = (1u64, 1u64, "approve-once").to_variant();
+        push("decide", call(&shell, "Decide", Some(decide)).await);
+        push("close", call(&shell, "Close", None).await);
+        glib::timeout_future(Duration::from_secs(5)).await;
+    });
+    let quitter = helper.clone();
+    glib::timeout_add_local_once(Duration::from_secs(20), move || quitter.quit());
+    assert_eq!(helper.run(), Exit::Quit);
+    assert_eq!(
+        *results.borrow(),
+        [
+            ("open", Ok(())),
+            ("stranger", Err(ACCESS_DENIED.to_owned())),
+            ("send", Ok(())),
+            ("decide", Err(NOT_READY.to_owned())),
+            ("close", Ok(())),
+        ]
+    );
+    assert_eq!(fake.seen.prompts(), ["hello there"]);
+    service.end();
+    drop(runtime);
+}
+
 macro_rules! scenarios {
     ($($name:ident),* $(,)?) => {
         #[test]
@@ -861,4 +1263,11 @@ scenarios!(
     a_name_that_is_already_owned_is_not_taken_over,
     dropping_the_helper_releases_its_name,
     the_helper_exits_when_the_bus_goes_away,
+    each_method_has_its_rate_and_the_stranger_does_not_use_it_up,
+    an_edit_the_helper_refused_is_reported_to_the_handler,
+    close_replies_and_then_the_helper_exits,
+    the_shell_going_away_ends_a_helper_that_has_a_session,
+    the_shell_going_away_with_no_session_leaves_the_helper_running,
+    calls_reach_the_handler_in_the_order_they_were_sent,
+    the_real_service_sits_behind_the_front_door,
 );

@@ -27,7 +27,7 @@ Fast verify (also run by the Stop hook): `scripts/preflight.sh`
 - Key directories:
   - `bin/` — `vexos-ai.sh`, the launcher and helpers; embedded into the package by `nix/package.nix`
   - `nix/` — `package.nix` (shellchecked CLI + desktop entry), `module.nix` (`programs.vexos-ai`), `policy.nix` (managed agent safety policy), `panel.nix`, `extension.nix`
-  - `crates/` — Rust workspace: `vexos-ai-core` (ACP client), `vexos-ai-viewmodel` (panel rules, no GTK), `vexos-ai-helper` (headless D-Bus helper: who may call it, and what a call may carry), `vexos-ai-panel` (GTK4 window)
+  - `crates/` — Rust workspace: `vexos-ai-core` (ACP client), `vexos-ai-viewmodel` (panel rules, no GTK), `vexos-ai-helper` (headless D-Bus helper: who may call it, what a call may carry, and the session behind it), `vexos-ai-panel` (GTK4 window)
   - `extension/` — the GNOME Shell extension
   - `skills/` — agent skills (`vexos`, `vexos-diagnose`) linked into `~/.claude/skills` and `~/.agents/skills`
   - `docs/` — `contract.md` (argv, exit codes and `status --json` for callers such as VexPortal) and `spec.md` (roadmap and decisions)

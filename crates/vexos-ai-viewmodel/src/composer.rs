@@ -75,6 +75,10 @@ pub struct Composer {
     /// The input from before a draft was added below it (its text, and
     /// whether it was itself a draft), for Discard.
     before: Option<(String, Option<Draft>)>,
+    /// An edit was lost: the input holds text this composer has not seen. A
+    /// draft is asked about, never placed, and nothing is sent, until the next
+    /// edit says what the input holds.
+    unknown: bool,
 }
 
 impl Composer {
@@ -114,7 +118,7 @@ impl Composer {
             self.asking = Some(draft);
             return Offer::Nothing;
         }
-        if self.text.trim().is_empty() {
+        if self.text.trim().is_empty() && !self.unknown {
             self.text = draft;
             self.draft = Some(Draft::Pending);
             Offer::Placed
@@ -130,7 +134,10 @@ impl Composer {
             return false;
         };
         match placement {
-            Placement::Replace => self.text = draft,
+            Placement::Replace => {
+                self.text = draft;
+                self.unknown = false;
+            }
             Placement::Append => {
                 let typed = mem::take(&mut self.text);
                 self.text = format!("{}\n\n{draft}", typed.trim_end());
@@ -142,9 +149,21 @@ impl Composer {
         true
     }
 
+    /// An edit was lost and no later edit has said what the input holds.
+    pub fn unknown(&self) -> bool {
+        self.unknown
+    }
+
+    /// An edit the helper could not take (too long, or too many): the input
+    /// holds text this composer has not seen.
+    pub fn edit_lost(&mut self) {
+        self.unknown = true;
+    }
+
     /// The input's whole text after the user changed it. Clearing it all
     /// leaves nothing to review, so the draft is gone too.
     pub fn edited(&mut self, text: &str) {
+        self.unknown = false;
         if text == self.text {
             return;
         }
@@ -171,7 +190,12 @@ impl Composer {
     /// be sent; `None` (and nothing changes) when not.
     pub fn submit(&mut self, via: Via, can_send: bool) -> Option<Outgoing> {
         let blocked = via == Via::EnterKey && self.draft == Some(Draft::Pending);
-        if !can_send || blocked || self.asking.is_some() || self.text.trim().is_empty() {
+        if !can_send
+            || blocked
+            || self.unknown
+            || self.asking.is_some()
+            || self.text.trim().is_empty()
+        {
             return None;
         }
         self.draft = None;
@@ -202,6 +226,70 @@ mod tests {
         c.hold(DRAFT.into());
         assert_eq!(c.offer(true), Offer::Placed);
         c
+    }
+
+    #[test]
+    fn a_lost_edit_makes_a_waiting_draft_ask_instead_of_placing() {
+        let mut c = Composer::default();
+        c.hold(DRAFT.into());
+        c.edit_lost();
+        assert_eq!(c.offer(true), Offer::Ask);
+        assert_eq!((c.text(), c.draft()), ("", None));
+        assert!(c.waiting());
+    }
+
+    #[test]
+    fn a_lost_edit_blocks_a_send_until_the_text_is_known_again() {
+        let mut c = Composer::default();
+        c.edited("hi");
+        assert!(!c.unknown());
+        c.edit_lost();
+        assert!(c.unknown());
+        assert_eq!(c.submit(Via::SendButton, true), None);
+        assert_eq!(c.text(), "hi");
+        // The same text again is still news: the input is known now.
+        c.edited("hi");
+        assert!(!c.unknown());
+        assert_eq!(c.submit(Via::SendButton, true).expect("sent").text(), "hi");
+    }
+
+    #[test]
+    fn a_known_blank_input_takes_a_draft_again() {
+        let mut c = Composer::default();
+        c.edit_lost();
+        c.edited("");
+        c.hold(DRAFT.into());
+        assert_eq!(c.offer(true), Offer::Placed);
+    }
+
+    #[test]
+    fn replacing_makes_the_input_known_but_adding_below_and_keeping_do_not() {
+        let asked = || {
+            let mut c = Composer::default();
+            c.hold(DRAFT.into());
+            c.edit_lost();
+            assert_eq!(c.offer(true), Offer::Ask);
+            c
+        };
+        let mut c = asked();
+        assert!(c.resolve(Placement::Replace));
+        assert_eq!(c.submit(Via::SendButton, true).expect("sent").text(), DRAFT);
+        let mut c = asked();
+        assert!(c.resolve(Placement::Append));
+        assert_eq!(c.submit(Via::SendButton, true), None);
+        let mut c = asked();
+        assert!(!c.resolve(Placement::Cancel));
+        c.edited("typed");
+        assert!(c.submit(Via::SendButton, true).is_some());
+    }
+
+    #[test]
+    fn a_message_put_back_does_not_make_the_input_known() {
+        let mut c = Composer::default();
+        c.edit_lost();
+        c.restore("back".into());
+        assert_eq!(c.text(), "back");
+        assert_eq!(c.submit(Via::SendButton, true), None);
     }
 
     #[test]

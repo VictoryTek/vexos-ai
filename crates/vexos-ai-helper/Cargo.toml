@@ -9,6 +9,13 @@ description = "VexOS assistant helper: a session D-Bus service that only the GNO
 [dependencies]
 gio = "0.22"
 glib = "0.22"
+tokio = { version = "1", features = ["rt-multi-thread"] }
+vexos-ai-core = { path = "../vexos-ai-core" }
+vexos-ai-viewmodel = { path = "../vexos-ai-viewmodel" }
+
+[dev-dependencies]
+serde_json = "1"
+tokio = { version = "1", features = ["io-util", "macros", "rt-multi-thread", "sync", "time"] }
 
 [features]
 # Builds the test-only caller program (testing/fakecaller.rs). Off in a release.
