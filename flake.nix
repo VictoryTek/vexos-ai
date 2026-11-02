@@ -30,7 +30,7 @@
 
       devShells = forAllSystems (pkgs: {
         default = pkgs.mkShell {
-          packages = with pkgs; [ shellcheck shfmt jq bats util-linux cargo rustc clippy rustfmt pkg-config ];
+          packages = with pkgs; [ shellcheck shfmt jq bats util-linux cargo rustc clippy rustfmt pkg-config dbus ];
           # For crates/vexos-ai-panel.
           buildInputs = with pkgs; [ gtk4 libadwaita ];
         };

@@ -11,7 +11,7 @@ use vexos_ai_core::{Agent, Decision, Error, Event, PermissionRequest, Session, T
 use std::time::{Duration, Instant};
 
 use crate::composer::Outgoing;
-use crate::escape::visible;
+use crate::escape::{visible, visible_card};
 use crate::proposal::Proposal;
 use crate::usage::{Disabled, Shown, UsageButton, five_hour, tooltip};
 
@@ -171,7 +171,7 @@ pub struct ApprovalCard {
 
 impl ApprovalCard {
     fn new(request: PermissionRequest) -> Self {
-        let title = visible(&request.title);
+        let title = visible_card(&request.title);
         let proposal =
             Proposal::from_request(request.kind.as_deref(), &request.raw_input).escaped();
         let bytes = title.len() + proposal.shown_bytes();
@@ -1839,6 +1839,24 @@ mod tests {
         }));
         assert_eq!(card(&c, 0).title, "# **title**");
         assert_eq!(card(&c, 0).proposal, Proposal::Command(command.into()));
+    }
+
+    #[test]
+    fn an_approval_card_shows_a_look_alike_space_in_its_title_and_command() {
+        let mut c = ready();
+        c.apply(Event::Permission(PermissionRequest {
+            id: 1,
+            tool_call_id: None,
+            title: "run\u{a0}it".into(),
+            kind: Some("execute".into()),
+            raw_input: json!({ "command": "cp a\u{a0}b /dst" }),
+            choices: BOTH.to_vec(),
+        }));
+        assert_eq!(card(&c, 0).title, r"run\u{a0}it");
+        assert_eq!(
+            card(&c, 0).proposal,
+            Proposal::Command(r"cp a\u{a0}b /dst".into())
+        );
     }
 
     // Prompts -------------------------------------------------------------------

@@ -3,6 +3,9 @@
 //! they read has to be what is there: a control or invisible character is shown
 //! as `\u{hex}`, and nothing is stripped, normalised or hidden.
 //!
+//! On an approval card (`visible_card`) look-alike spaces such as U+00A0 are
+//! shown as `\u{hex}` too; the log sanitizer and tool cards keep them.
+//!
 //! A real escape and the same characters typed as text must never look alike.
 //! A run of backslashes is written twice over when what follows it could be
 //! mistaken for an escape: the text `u{` (the start of one) or a character that
@@ -29,15 +32,43 @@ pub(crate) fn is_hidden(c: char) -> bool {
         | '\u{E0000}'..='\u{E0FFF}')
 }
 
+/// Characters that draw as an ordinary space but are not one, so a shell does
+/// not split words on them: no-break space, Ogham space mark, the en and em
+/// spaces and the rest of U+2000-200A, narrow no-break space, medium
+/// mathematical space and ideographic space. They are escaped on approval
+/// cards only (see [`visible_card`]): the log sanitizer and tool cards keep
+/// them, and Claude's own reset text uses U+202F.
+pub(crate) fn is_lookalike_space(c: char) -> bool {
+    matches!(
+        c,
+        '\u{A0}' | '\u{1680}' | '\u{2000}'..='\u{200A}' | '\u{202F}' | '\u{205F}' | '\u{3000}'
+    )
+}
+
 /// A character shown as its code: a control other than newline and tab, or a
 /// hidden one.
 fn needs_escape(c: char) -> bool {
     (c.is_control() && c != '\n' && c != '\t') || is_hidden(c)
 }
 
+/// [`needs_escape`], and on an approval card also a look-alike space.
+fn needs_escape_on_card(c: char) -> bool {
+    needs_escape(c) || is_lookalike_space(c)
+}
+
 /// `text` with every control (except newline and tab) and hidden character
 /// shown as `\u{hex}`.
 pub fn visible(text: &str) -> String {
+    render(text, needs_escape)
+}
+
+/// [`visible`] for text on an approval card: look-alike spaces are shown as
+/// `\u{hex}` too, so `cp a<U+00A0>b /dst` does not read as two words.
+pub fn visible_card(text: &str) -> String {
+    render(text, needs_escape_on_card)
+}
+
+fn render(text: &str, needs_escape: fn(char) -> bool) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(c) = rest.chars().next() {
@@ -348,6 +379,81 @@ mod tests {
         }
     }
 
+    /// Look-alike spaces (E9): every one, and the ends of each range.
+    const SPACES: &[char] = &[
+        '\u{a0}', '\u{1680}', '\u{2000}', '\u{2001}', '\u{2005}', '\u{2009}', '\u{200a}',
+        '\u{202f}', '\u{205f}', '\u{3000}',
+    ];
+
+    /// Next to them: other visible characters, left alone on a card too.
+    const NEAR_SPACES: &[char] = &[
+        '\u{20}', '\u{a1}', '\u{167f}', '\u{1681}', '\u{1fff}', '\u{2030}', '\u{205e}', '\u{2fff}',
+        '\u{3001}', '\u{2800}', 'a', '日',
+    ];
+
+    #[test]
+    fn a_card_shows_every_look_alike_space_as_its_code() {
+        for &c in SPACES {
+            assert_eq!(visible_card(&c.to_string()), shown(c), "{:x}", c as u32);
+            assert_eq!(
+                visible_card(&format!("cp a{c}b /dst")),
+                format!("cp a{}b /dst", shown(c))
+            );
+        }
+    }
+
+    #[test]
+    fn a_card_leaves_the_characters_next_to_the_spaces_alone() {
+        for &c in NEAR_SPACES {
+            assert_eq!(
+                visible_card(&c.to_string()),
+                c.to_string(),
+                "{:x}",
+                c as u32
+            );
+        }
+        assert_eq!(visible_card("a b\tc\nd"), "a b\tc\nd");
+    }
+
+    #[test]
+    fn the_log_and_tool_text_still_keep_look_alike_spaces() {
+        // Only cards escape them: the log sanitizer and tool cards do not, and
+        // U+202F is in Claude's own reset text.
+        for &c in SPACES {
+            assert!(!is_hidden(c), "{:x}", c as u32);
+            assert_eq!(visible(&c.to_string()), c.to_string(), "{:x}", c as u32);
+        }
+    }
+
+    #[test]
+    fn a_card_escapes_everything_visible_does_and_more() {
+        for &c in ESCAPED {
+            assert_eq!(visible_card(&c.to_string()), visible(&c.to_string()));
+        }
+        for &c in KEPT {
+            if SPACES.contains(&c) {
+                continue;
+            }
+            assert_eq!(
+                visible_card(&c.to_string()),
+                c.to_string(),
+                "{:x}",
+                c as u32
+            );
+        }
+    }
+
+    #[test]
+    fn a_real_look_alike_escape_and_the_same_text_typed_stay_apart() {
+        assert_eq!(visible_card("\u{a0}"), r"\u{a0}");
+        assert_eq!(visible_card(r"\u{a0}"), r"\\u{a0}");
+        assert_eq!(visible_card("\\\u{a0}"), "\\\\\\u{a0}");
+        assert_ne!(visible_card("\\\u{a0}"), visible_card(r"\\u{a0}"));
+        for s in ["a\u{a0}b", "\\\u{3000}", r"\u{a0}", "\\\u{202f}\\\u{202e}x"] {
+            assert_eq!(unescape(&visible_card(s)), s, "{s:?}");
+        }
+    }
+
     /// The source of `conversation.rs` without its tests.
     fn conversation_code() -> &'static str {
         let source = include_str!("conversation.rs");
@@ -368,7 +474,7 @@ mod tests {
         let new = body(code, "fn new(request: PermissionRequest)");
         assert!(new.contains(".escaped()"), "{new}");
         assert!(
-            new.contains("let title = visible(&request.title);"),
+            new.contains("let title = visible_card(&request.title);"),
             "{new}"
         );
         // One place builds a tool card, after making its text visible.

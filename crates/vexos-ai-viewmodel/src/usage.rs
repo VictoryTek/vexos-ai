@@ -176,7 +176,17 @@ impl Shown {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
+
+    #[test]
+    fn a_reset_time_with_a_narrow_no_break_space_still_parses() {
+        // U+202F is in Claude's own reset text; escaping look-alike spaces on
+        // approval cards (E9) must never reach this parser.
+        let got = five_hour("5-hour limit — 25% · Resets Oct 27, 1:40\u{202f}PM CDT").unwrap();
+        assert_eq!(got.percent, 25);
+        assert_eq!(got.resets, "Oct 27, 1:40 PM CDT");
+    }
 
     const KNOWN: &str = "5-hour limit — 25% · Resets Oct 27, 1:40 PM CDT";
 

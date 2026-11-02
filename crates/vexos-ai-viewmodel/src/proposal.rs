@@ -7,7 +7,7 @@
 
 use serde_json::Value;
 
-use crate::escape::visible;
+use crate::escape::visible_card;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Proposal {
@@ -106,22 +106,23 @@ impl Proposal {
         }
     }
 
-    /// The same proposal with every string made visible (see `escape`).
+    /// The same proposal with every string made visible (see `escape`),
+    /// look-alike spaces included: this is what the user approves.
     pub fn escaped(self) -> Proposal {
         match self {
-            Proposal::Command(text) => Proposal::Command(visible(&text)),
-            Proposal::Plan(text) => Proposal::Plan(visible(&text)),
-            Proposal::Other(text) => Proposal::Other(visible(&text)),
+            Proposal::Command(text) => Proposal::Command(visible_card(&text)),
+            Proposal::Plan(text) => Proposal::Plan(visible_card(&text)),
+            Proposal::Other(text) => Proposal::Other(visible_card(&text)),
             Proposal::TooLarge(bytes) => Proposal::TooLarge(bytes),
             Proposal::Diff { path, lines } => Proposal::Diff {
-                path: visible(&path),
+                path: visible_card(&path),
                 lines: lines
                     .into_iter()
                     .map(|line| match line {
-                        DiffLine::Hunk(text) => DiffLine::Hunk(visible(&text)),
-                        DiffLine::Context(text) => DiffLine::Context(visible(&text)),
-                        DiffLine::Removed(text) => DiffLine::Removed(visible(&text)),
-                        DiffLine::Added(text) => DiffLine::Added(visible(&text)),
+                        DiffLine::Hunk(text) => DiffLine::Hunk(visible_card(&text)),
+                        DiffLine::Context(text) => DiffLine::Context(visible_card(&text)),
+                        DiffLine::Removed(text) => DiffLine::Removed(visible_card(&text)),
+                        DiffLine::Added(text) => DiffLine::Added(visible_card(&text)),
                     })
                     .collect(),
             },
@@ -315,6 +316,42 @@ mod tests {
                     Removed(s(shown)),
                     Added(s(shown)),
                     Added(s("plain")),
+                ]
+            }
+        );
+    }
+
+    #[test]
+    fn every_string_of_a_proposal_shows_look_alike_spaces() {
+        let nbsp = "cp a\u{a0}b /dst";
+        let shown = r"cp a\u{a0}b /dst";
+        assert_eq!(
+            Proposal::Command(s(nbsp)).escaped(),
+            Proposal::Command(s(shown))
+        );
+        assert_eq!(Proposal::Plan(s(nbsp)).escaped(), Proposal::Plan(s(shown)));
+        assert_eq!(
+            Proposal::Other(s(nbsp)).escaped(),
+            Proposal::Other(s(shown))
+        );
+        assert_eq!(
+            Proposal::Diff {
+                path: s(nbsp),
+                lines: vec![
+                    Hunk(s(nbsp)),
+                    Context(s(nbsp)),
+                    Removed(s(nbsp)),
+                    Added(s(nbsp))
+                ]
+            }
+            .escaped(),
+            Proposal::Diff {
+                path: s(shown),
+                lines: vec![
+                    Hunk(s(shown)),
+                    Context(s(shown)),
+                    Removed(s(shown)),
+                    Added(s(shown))
                 ]
             }
         );
