@@ -51,10 +51,13 @@ pub struct Config {
     pub clock: Rc<dyn Fn() -> Instant>,
 }
 
-/// What an accepted call answers with. No call returns a value yet.
+/// What an accepted call answers with.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Reply {
     Done,
+    /// `Open`'s answer: the number of this session, which every `Shown` and
+    /// `Decide` must carry.
+    Generation(u64),
     /// The reply is sent and flushed, then the helper exits.
     DoneThenExit,
 }
@@ -62,11 +65,19 @@ pub enum Reply {
 #[derive(Debug, PartialEq, Eq)]
 pub enum HandlerError {
     NotReady,
+    /// A `Shown` or `Decide` the rules refused. The caller is told the same
+    /// fixed error whatever the reason.
+    Refused,
 }
 
 /// Receives a call that passed the gate.
 pub trait Handler {
     fn handle(&self, call: Call) -> Result<Reply, HandlerError>;
+
+    /// Whether `call` is not counted against its rate limit: the first `Shown`
+    /// for a pending card, so that a retry still works. Asked after the caller
+    /// and argument checks, and before the call is counted.
+    fn rate_exempt(&self, call: &Call) -> bool;
 
     /// The owner of `org.gnome.Shell` went away or changed. Ends the session
     /// (denying what is pending) and returns `true`, and then the helper exits;
@@ -370,7 +381,8 @@ impl State {
         if matches!(call, Call::Open) {
             self.cancel_timer();
         }
-        let allowed = self.limiter.borrow_mut().allow(call.name(), (self.clock)());
+        let allowed = self.handler.rate_exempt(&call)
+            || self.limiter.borrow_mut().allow(call.name(), (self.clock)());
         if !allowed {
             if matches!(call, Call::Edited(_)) {
                 let _ = self.handler.handle(Call::EditLost);
@@ -380,6 +392,9 @@ impl State {
         }
         match self.handler.handle(call) {
             Ok(Reply::Done) => invocation.return_value(Some(&().to_variant())),
+            Ok(Reply::Generation(generation)) => {
+                invocation.return_value(Some(&(generation,).to_variant()));
+            }
             Ok(Reply::DoneThenExit) => {
                 invocation.return_value(Some(&().to_variant()));
                 // The reply must be on the wire before the process ends.
@@ -388,6 +403,9 @@ impl State {
             }
             Err(HandlerError::NotReady) => {
                 invocation.return_dbus_error(&error("NotReady"), "The helper is not ready.");
+            }
+            Err(HandlerError::Refused) => {
+                invocation.return_dbus_error(&error("Refused"), "The request cannot be answered.");
             }
         }
     }

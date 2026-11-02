@@ -3,6 +3,7 @@
 //! may carry) and the session behind it: the agent's session, the conversation
 //! and the composer, driven only by calls that passed the front door.
 
+pub mod approval;
 pub mod bus;
 pub mod gate;
 pub mod peers;

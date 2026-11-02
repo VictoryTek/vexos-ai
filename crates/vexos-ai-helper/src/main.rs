@@ -5,7 +5,7 @@
 
 use std::process::ExitCode;
 use std::rc::Rc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use vexos_ai_helper::bus::{BUS_NAME, Bus, Config, Exit, Handler, Helper};
 use vexos_ai_helper::peers::own_uid;
@@ -45,10 +45,19 @@ fn main() -> ExitCode {
             .unwrap_or_default()
             .usage_on_launch,
     };
+    // This process runs one session. Its number is the start time in
+    // nanoseconds, so a later helper never reuses it and a late call aimed at
+    // an earlier session cannot answer a request of this one.
+    let generation = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(1, |t| u64::try_from(t.as_nanos()).unwrap_or(u64::MAX))
+        .max(1);
     let service = Rc::new(Service::new(
         runtime.handle().clone(),
         Box::new(Agents::new(runtime.handle().clone())),
         settings,
+        generation,
+        Rc::new(Instant::now),
     ));
     let handler: Rc<dyn Handler> = service.clone();
 

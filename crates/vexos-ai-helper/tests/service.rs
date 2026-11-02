@@ -6,9 +6,10 @@
 //! the default main context, so every scenario runs in turn on this one test's
 //! thread, as in `tests/bus.rs`.
 
+use std::cell::Cell;
 use std::future::Future;
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use glib::MainContext;
 use serde_json::json;
@@ -44,10 +45,15 @@ async fn settle() {
     glib::timeout_future(Duration::from_millis(300)).await;
 }
 
+/// The number of the session the rig's service runs.
+const GEN: u64 = 5150;
+
 struct Rig {
     runtime: Option<Runtime>,
     service: Rc<Service>,
     fake: FakeStarter,
+    /// The service's clock: it stands still until a test moves it.
+    now: Rc<Cell<Instant>>,
 }
 
 impl Rig {
@@ -59,6 +65,8 @@ impl Rig {
         let runtime = Runtime::new().unwrap();
         let mut fake = FakeStarter::new(runtime.handle().clone());
         set(&mut fake);
+        let now = Rc::new(Cell::new(Instant::now()));
+        let reader = now.clone();
         let service = Rc::new(Service::new(
             runtime.handle().clone(),
             Box::new(fake.clone()),
@@ -66,16 +74,48 @@ impl Rig {
                 agent: Agent::Claude,
                 usage_on_launch,
             },
+            GEN,
+            Rc::new(move || reader.get()),
         ));
         Rig {
             runtime: Some(runtime),
             service,
             fake,
+            now,
         }
     }
 
     fn call(&self, call: Call) -> Result<Reply, HandlerError> {
         self.service.handle(call)
+    }
+
+    fn advance(&self, ms: u64) {
+        self.now.set(self.now.get() + Duration::from_millis(ms));
+    }
+
+    fn shown(&self, generation: u64, request: u64) -> Result<Reply, HandlerError> {
+        self.call(Call::Shown {
+            generation,
+            request,
+        })
+    }
+
+    fn decide(&self, generation: u64, request: u64, choice: Choice) -> Result<Reply, HandlerError> {
+        self.call(Call::Decide {
+            generation,
+            request,
+            choice,
+        })
+    }
+
+    /// Opens, and has the agent ask to run `command` as request 1.
+    async fn with_request(&self, rpc_id: u64, command: &str) {
+        self.opened().await;
+        self.fake.tell(Cmd::Ask {
+            rpc_id,
+            command: command.into(),
+        });
+        until("the card", || self.cards() == [(1, Answer::Pending)]).await;
     }
 
     fn ready(&self) -> bool {
@@ -86,7 +126,7 @@ impl Rig {
     }
 
     async fn opened(&self) {
-        assert_eq!(self.call(Call::Open), Ok(Reply::Done));
+        assert_eq!(self.call(Call::Open), Ok(Reply::Generation(GEN)));
         until("the session to be ready", || self.ready()).await;
     }
 
@@ -144,7 +184,7 @@ fn open_starts_one_session_and_gets_it_ready_and_a_second_open_starts_none() {
             .as_ref()
             .and_then(|c| c.mode().map(str::to_owned));
         assert_eq!(mode.as_deref(), Some("default"));
-        assert_eq!(rig.call(Call::Open), Ok(Reply::Done));
+        assert_eq!(rig.call(Call::Open), Ok(Reply::Generation(GEN)));
         settle().await;
         assert_eq!(rig.fake.starts(), 1);
         // Starting is not sending.
@@ -155,7 +195,7 @@ fn open_starts_one_session_and_gets_it_ready_and_a_second_open_starts_none() {
 fn the_launch_usage_goes_out_once_when_the_setting_is_on() {
     let rig = Rig::new(true);
     run(async {
-        assert_eq!(rig.call(Call::Open), Ok(Reply::Done));
+        assert_eq!(rig.call(Call::Open), Ok(Reply::Generation(GEN)));
         until("the launch /usage", || !rig.fake.seen.prompts().is_empty()).await;
         assert_eq!(rig.fake.seen.prompts(), ["/usage"]);
         rig.fake.tell(Cmd::EndTurn);
@@ -177,7 +217,7 @@ fn no_launch_usage_when_the_setting_is_off() {
 fn a_start_that_fails_leaves_a_conversation_that_cannot_send() {
     let rig = Rig::with(false, |fake| fake.fail = true);
     run(async {
-        assert_eq!(rig.call(Call::Open), Ok(Reply::Done));
+        assert_eq!(rig.call(Call::Open), Ok(Reply::Generation(GEN)));
         until("the failure", || {
             matches!(
                 rig.service
@@ -189,7 +229,7 @@ fn a_start_that_fails_leaves_a_conversation_that_cannot_send() {
         })
         .await;
         assert_eq!(rig.send("hello"), Ok(Reply::Done));
-        assert_eq!(rig.call(Call::Open), Ok(Reply::Done));
+        assert_eq!(rig.call(Call::Open), Ok(Reply::Generation(GEN)));
         settle().await;
         assert!(rig.fake.seen.prompts().is_empty());
         assert_eq!(rig.fake.starts(), 1);
@@ -359,27 +399,11 @@ fn a_message_the_core_refuses_goes_back_in_the_input() {
 
 // Approvals.
 
-fn a_request_waits_unanswered_and_decide_and_shown_do_not_reach_it_until_close_denies_it() {
+fn a_request_waits_unanswered_and_close_denies_it() {
     let rig = Rig::new(false);
     run(async {
-        rig.opened().await;
-        rig.fake.tell(Cmd::Ask {
-            rpc_id: 100,
-            command: "touch x".into(),
-        });
-        until("the card", || rig.cards() == [(1, Answer::Pending)]).await;
         // The core numbers requests itself: this is its first.
-        let decide = Call::Decide {
-            generation: 1,
-            request: 1,
-            choice: Choice::ApproveOnce,
-        };
-        assert_eq!(rig.call(decide), Err(HandlerError::NotReady));
-        let shown = Call::Shown {
-            generation: 1,
-            request: 1,
-        };
-        assert_eq!(rig.call(shown), Err(HandlerError::NotReady));
+        rig.with_request(100, "touch x").await;
         settle().await;
         assert_eq!(rig.fake.seen.answer(100), None);
         assert_eq!(rig.cards(), [(1, Answer::Pending)]);
@@ -394,6 +418,212 @@ fn a_request_waits_unanswered_and_decide_and_shown_do_not_reach_it_until_close_d
             rig.fake.seen.answer(100)
         );
         assert_eq!(rig.cards(), [(1, Answer::Closed)]);
+    });
+}
+
+fn approved(outcome: &Option<serde_json::Value>) -> bool {
+    outcome.as_ref() == Some(&json!({ "outcome": "selected", "optionId": "yes" }))
+}
+
+fn approve_is_accepted_only_400_ms_after_shown_and_reaches_the_agent_once() {
+    let rig = Rig::new(false);
+    run(async {
+        rig.with_request(100, "touch x").await;
+        assert_eq!(rig.shown(GEN, 1), Ok(Reply::Done));
+        rig.advance(399);
+        assert_eq!(
+            rig.decide(GEN, 1, Choice::ApproveOnce),
+            Err(HandlerError::Refused)
+        );
+        settle().await;
+        assert_eq!(rig.fake.seen.answer(100), None, "nothing was sent");
+        assert_eq!(rig.cards(), [(1, Answer::Pending)]);
+        rig.advance(1);
+        assert_eq!(rig.decide(GEN, 1, Choice::ApproveOnce), Ok(Reply::Done));
+        until("the answer", || rig.fake.seen.answer(100).is_some()).await;
+        assert!(
+            approved(&rig.fake.seen.answer(100)),
+            "{:?}",
+            rig.fake.seen.answer(100)
+        );
+        assert_eq!(rig.cards(), [(1, Answer::Approved)]);
+        // Once: a second answer, either way, is refused.
+        for choice in [Choice::ApproveOnce, Choice::DenyOnce] {
+            assert_eq!(rig.decide(GEN, 1, choice), Err(HandlerError::Refused));
+        }
+        assert_eq!(rig.cards(), [(1, Answer::Approved)]);
+    });
+}
+
+fn deny_is_accepted_right_after_shown() {
+    let rig = Rig::new(false);
+    run(async {
+        rig.with_request(100, "touch x").await;
+        assert_eq!(rig.shown(GEN, 1), Ok(Reply::Done));
+        assert_eq!(rig.decide(GEN, 1, Choice::DenyOnce), Ok(Reply::Done));
+        until("the answer", || rig.fake.seen.answer(100).is_some()).await;
+        assert!(
+            denied(&rig.fake.seen.answer(100)),
+            "{:?}",
+            rig.fake.seen.answer(100)
+        );
+        assert_eq!(rig.cards(), [(1, Answer::Denied)]);
+    });
+}
+
+fn a_card_that_was_not_shown_cannot_be_decided_either_way() {
+    let rig = Rig::new(false);
+    run(async {
+        rig.with_request(100, "touch x").await;
+        rig.advance(10_000);
+        for choice in [Choice::ApproveOnce, Choice::DenyOnce] {
+            assert_eq!(rig.decide(GEN, 1, choice), Err(HandlerError::Refused));
+        }
+        // A `Shown` for a card that does not exist is refused and records nothing.
+        assert_eq!(rig.shown(GEN, 2), Err(HandlerError::Refused));
+        rig.advance(10_000);
+        assert_eq!(
+            rig.decide(GEN, 1, Choice::DenyOnce),
+            Err(HandlerError::Refused)
+        );
+        settle().await;
+        assert_eq!(rig.fake.seen.answer(100), None);
+        assert_eq!(rig.cards(), [(1, Answer::Pending)]);
+    });
+}
+
+fn another_generation_is_refused_for_shown_and_decide() {
+    let rig = Rig::new(false);
+    run(async {
+        rig.with_request(100, "touch x").await;
+        for wrong in [GEN - 1, GEN + 1, 0, 1, u64::MAX] {
+            assert_eq!(rig.shown(wrong, 1), Err(HandlerError::Refused), "{wrong}");
+        }
+        // Shown with the right number, then every decide with a wrong one.
+        assert_eq!(rig.shown(GEN, 1), Ok(Reply::Done));
+        rig.advance(10_000);
+        for wrong in [GEN - 1, GEN + 1, 0, 1, u64::MAX] {
+            for choice in [Choice::ApproveOnce, Choice::DenyOnce] {
+                assert_eq!(
+                    rig.decide(wrong, 1, choice),
+                    Err(HandlerError::Refused),
+                    "{wrong}"
+                );
+            }
+        }
+        settle().await;
+        assert_eq!(rig.fake.seen.answer(100), None);
+        assert_eq!(rig.cards(), [(1, Answer::Pending)]);
+    });
+}
+
+fn only_a_pending_card_can_be_shown_or_decided() {
+    let rig = Rig::new(false);
+    run(async {
+        // No session yet: there is nothing to answer.
+        assert_eq!(rig.shown(GEN, 1), Err(HandlerError::Refused));
+        assert_eq!(
+            rig.decide(GEN, 1, Choice::DenyOnce),
+            Err(HandlerError::Refused)
+        );
+        rig.with_request(100, "touch x").await;
+        // An id that is not a card.
+        for request in [0, 2, u64::MAX] {
+            assert_eq!(rig.shown(GEN, request), Err(HandlerError::Refused));
+            assert_eq!(
+                rig.decide(GEN, request, Choice::DenyOnce),
+                Err(HandlerError::Refused)
+            );
+        }
+        // An answered card.
+        assert_eq!(rig.shown(GEN, 1), Ok(Reply::Done));
+        assert_eq!(rig.decide(GEN, 1, Choice::DenyOnce), Ok(Reply::Done));
+        assert_eq!(rig.shown(GEN, 1), Err(HandlerError::Refused));
+        rig.advance(10_000);
+        assert_eq!(
+            rig.decide(GEN, 1, Choice::ApproveOnce),
+            Err(HandlerError::Refused)
+        );
+        until("the answer", || rig.fake.seen.answer(100).is_some()).await;
+        assert!(denied(&rig.fake.seen.answer(100)));
+        assert_eq!(rig.cards(), [(1, Answer::Denied)]);
+    });
+}
+
+fn a_card_too_large_to_review_cannot_be_shown_or_approved() {
+    let rig = Rig::new(false);
+    run(async {
+        rig.opened().await;
+        rig.fake.tell(Cmd::Ask {
+            rpc_id: 101,
+            command: "x".repeat(20_000),
+        });
+        until("the card", || rig.cards() == [(1, Answer::TooLarge)]).await;
+        assert_eq!(rig.shown(GEN, 1), Err(HandlerError::Refused));
+        rig.advance(10_000);
+        for choice in [Choice::ApproveOnce, Choice::DenyOnce] {
+            assert_eq!(rig.decide(GEN, 1, choice), Err(HandlerError::Refused));
+        }
+        // It was denied at once and nothing was approved.
+        until("the denial", || rig.fake.seen.answer(101).is_some()).await;
+        assert!(denied(&rig.fake.seen.answer(101)));
+    });
+}
+
+fn nothing_is_decided_after_close_and_close_denies_what_was_shown() {
+    let rig = Rig::new(false);
+    run(async {
+        rig.with_request(100, "touch x").await;
+        assert_eq!(rig.shown(GEN, 1), Ok(Reply::Done));
+        rig.advance(10_000);
+        assert_eq!(rig.call(Call::Close), Ok(Reply::DoneThenExit));
+        for choice in [Choice::ApproveOnce, Choice::DenyOnce] {
+            assert_eq!(rig.decide(GEN, 1, choice), Err(HandlerError::NotReady));
+        }
+        assert_eq!(rig.shown(GEN, 1), Err(HandlerError::NotReady));
+        until("the denial", || rig.fake.seen.answer(100).is_some()).await;
+        assert!(
+            denied(&rig.fake.seen.answer(100)),
+            "{:?}",
+            rig.fake.seen.answer(100)
+        );
+        assert_eq!(rig.cards(), [(1, Answer::Closed)]);
+    });
+}
+
+fn only_the_first_shown_of_a_pending_card_is_exempt_from_the_rate() {
+    let rig = Rig::new(false);
+    run(async {
+        let first = |generation: u64, request: u64| Call::Shown {
+            generation,
+            request,
+        };
+        // Nothing pending yet.
+        assert!(!rig.service.rate_exempt(&first(GEN, 1)));
+        rig.with_request(100, "touch x").await;
+        assert!(rig.service.rate_exempt(&first(GEN, 1)));
+        assert!(!rig.service.rate_exempt(&first(GEN + 1, 1)), "stale");
+        assert!(!rig.service.rate_exempt(&first(GEN, 2)), "no such card");
+        // Asking does not use it up; being shown does.
+        assert!(rig.service.rate_exempt(&first(GEN, 1)));
+        assert_eq!(rig.shown(GEN, 1), Ok(Reply::Done));
+        assert!(!rig.service.rate_exempt(&first(GEN, 1)), "a repeat");
+        // No other call is exempt.
+        for call in [
+            Call::Decide {
+                generation: GEN,
+                request: 1,
+                choice: Choice::DenyOnce,
+            },
+            Call::Edited("x".into()),
+            Call::Send {
+                text: "x".into(),
+                via: Via::Button,
+            },
+            Call::Open,
+        ] {
+            assert!(!rig.service.rate_exempt(&call), "{}", call.name());
+        }
     });
 }
 
@@ -460,6 +690,15 @@ fn after_close_every_call_but_close_is_answered_not_ready_and_does_nothing() {
             Call::CheckUsage,
             Call::DraftChoice(Placement::Keep),
             Call::DraftDiscard,
+            Call::Decide {
+                generation: GEN,
+                request: 1,
+                choice: Choice::DenyOnce,
+            },
+            Call::Shown {
+                generation: GEN,
+                request: 1,
+            },
         ];
         for call in calls {
             let name = call.name();
@@ -481,7 +720,7 @@ fn close_with_no_session_still_means_the_helper_exits() {
 fn a_session_that_arrives_after_close_is_dropped_unused() {
     let rig = Rig::with(false, |fake| fake.delay = Duration::from_millis(300));
     run(async {
-        assert_eq!(rig.call(Call::Open), Ok(Reply::Done));
+        assert_eq!(rig.call(Call::Open), Ok(Reply::Generation(GEN)));
         assert_eq!(rig.call(Call::Close), Ok(Reply::DoneThenExit));
         glib::timeout_future(Duration::from_millis(900)).await;
         assert!(!rig.ready());
@@ -532,7 +771,15 @@ scenarios!(
     cancel_reaches_the_agent,
     the_draft_calls_change_nothing_while_there_is_no_draft,
     a_lost_edit_is_remembered_until_the_next_edit_and_a_send_makes_the_input_known,
-    a_request_waits_unanswered_and_decide_and_shown_do_not_reach_it_until_close_denies_it,
+    a_request_waits_unanswered_and_close_denies_it,
+    approve_is_accepted_only_400_ms_after_shown_and_reaches_the_agent_once,
+    deny_is_accepted_right_after_shown,
+    a_card_that_was_not_shown_cannot_be_decided_either_way,
+    another_generation_is_refused_for_shown_and_decide,
+    only_a_pending_card_can_be_shown_or_decided,
+    a_card_too_large_to_review_cannot_be_shown_or_approved,
+    nothing_is_decided_after_close_and_close_denies_what_was_shown,
+    only_the_first_shown_of_a_pending_card_is_exempt_from_the_rate,
     a_request_too_large_to_review_is_denied_at_once,
     the_shell_going_away_denies_what_is_pending_and_ends_the_session,
     the_shell_going_away_with_no_session_changes_nothing,

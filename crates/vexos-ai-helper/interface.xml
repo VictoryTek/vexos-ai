@@ -1,6 +1,8 @@
 <node>
   <interface name="io.github.victorytek.VexosAssistant.Helper1">
-    <method name="Open"/>
+    <method name="Open">
+      <arg type="t" name="generation" direction="out"/>
+    </method>
     <method name="Close"/>
     <method name="Edited">
       <arg type="s" name="text" direction="in"/>

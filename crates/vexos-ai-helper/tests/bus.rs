@@ -38,6 +38,7 @@ const NOT_READY: &str = "io.github.victorytek.VexosAssistant.Error.NotReady";
 const TOO_LONG: &str = "io.github.victorytek.VexosAssistant.Error.TooLong";
 const INVALID: &str = "io.github.victorytek.VexosAssistant.Error.InvalidArgument";
 const TOO_FAST: &str = "io.github.victorytek.VexosAssistant.Error.TooFast";
+const REFUSED: &str = "io.github.victorytek.VexosAssistant.Error.Refused";
 
 // A private bus.
 
@@ -235,16 +236,34 @@ struct Recorder {
     /// Whether there is a session for `shell_gone` to end.
     has_session: Cell<bool>,
     gone: Cell<usize>,
+    /// `Open` answers with this generation instead of `NotReady`.
+    open_generation: Cell<Option<u64>>,
+    /// `Shown` and `Decide` answer `Refused` instead of `NotReady`.
+    refuse: Cell<bool>,
+    /// Every `Shown` is exempt from its rate limit.
+    exempt: Cell<bool>,
 }
 
 impl Handler for Recorder {
     fn handle(&self, call: Call) -> Result<Reply, HandlerError> {
         let close = call == Call::Close;
+        let answer = match &call {
+            Call::Open => self.open_generation.get().map(Reply::Generation),
+            _ => None,
+        };
+        let refused = matches!(call, Call::Shown { .. } | Call::Decide { .. }) && self.refuse.get();
         self.calls.borrow_mut().push(call);
         if close && self.exit_on_close.get() {
             return Ok(Reply::DoneThenExit);
         }
-        Err(HandlerError::NotReady)
+        if refused {
+            return Err(HandlerError::Refused);
+        }
+        answer.ok_or(HandlerError::NotReady)
+    }
+
+    fn rate_exempt(&self, call: &Call) -> bool {
+        matches!(call, Call::Shown { .. }) && self.exempt.get()
     }
 
     fn shell_gone(&self) -> bool {
@@ -969,6 +988,132 @@ fn each_method_has_its_rate_and_the_stranger_does_not_use_it_up() {
     assert_eq!(calls.iter().filter(|c| **c == Call::EditLost).count(), 1);
 }
 
+fn open_replies_with_the_generation() {
+    let bus = TestBus::start();
+    let (_helper, recorder) = start(&bus, &[this_program()]);
+    recorder.open_generation.set(Some(0x0123_4567_89ab_cdef));
+    run(async {
+        let shell = connect(&bus.address).await;
+        own_name(&shell, SHELL_NAME).await;
+        // The reply is a tuple holding the number, whole (a `t` is 64 bits).
+        for _ in 0..2 {
+            let reply = call_at(&shell, OBJECT_PATH, INTERFACE, "Open", None)
+                .await
+                .expect("Open is answered");
+            assert_eq!(reply.get::<(u64,)>(), Some((0x0123_4567_89ab_cdef,)));
+        }
+        // A stranger gets no number.
+        let stranger = connect(&bus.address).await;
+        assert!(
+            call_at(&stranger, OBJECT_PATH, INTERFACE, "Open", None)
+                .await
+                .is_err()
+        );
+    });
+}
+
+fn a_refused_decide_or_shown_is_one_fixed_error_that_carries_nothing_of_the_call() {
+    let bus = TestBus::start();
+    let (_helper, recorder) = start(&bus, &[this_program()]);
+    recorder.refuse.set(true);
+    run(async {
+        let shell = connect(&bus.address).await;
+        own_name(&shell, SHELL_NAME).await;
+        for (method, params) in [
+            ("Decide", (1u64, 2u64, "approve-once").to_variant()),
+            ("Decide", (1u64, 2u64, "deny-once").to_variant()),
+            ("Shown", (1u64, 2u64).to_variant()),
+        ] {
+            let error = call_at(&shell, OBJECT_PATH, INTERFACE, method, Some(params))
+                .await
+                .expect_err("refused");
+            assert_eq!(error_name(&error), REFUSED, "{method}");
+            let text = error.message().to_owned();
+            for caller_text in ["approve-once", "deny-once"] {
+                assert!(!text.contains(caller_text), "{text}");
+            }
+        }
+        // The calls reached the handler with the typed values.
+        let calls = recorder.calls.borrow();
+        assert_eq!(
+            *calls,
+            [
+                Call::Decide {
+                    generation: 1,
+                    request: 2,
+                    choice: Choice::ApproveOnce
+                },
+                Call::Decide {
+                    generation: 1,
+                    request: 2,
+                    choice: Choice::DenyOnce
+                },
+                Call::Shown {
+                    generation: 1,
+                    request: 2
+                },
+            ]
+        );
+    });
+}
+
+fn an_exempt_shown_is_not_counted_against_its_rate() {
+    let bus = TestBus::start();
+    let (_now, clock) = stopped_clock();
+    let (_helper, recorder) = start_with(&bus, &[this_program()], clock);
+    let shown = || (1u64, 2u64).to_variant();
+    run(async {
+        let shell = connect(&bus.address).await;
+        own_name(&shell, SHELL_NAME).await;
+        // Exempt: far more than ten in one second, and none is counted.
+        recorder.exempt.set(true);
+        for n in 0..30 {
+            assert_eq!(
+                call(&shell, "Shown", Some(shown())).await,
+                Err(NOT_READY.to_owned()),
+                "exempt {n}"
+            );
+        }
+        // Not exempt: the limit is ten, and the exempt ones did not use it up.
+        recorder.exempt.set(false);
+        for n in 0..10 {
+            assert_eq!(
+                call(&shell, "Shown", Some(shown())).await,
+                Err(NOT_READY.to_owned()),
+                "counted {n}"
+            );
+        }
+        assert_eq!(
+            call(&shell, "Shown", Some(shown())).await,
+            Err(TOO_FAST.to_owned())
+        );
+        // Exempt again while the limit is used up: it still goes through.
+        recorder.exempt.set(true);
+        assert_eq!(
+            call(&shell, "Shown", Some(shown())).await,
+            Err(NOT_READY.to_owned())
+        );
+        // The exemption is for Shown only: Decide is still limited.
+        for _ in 0..5 {
+            let _ = call(
+                &shell,
+                "Decide",
+                Some((1u64, 2u64, "deny-once").to_variant()),
+            )
+            .await;
+        }
+        assert_eq!(
+            call(
+                &shell,
+                "Decide",
+                Some((1u64, 2u64, "deny-once").to_variant())
+            )
+            .await,
+            Err(TOO_FAST.to_owned())
+        );
+    });
+}
+
 fn an_edit_the_helper_refused_is_reported_to_the_handler() {
     let bus = TestBus::start();
     let (_helper, recorder) = start(&bus, &[this_program()]);
@@ -1159,6 +1304,8 @@ fn the_real_service_sits_behind_the_front_door() {
             agent: vexos_ai_core::Agent::Claude,
             usage_on_launch: false,
         },
+        4242,
+        Rc::new(Instant::now),
     ));
     let handler: Rc<dyn Handler> = service.clone();
     let helper = Rc::new(
@@ -1170,6 +1317,8 @@ fn the_real_service_sits_behind_the_front_door() {
     );
     let results = Rc::new(RefCell::new(Vec::new()));
     let log = results.clone();
+    let generation = Rc::new(Cell::new(None));
+    let told = generation.clone();
     let address = bus.address.clone();
     let watched = service.clone();
     let seen = fake.seen.clone();
@@ -1179,7 +1328,9 @@ fn the_real_service_sits_behind_the_front_door() {
         let stranger = connect(&address).await;
         let push =
             |name: &'static str, result: Result<(), String>| log.borrow_mut().push((name, result));
-        push("open", call(&shell, "Open", None).await);
+        let opened = call_at(&shell, OBJECT_PATH, INTERFACE, "Open", None).await;
+        told.set(opened.as_ref().ok().and_then(|v| v.get::<(u64,)>()));
+        push("open", opened.map(|_| ()).map_err(|e| error_name(&e)));
         for _ in 0..500 {
             if watched
                 .conversation()
@@ -1203,9 +1354,12 @@ fn the_real_service_sits_behind_the_front_door() {
             }
             glib::timeout_future(Duration::from_millis(10)).await;
         }
-        // Nothing can approve yet.
-        let decide = (1u64, 1u64, "approve-once").to_variant();
+        // No request exists: nothing can be approved, with the right
+        // generation or any other.
+        let decide = (4242u64, 1u64, "approve-once").to_variant();
         push("decide", call(&shell, "Decide", Some(decide)).await);
+        let shown = (4242u64, 1u64).to_variant();
+        push("shown", call(&shell, "Shown", Some(shown)).await);
         push("close", call(&shell, "Close", None).await);
         glib::timeout_future(Duration::from_secs(5)).await;
     });
@@ -1218,10 +1372,12 @@ fn the_real_service_sits_behind_the_front_door() {
             ("open", Ok(())),
             ("stranger", Err(ACCESS_DENIED.to_owned())),
             ("send", Ok(())),
-            ("decide", Err(NOT_READY.to_owned())),
+            ("decide", Err(REFUSED.to_owned())),
+            ("shown", Err(REFUSED.to_owned())),
             ("close", Ok(())),
         ]
     );
+    assert_eq!(generation.get(), Some((4242,)), "Open names the session");
     assert_eq!(fake.seen.prompts(), ["hello there"]);
     service.end();
     drop(runtime);
@@ -1264,6 +1420,9 @@ scenarios!(
     dropping_the_helper_releases_its_name,
     the_helper_exits_when_the_bus_goes_away,
     each_method_has_its_rate_and_the_stranger_does_not_use_it_up,
+    open_replies_with_the_generation,
+    a_refused_decide_or_shown_is_one_fixed_error_that_carries_nothing_of_the_call,
+    an_exempt_shown_is_not_counted_against_its_rate,
     an_edit_the_helper_refused_is_reported_to_the_handler,
     close_replies_and_then_the_helper_exits,
     the_shell_going_away_ends_a_helper_that_has_a_session,

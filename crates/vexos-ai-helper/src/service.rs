@@ -8,15 +8,18 @@ use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Instant;
 
 use tokio::runtime::Handle;
-use vexos_ai_core::{Agent, Config as CoreConfig, Error, Events, Session};
+use vexos_ai_core::{Agent, Config as CoreConfig, Decision, Error, Events, Session};
 use vexos_ai_viewmodel::{
-    Composer, Conversation, Outgoing, Placement as Place, Sent, USAGE_LOCK, Via as How,
+    Answer, Composer, Conversation, Item, Outgoing, Placement as Place, Sent, USAGE_LOCK,
+    Via as How,
 };
 
+use crate::approval::Approvals;
 use crate::bus::{Handler, HandlerError, Reply};
-use crate::gate::{Call, Placement, Via};
+use crate::gate::{Call, Choice, Placement, Via};
 
 /// Where the agent works: the same fixed place as the panel. Nothing a caller
 /// sends can change it.
@@ -69,6 +72,10 @@ struct Inner {
     conversation: RefCell<Option<Conversation>>,
     composer: RefCell<Composer>,
     session: RefCell<Option<Arc<Session>>>,
+    /// Which cards were shown, and when; the session's generation number.
+    approvals: RefCell<Approvals>,
+    /// The time `Shown` and `Decide` are measured in.
+    clock: Rc<dyn Fn() -> Instant>,
     /// `Close` or the Shell's exit came: a session that is still starting is
     /// dropped when it arrives.
     closed: Cell<bool>,
@@ -79,7 +86,14 @@ pub struct Service {
 }
 
 impl Service {
-    pub fn new(runtime: Handle, starter: Box<dyn Starter>, settings: Settings) -> Service {
+    /// `generation` names this session: every `Shown` and `Decide` must carry it.
+    pub fn new(
+        runtime: Handle,
+        starter: Box<dyn Starter>,
+        settings: Settings,
+        generation: u64,
+        clock: Rc<dyn Fn() -> Instant>,
+    ) -> Service {
         Service {
             inner: Rc::new(Inner {
                 runtime,
@@ -88,6 +102,8 @@ impl Service {
                 conversation: RefCell::new(None),
                 composer: RefCell::new(Composer::default()),
                 session: RefCell::new(None),
+                approvals: RefCell::new(Approvals::new(generation)),
+                clock,
                 closed: Cell::new(false),
             }),
         }
@@ -118,7 +134,10 @@ impl Handler for Service {
             return Err(HandlerError::NotReady);
         }
         match call {
-            Call::Open => inner.open(),
+            Call::Open => {
+                inner.open();
+                return Ok(Reply::Generation(inner.approvals.borrow().generation()));
+            }
             Call::Close => {
                 inner.close_session();
                 return Ok(Reply::DoneThenExit);
@@ -139,11 +158,32 @@ impl Handler for Service {
             Call::DraftDiscard => {
                 inner.composer.borrow_mut().discard();
             }
-            // Their rules (the pending request, the generation, the shown card)
-            // come with the next item; until then nothing can answer a request.
-            Call::Decide { .. } | Call::Shown { .. } => return Err(HandlerError::NotReady),
+            Call::Shown {
+                generation,
+                request,
+            } => return inner.shown(generation, request),
+            Call::Decide {
+                generation,
+                request,
+                choice,
+            } => return inner.decide(generation, request, choice),
         }
         Ok(Reply::Done)
+    }
+
+    fn rate_exempt(&self, call: &Call) -> bool {
+        let Call::Shown {
+            generation,
+            request,
+        } = call
+        else {
+            return false;
+        };
+        let pending = self.inner.is_pending(*request);
+        self.inner
+            .approvals
+            .borrow()
+            .first_shown(*generation, *request, pending)
     }
 
     fn shell_gone(&self) -> bool {
@@ -158,6 +198,68 @@ impl Handler for Service {
 impl Inner {
     fn session(&self) -> Option<Arc<Session>> {
         self.session.borrow().clone()
+    }
+
+    /// Whether `request` is a card that is waiting for an answer right now.
+    /// A card too large to review, an answered one and an unknown id are not.
+    fn is_pending(&self, request: u64) -> bool {
+        self.conversation.borrow().as_ref().is_some_and(|c| {
+            c.items().iter().any(|item| {
+                matches!(item, Item::Approval(card)
+                    if card.request == request && card.answer == Answer::Pending)
+            })
+        })
+    }
+
+    /// `Shown`: the Shell drew the card. Starts the clock for `approve-once`.
+    fn shown(&self, generation: u64, request: u64) -> Result<Reply, HandlerError> {
+        let pending = self.is_pending(request);
+        let now = (self.clock)();
+        match self
+            .approvals
+            .borrow_mut()
+            .shown(generation, request, pending, now)
+        {
+            Ok(()) => Ok(Reply::Done),
+            Err(why) => {
+                eprintln!("vexos-ai-helper: refused Shown: {why:?}");
+                Err(HandlerError::Refused)
+            }
+        }
+    }
+
+    /// `Decide`: the only way a request is answered by a caller. The rules
+    /// decide first; only then does the view-model's own click pass the answer
+    /// to the core.
+    fn decide(&self, generation: u64, request: u64, choice: Choice) -> Result<Reply, HandlerError> {
+        let pending = self.is_pending(request);
+        let now = (self.clock)();
+        if let Err(why) = self
+            .approvals
+            .borrow()
+            .decide(generation, request, choice, pending, now)
+        {
+            eprintln!("vexos-ai-helper: refused Decide: {why:?}");
+            return Err(HandlerError::Refused);
+        }
+        let Some(session) = self.session() else {
+            return Err(HandlerError::Refused);
+        };
+        let decision = match choice {
+            Choice::ApproveOnce => Decision::ApproveOnce,
+            Choice::DenyOnce => Decision::DenyOnce,
+        };
+        let clicked = match self.conversation.borrow_mut().as_mut() {
+            Some(c) => c.click(request, decision, &*session),
+            None => return Err(HandlerError::Refused),
+        };
+        match clicked {
+            Ok(_) => Ok(Reply::Done),
+            Err(why) => {
+                eprintln!("vexos-ai-helper: refused Decide: {why:?}");
+                Err(HandlerError::Refused)
+            }
+        }
     }
 
     /// Prepares the conversation and starts the saved agent's session in the
