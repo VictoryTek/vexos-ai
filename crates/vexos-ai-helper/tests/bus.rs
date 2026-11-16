@@ -1366,6 +1366,17 @@ fn the_real_service_sits_behind_the_front_door() {
     let quitter = helper.clone();
     glib::timeout_add_local_once(Duration::from_secs(20), move || quitter.quit());
     assert_eq!(helper.run(), Exit::Quit);
+    // The helper quits as it answers Close, so the caller has not read that
+    // reply yet; it was on the wire already. Let the caller read it, as
+    // `close_replies_and_then_the_helper_exits` does.
+    run(async {
+        for _ in 0..100 {
+            if results.borrow().len() >= 6 {
+                break;
+            }
+            glib::timeout_future(Duration::from_millis(20)).await;
+        }
+    });
     assert_eq!(
         *results.borrow(),
         [
