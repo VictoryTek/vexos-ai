@@ -36,10 +36,20 @@ setup() { common_setup; }
   jqe '.crash == {capture: false, muted: ["firefox", "steam"]}'
 }
 
-@test "an agent file left by the removed OpenCode is null" {
-  set_file "$CONF/agent" opencode
-  run vexos status --json
-  jqe '.agent == null'
+@test "status reports codex and opencode as the agent" {
+  for agent in claude codex opencode; do
+    set_file "$CONF/agent" "$agent"
+    run vexos status --json
+    jqe ".agent == \"$agent\""
+  done
+}
+
+@test "an agent file naming anything else is null" {
+  for bad in Codex codex-acp "codex x" gemini; do
+    set_file "$CONF/agent" "$bad"
+    run vexos status --json
+    jqe '.agent == null'
+  done
 }
 
 @test "a garbage agent file is null" {

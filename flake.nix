@@ -47,7 +47,10 @@
         policy = let
           policy = import ./nix/policy.nix { inherit (nixpkgs) lib; };
           claude = pkgs.writeText "claude.json" (builtins.toJSON policy.claude);
-        in pkgs.runCommand "vexos-ai-policy" { nativeBuildInputs = [ pkgs.jq ]; } ''
+          opencode = pkgs.writeText "opencode.json" (builtins.toJSON policy.opencode);
+          codex = pkgs.writeText "codex.json" (builtins.toJSON policy.codex);
+          codexToml = (pkgs.formats.toml { }).generate "requirements.toml" policy.codex;
+        in pkgs.runCommand "vexos-ai-policy" { nativeBuildInputs = [ pkgs.jq pkgs.python3 ]; } ''
           check() { jq -e "$2" "$1" >/dev/null || { echo "policy check failed: $2 ($1)"; exit 1; }; }
 
           check ${claude} '.permissions.disableAutoMode == "disable"'
@@ -66,6 +69,50 @@
               check ${claude} ".permissions.deny | index(\"Bash($p$c *)\") != null"
             done
           done
+
+          # OpenCode 2.x: edits and shell commands ask, no subagent may start (its
+          # own rules are out of reach), the appliers are hard-denied policies, and
+          # the 1.x keys are gone (a 2.x OpenCode would not read them).
+          check ${opencode} '.permissions == [
+            {action: "edit", resource: "*", effect: "ask"},
+            {action: "shell", resource: "*", effect: "ask"},
+            {action: "subagent", resource: "*", effect: "deny"}]'
+          # The pinned agent carries the same rules, so its own come last and say the same.
+          check ${opencode} '.agents == {build: {permissions: .permissions}}'
+          check ${opencode} '(has("permission") or has("agent") or has("default_agent")) | not'
+          # Starting a subagent is a hard policy, not only a rule.
+          check ${opencode} '.policies | any(. == {action: "tool.use", resource: "subagent:*", effect: "deny"})'
+          check ${opencode} '.policies | all(.action == "tool.use" and .effect == "deny")'
+          for c in "nixos-rebuild switch" "nixos-rebuild boot" "nixos-rebuild test" \
+                   "just rebuild" "just switch" "just update" "just update-all" "nix flake check"; do
+            for p in "" "sudo " "pkexec "; do
+              check ${opencode} ".policies | any(.resource == \"shell:$p$c *\")"
+            done
+          done
+
+          # Codex: always asks the user, read-only sandbox, nothing auto-approves,
+          # and every applier (bare, sudo, pkexec) is a forbidden rule.
+          # The two policies that ask the user, and no "never".
+          check ${codex} '.allowed_approval_policies == ["untrusted", "on-request"]'
+          check ${codex} '.allowed_approval_policies | index("never") == null'
+          check ${codex} '.allowed_approvals_reviewers == ["user"]'
+          check ${codex} '.allowed_sandbox_modes == ["read-only"]'
+          check ${codex} '[.rules.prefix_rules[].decision] | all(. == "forbidden")'
+          for c in "nixos-rebuild switch" "nixos-rebuild boot" "nixos-rebuild test"                    "just rebuild" "just switch" "just update" "just update-all" "nix flake check"; do
+            for p in "" "sudo " "pkexec "; do
+              words=$(printf '%s' "$p$c" | jq -cR 'split(" ") | map({token: .})')
+              check ${codex} ".rules.prefix_rules | map(.pattern) | any(. == $words)"
+            done
+          done
+          # The TOML Codex reads is the same document as the one asserted above.
+          python3 - ${codexToml} ${codex} <<'PY'
+          import json, sys, tomllib
+          with open(sys.argv[1], "rb") as f:
+              toml = tomllib.load(f)
+          with open(sys.argv[2]) as f:
+              expected = json.load(f)
+          assert toml == expected, "the rendered TOML differs from the policy"
+          PY
           touch $out
         '';
 
@@ -210,6 +257,8 @@
           agents = {
             claudePackage = stub "claude" "2.1.300";
             claudeAcpPackage = stub "claude-agent-acp" "0.88.0";
+            codexAcpPackage = stub "codex-acp" "2.1.1";
+            opencodePackage = stub "opencode" "2.2.6";
           };
           eval = settings: (nixpkgs.lib.nixosSystem {
             inherit (pkgs.stdenv.hostPlatform) system;
@@ -273,9 +322,33 @@
             "no panel with 26.05's claude-agent-acp" = refused "claudeAcpPackage is 0.36.1" {
               programs.vexos-ai = { enable = true; claudeAcpPackage = lib.mkForce (stub "claude-agent-acp" "0.36.1"); };
             };
-            "the removed opencodePackage option is refused" = refused "OpenCode was removed" {
-              programs.vexos-ai = { enable = true; opencodePackage = stub "opencode" "1.19.0"; };
+            "no panel with 26.05's codex-acp" = refused "codexAcpPackage is 0.13.0" {
+              programs.vexos-ai = { enable = true; codexAcpPackage = lib.mkForce (stub "codex-acp" "0.13.0"); };
             };
+            "no panel with 26.05's opencode" = refused "opencodePackage is 1.15.10" {
+              programs.vexos-ai = { enable = true; opencodePackage = lib.mkForce (stub "opencode" "1.15.10"); };
+            };
+            "no panel with a changed Codex policy" = refused "Codex's managed policy" {
+              programs.vexos-ai.enable = true;
+              environment.etc."codex/requirements.toml".source = lib.mkForce (pkgs.writeText "x.toml" "");
+            };
+            "no panel with a changed OpenCode policy" = refused "OpenCode's managed policy" {
+              programs.vexos-ai.enable = true;
+              environment.etc."opencode/opencode.json".text = lib.mkForce "{}";
+            };
+            "Codex and OpenCode need nothing set: the policy is installed, nothing else" =
+              let bare = (nixpkgs.lib.nixosSystem {
+                inherit (pkgs.stdenv.hostPlatform) system;
+                modules = [
+                  self.nixosModules.default
+                  { boot.isContainer = true; system.stateVersion = "26.05";
+                    programs.vexos-ai = { enable = true; claudePackage = stub "claude" "2.1.300";
+                                          claudeAcpPackage = stub "claude-agent-acp" "0.88.0"; }; }
+                ];
+              }).config;
+              in failing bare == "" && bare.programs.vexos-ai.codexAcpPackage == null
+                && bare.programs.vexos-ai.opencodePackage == null
+                && bare.environment.etc ? "codex/requirements.toml" && bare.environment.etc ? "opencode/opencode.json";
           };
         in pkgs.runCommand "vexos-ai-module" { } ''
           failed=0
@@ -285,6 +358,8 @@
           '') cases)}
           ${lib.optionalString (panel != null) ''
             grep -q '${agents.claudeAcpPackage}/bin' ${panel}/bin/vexos-ai-panel \
+              && grep -q '${agents.codexAcpPackage}/bin' ${panel}/bin/vexos-ai-panel \
+              && grep -q '${agents.opencodePackage}/bin' ${panel}/bin/vexos-ai-panel \
               && echo 'ok   the panel runs the pinned agents first on PATH' \
               || { echo 'FAIL the panel runs the pinned agents first on PATH'; failed=1; }
             # The panel reads and writes the extension's `window-mode` key, so it must

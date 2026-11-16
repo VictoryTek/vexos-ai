@@ -35,9 +35,9 @@ common_setup() {
   mkdir -p "$bin"
   cp "$BATS_TEST_DIRNAME"/stubs/* "$bin"/
   chmod +x "$bin"/*
-  # claude is "installed" only by tests that want them.
+  # claude, codex and opencode are "installed" only by tests that want them.
   mkdir -p "$BATS_TEST_TMPDIR/agents"
-  mv "$bin/claude" "$BATS_TEST_TMPDIR/agents/"
+  mv "$bin/claude" "$bin/codex" "$bin/opencode" "$BATS_TEST_TMPDIR/agents/"
   export PATH="$bin:$PATH"
 
   # Fake system profiles; the script reads them from these.

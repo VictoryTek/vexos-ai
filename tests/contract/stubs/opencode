@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Stub opencode: records how it was started.
+log=${STUB_LOG:?}
+{
+  echo "argc=$#"
+  for a in "$@"; do echo "arg=$a"; done
+  echo "pwd=$PWD"
+} >>"$log/opencode.log"
+exit 0

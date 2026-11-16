@@ -1,6 +1,6 @@
 # vexos-ai
 
-The VexOS AI assistant: Claude Code, taught how VexOS works
+The VexOS AI assistant: Claude Code (or Codex, or OpenCode: `vexos-ai pick`), taught how VexOS works
 (`skills/`), fenced off from applying changes and kept asking before it acts
 (managed policy, `nix/policy.nix`), with a
 launcher, theme sync and "diagnose with AI".

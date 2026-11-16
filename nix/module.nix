@@ -1,4 +1,4 @@
-# NixOS module for the VexOS AI assistant: Claude Code, taught how
+# NixOS module for the VexOS AI assistant: Claude Code, Codex or OpenCode, taught how
 # VexOS works and fenced off from applying changes. The agent edits /etc/nixos
 # side-files and dry-builds; the user runs `just rebuild`.
 #
@@ -7,7 +7,10 @@
 # programs.vexos-ai.enable — the same split as vex-vpn.
 #
 # What it installs:
-#   - claude-code (the package is an option; vexos-nix passes unstable)
+#   - claude-code (the package is an option; vexos-nix passes unstable). Codex
+#     and OpenCode are optional: their packages are null unless a consumer sets
+#     them (vexos-nix installs the CLIs itself), but their managed policy is
+#     always installed, so choosing one with `vexos-ai pick` is as safe as Claude
 #   - vexos-ai: launcher, first-run picker, theme sync, "diagnose with AI"
 #   - the VexOS skills at /etc/vexos/ai/skills, linked into ~/.claude/skills
 #     (Claude Code reads it) and ~/.agents/skills (the generic spot)
@@ -32,9 +35,18 @@ let
 
   skills = [ "vexos" "vexos-diagnose" ];
 
-  # The panel drives the agents over ACP; these versions were tested live
-  # (assistant_panel_spike_results.md). 26.05's claude-agent-acp is 0.36.1.
-  minimum = { claudeAcp = "0.88.0"; };
+  # The panel drives the agents over ACP; the Claude version was tested live
+  # (assistant_panel_spike_results.md). 26.05's claude-agent-acp is 0.36.1. The
+  # Codex and OpenCode floors only keep out 26.05's builds (codex-acp 0.13.0,
+  # opencode 1.15.10), whose modes and permission config differ; neither has
+  # been run live here yet.
+  minimum = { claudeAcp = "0.88.0"; codexAcp = "2.0.0"; opencode = "2.0.0"; };
+
+  # The optional agent packages that are set.
+  optionalAgents = lib.filter (p: p != null) [ cfg.codexPackage cfg.codexAcpPackage cfg.opencodePackage ];
+
+  # The Codex managed requirements, as the TOML Codex reads.
+  codexRequirements = (pkgs.formats.toml { }).generate "requirements.toml" policy.codex;
 
   # The panel runs the pinned agents, whatever else is on the user's PATH.
   panel = pkgs.symlinkJoin {
@@ -44,7 +56,8 @@ let
     # D-Bus activation (the Shell extension) must start the wrapped panel too.
     postBuild = ''
       wrapProgram $out/bin/vexos-ai-panel \
-        --prefix PATH : ${lib.makeBinPath [ cfg.claudeAcpPackage ]}
+        --prefix PATH : ${lib.makeBinPath ([ cfg.claudeAcpPackage ]
+          ++ lib.filter (p: p != null) [ cfg.codexAcpPackage cfg.opencodePackage ])}
       service=$out/share/dbus-1/services/io.github.victorytek.VexosAssistant.service
       rm $service
       printf '%s\n' '[D-BUS Service]' 'Name=io.github.victorytek.VexosAssistant' \
@@ -60,6 +73,11 @@ let
     let etc = config.environment.etc; in
     etc ? ${path} && etc.${path}.enable && etc.${path}.text == text;
 
+  # The same for a file installed from a store path.
+  managedSource = path: source:
+    let etc = config.environment.etc; in
+    etc ? ${path} && etc.${path}.enable && etc.${path}.source == source;
+
   # The system profile on PATH: these services launch claude, the
   # terminal (xdg-terminal-exec) and vexos-ai itself by name.
   userService = description: script: {
@@ -72,13 +90,8 @@ let
   };
 in
 {
-  imports = [
-    (lib.mkRemovedOptionModule [ "programs" "vexos-ai" "opencodePackage" ]
-      "OpenCode was removed from vexos-ai; delete this setting.")
-  ];
-
   options.programs.vexos-ai = {
-    enable = lib.mkEnableOption "the VexOS AI assistant (Claude Code)";
+    enable = lib.mkEnableOption "the VexOS AI assistant (Claude Code, Codex or OpenCode)";
 
     claudePackage = lib.mkOption {
       type = lib.types.package;
@@ -87,6 +100,37 @@ in
       description = ''
         Claude Code package. Unfree: the consumer must allow it. vexos-nix
         passes the nixpkgs-unstable build, as agent CLIs move weekly.
+      '';
+    };
+
+    codexPackage = lib.mkOption {
+      type = lib.types.nullOr lib.types.package;
+      default = null;
+      description = ''
+        Codex CLI. Null (the default) installs nothing: the consumer installs it
+        itself, as vexos-nix does. Set it to have this module install it. Unfree.
+      '';
+    };
+
+    codexAcpPackage = lib.mkOption {
+      type = lib.types.nullOr lib.types.package;
+      default = null;
+      description = ''
+        The ACP adapter the panel runs Codex through (`codex-acp`). Null leaves
+        Codex out of the panel: `codex-acp` is not on its PATH, so a session
+        with Codex chosen fails to start. Needs ${minimum.codexAcp} or later;
+        nixos-26.05 has 0.13.0, so pass the nixpkgs-unstable build.
+      '';
+    };
+
+    opencodePackage = lib.mkOption {
+      type = lib.types.nullOr lib.types.package;
+      default = null;
+      description = ''
+        OpenCode, which is its own ACP adapter (`opencode acp`). Null installs
+        nothing and leaves the panel to find `opencode` on the user's PATH. Needs
+        ${minimum.opencode} or later; nixos-26.05 has 1.15.10, so pass the
+        nixpkgs-unstable build.
       '';
     };
 
@@ -144,7 +188,7 @@ in
     environment.systemPackages = [
       cfg.claudePackage
       package
-    ];
+    ] ++ optionalAgents;
 
     # ── Skills ───────────────────────────────────────────────────────────────
     environment.etc."vexos/ai/skills".source = ../skills;
@@ -160,6 +204,12 @@ in
     # ── Agent policy ─────────────────────────────────────────────────────────
     # Never apply, always ask: see nix/policy.nix.
     environment.etc."claude-code/managed-settings.d/50-vexos.json".text = builtins.toJSON policy.claude;
+    # Codex reads /etc/codex/requirements.toml as an admin-enforced layer that
+    # user and project config cannot override; OpenCode loads
+    # /etc/opencode/opencode.json after the user's config. Installed whether or
+    # not the agents' packages are, so they are fenced the moment they exist.
+    environment.etc."codex/requirements.toml".source = codexRequirements;
+    environment.etc."opencode/opencode.json".text = builtins.toJSON policy.opencode;
 
     # ── User services ────────────────────────────────────────────────────────
     # `vexos-ai crash-capture off` creates the flag file; the unit then does not
@@ -184,6 +234,24 @@ in
       {
         assertion = managed "claude-code/managed-settings.d/50-vexos.json" (builtins.toJSON policy.claude);
         message = "programs.vexos-ai.enablePanel needs Claude's managed policy at /etc/claude-code/managed-settings.d/50-vexos.json, as nix/policy.nix renders it.";
+      }
+      {
+        assertion = managedSource "codex/requirements.toml" codexRequirements;
+        message = "programs.vexos-ai.enablePanel needs Codex's managed policy at /etc/codex/requirements.toml, as nix/policy.nix renders it.";
+      }
+      {
+        assertion = managed "opencode/opencode.json" (builtins.toJSON policy.opencode);
+        message = "programs.vexos-ai.enablePanel needs OpenCode's managed policy at /etc/opencode/opencode.json, as nix/policy.nix renders it.";
+      }
+      {
+        assertion = cfg.codexAcpPackage == null
+          || lib.versionAtLeast (lib.getVersion cfg.codexAcpPackage) minimum.codexAcp;
+        message = "programs.vexos-ai.codexAcpPackage is ${lib.getVersion cfg.codexAcpPackage}; the panel needs ${minimum.codexAcp} or later. Pass the nixpkgs-unstable build (pkgs.unstable.codex-acp).";
+      }
+      {
+        assertion = cfg.opencodePackage == null
+          || lib.versionAtLeast (lib.getVersion cfg.opencodePackage) minimum.opencode;
+        message = "programs.vexos-ai.opencodePackage is ${lib.getVersion cfg.opencodePackage}; the panel needs ${minimum.opencode} or later. Pass the nixpkgs-unstable build (pkgs.unstable.opencode).";
       }
       {
         assertion = lib.versionAtLeast (lib.getVersion cfg.claudeAcpPackage) minimum.claudeAcp;

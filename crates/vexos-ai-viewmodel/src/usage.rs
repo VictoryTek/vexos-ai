@@ -122,6 +122,8 @@ pub enum Disabled {
     Loading,
     TurnRunning,
     ApprovalWaiting,
+    /// Only Claude has a `/usage` command.
+    Unsupported,
 }
 
 /// The usage line, as the window shows it. Read-only; a click goes to
@@ -144,6 +146,7 @@ pub fn tooltip(disabled: Option<Disabled>) -> &'static str {
         Some(Disabled::Loading) => "Not available while usage is loading",
         Some(Disabled::TurnRunning) => "Not available while a turn is running",
         Some(Disabled::ApprovalWaiting) => "Not available while an approval is waiting",
+        Some(Disabled::Unsupported) => "This assistant has no usage report",
     }
 }
 
@@ -397,6 +400,7 @@ mod tests {
             (Disabled::Loading, "usage is loading"),
             (Disabled::TurnRunning, "a turn is running"),
             (Disabled::ApprovalWaiting, "an approval is waiting"),
+            (Disabled::Unsupported, "has no usage report"),
         ] {
             assert!(tooltip(Some(why)).contains(text), "{why:?}");
         }

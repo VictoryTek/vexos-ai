@@ -39,13 +39,27 @@ setup() { common_setup; }
   [ "$(cat "$CONF/agent")" = claude ]
 }
 
-@test "pick opencode is a usage error: it was removed" {
+@test "pick codex and pick opencode save the choice and name it" {
+  run vexos pick codex
+  [ "$status" -eq 0 ]
+  [ "$output" = "Assistant set to Codex." ]
+  [ "$(cat "$CONF/agent")" = codex ]
+  run vexos pick opencode
+  [ "$status" -eq 0 ]
+  [ "$output" = "Assistant set to OpenCode." ]
+  [ "$(cat "$CONF/agent")" = opencode ]
+}
+
+@test "pick names exactly three assistants; anything else is a usage error" {
   set_file "$CONF/agent" claude
-  run --separate-stderr vexos pick opencode
+  for bad in Codex CODEX codex-acp "codex " "open code" Claude "" gemini; do
+    run --separate-stderr vexos pick "$bad"
+    [ "$(cat "$CONF/agent")" = claude ]
+  done
+  run --separate-stderr vexos pick gemini
   [ "$status" -eq 2 ]
   [ -z "$output" ]
-  [ "$stderr" = "vexos-ai: unknown assistant 'opencode' (use claude)" ]
-  [ "$(cat "$CONF/agent")" = claude ]
+  [ "$stderr" = "vexos-ai: unknown assistant 'gemini' (use claude, codex or opencode)" ]
 }
 
 @test "pick with too many arguments is a usage error" {

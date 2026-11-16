@@ -812,3 +812,120 @@ async fn a_relative_working_directory_is_refused() {
     let result = Session::connect(Agent::Claude, Config::new("relative"), r, w).await;
     assert!(matches!(result, Err(Error::Config(_))));
 }
+
+// 1c. Codex and OpenCode ---------------------------------------------------------
+
+fn codex_session(current: &str) -> Value {
+    json!({ "sessionId": "s1", "modes": { "currentModeId": current, "availableModes": [
+        { "id": "read-only" }, { "id": "agent" }, { "id": "agent-full-access" } ] } })
+}
+
+/// A Codex session that is up and pinned to `read-only`.
+async fn codex() -> (Session, Events, Fake) {
+    let (start, mut fake) = begin(Agent::Codex, config());
+    handshake(&mut fake, codex_session("agent")).await;
+    let set = fake.expect("session/set_mode").await;
+    fake.reply(&set, json!({})).await;
+    let (session, events) = start.await.unwrap().unwrap();
+    (session, events, fake)
+}
+
+#[tokio::test]
+async fn codex_is_reset_to_read_only_whatever_it_starts_in() {
+    for started in [
+        "agent",
+        "agent-full-access",
+        "auto",
+        "full-access",
+        "read-only",
+    ] {
+        let (start, mut fake) = begin(Agent::Codex, config());
+        handshake(&mut fake, codex_session(started)).await;
+        let set = fake.expect("session/set_mode").await;
+        assert_eq!(
+            set["params"],
+            json!({ "sessionId": "s1", "modeId": "read-only" }),
+            "{started}"
+        );
+        fake.reply(&set, json!({})).await;
+        start.await.unwrap().unwrap();
+    }
+}
+
+#[tokio::test]
+async fn a_codex_mode_that_writes_or_never_asks_is_reset() {
+    for mode in ["agent", "agent-full-access", "auto", "full-access"] {
+        let (_session, _events, mut fake) = codex().await;
+        fake.update(json!({ "sessionUpdate": "current_mode_update", "currentModeId": mode }))
+            .await;
+        let set = fake.expect("session/set_mode").await;
+        assert_eq!(set["params"]["modeId"], "read-only", "{mode}");
+    }
+}
+
+#[tokio::test]
+async fn a_failed_codex_reset_aborts_the_session() {
+    let (start, mut fake) = begin(Agent::Codex, config());
+    handshake(&mut fake, codex_session("agent-full-access")).await;
+    let set = fake.expect("session/set_mode").await;
+    fake.fail(&set).await;
+    assert!(matches!(start.await.unwrap(), Err(Error::ModePin(_))));
+    assert!(fake.next().await.is_none());
+}
+
+fn opencode_options(current: &str) -> Value {
+    json!([{ "id": "mode", "category": "mode", "currentValue": current }])
+}
+
+#[tokio::test]
+async fn opencode_is_pinned_to_build_through_its_mode_option() {
+    let (start, mut fake) = begin(Agent::OpenCode, config());
+    handshake(
+        &mut fake,
+        json!({ "sessionId": "s1", "configOptions": opencode_options("plan") }),
+    )
+    .await;
+    let set = fake.expect("session/set_config_option").await;
+    assert_eq!(
+        set["params"],
+        json!({ "sessionId": "s1", "configId": "mode", "value": "build" })
+    );
+    fake.reply(&set, json!({ "configOptions": opencode_options("build") }))
+        .await;
+    start.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn opencode_answering_with_another_agent_aborts_the_session() {
+    let (start, mut fake) = begin(Agent::OpenCode, config());
+    handshake(&mut fake, json!({ "sessionId": "s1" })).await;
+    let set = fake.expect("session/set_config_option").await;
+    fake.reply(&set, json!({ "configOptions": opencode_options("yolo") }))
+        .await;
+    assert!(matches!(start.await.unwrap(), Err(Error::ModePin(_))));
+}
+
+#[tokio::test]
+async fn the_agents_start_the_right_programs_and_none_auto_approves() {
+    for (agent, program, args) in [
+        (Agent::Claude, "claude-agent-acp", &[][..]),
+        (Agent::Codex, "codex-acp", &[][..]),
+        (Agent::OpenCode, "opencode", &["acp"][..]),
+    ] {
+        let command = agent.command();
+        assert_eq!(command.program, program);
+        assert_eq!(command.args, args);
+        let line = format!("{} {:?} {:?}", command.program, command.args, command.env);
+        for word in [
+            "yolo",
+            "dangerous",
+            "full-access",
+            "bypass",
+            "approve",
+            "never",
+            "auto",
+        ] {
+            assert!(!line.contains(word), "{program}: {line}");
+        }
+    }
+}

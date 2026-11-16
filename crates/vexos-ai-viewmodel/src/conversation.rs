@@ -31,6 +31,8 @@ impl Decider for Session {
 pub fn agent_label(agent: Agent) -> &'static str {
     match agent {
         Agent::Claude => "Claude",
+        Agent::Codex => "Codex",
+        Agent::OpenCode => "OpenCode",
     }
 }
 
@@ -41,13 +43,14 @@ pub const AGENT_FILE: &str = "vexos/ai/agent";
 /// Longest part of the choice file that is read.
 const MAX_CHOICE_BYTES: u64 = 64;
 
-/// The agent a choice file names: its first line, exactly `claude`. A
-/// leftover `opencode` (removed) names nothing. No trimming and no case
-/// folding, as in the CLI.
+/// The agent a choice file names: its first line, exactly `claude`, `codex`
+/// or `opencode`. No trimming and no case folding, as in the CLI.
 pub fn parse_agent(bytes: &[u8]) -> Option<Agent> {
     let line = bytes.split(|&b| b == b'\n').next().unwrap_or_default();
     match line {
         b"claude" => Some(Agent::Claude),
+        b"codex" => Some(Agent::Codex),
+        b"opencode" => Some(Agent::OpenCode),
         _ => None,
     }
 }
@@ -505,9 +508,17 @@ impl Conversation {
         self.hidden == Some(true)
     }
 
+    /// The usage line is shown: only Claude has the `/usage` command, so the
+    /// others are never sent it.
+    pub fn offers_usage_check(&self) -> bool {
+        self.agent == Agent::Claude
+    }
+
     /// Why a click on the usage line would do nothing now, if it would.
     pub fn usage_disabled(&self) -> Option<Disabled> {
-        if matches!(self.state, State::Starting | State::Ended(_)) {
+        if !self.offers_usage_check() {
+            Some(Disabled::Unsupported)
+        } else if matches!(self.state, State::Starting | State::Ended(_)) {
             Some(Disabled::NotReady)
         } else if self.hidden.is_some() {
             Some(Disabled::Loading)
@@ -564,7 +575,7 @@ impl Conversation {
         let disabled = self.usage_disabled();
         let (wide, narrow) = self.shown().labels(now);
         UsageButton {
-            visible: true,
+            visible: self.offers_usage_check(),
             enabled: disabled.is_none() && self.can_send(),
             wide,
             narrow,
@@ -573,7 +584,8 @@ impl Conversation {
     }
 
     fn shown(&self) -> Shown {
-        let launch_ahead = self.state == State::Starting && self.usage_on_launch;
+        let launch_ahead =
+            self.state == State::Starting && self.offers_usage_check() && self.usage_on_launch;
         if self.hidden.is_some() || launch_ahead {
             return Shown::Loading;
         }
@@ -608,7 +620,7 @@ impl Conversation {
         if self.state == State::Starting && self.started && self.mode.is_some() {
             self.state = State::Ready;
             self.ready.get_or_insert_with(Instant::now);
-            if self.usage_on_launch {
+            if self.offers_usage_check() && self.usage_on_launch {
                 self.launch_due = true;
             }
         }
@@ -2429,20 +2441,25 @@ mod tests {
     }
 
     #[test]
-    fn the_choice_is_exactly_claude() {
+    fn the_choice_is_exactly_one_of_three_values() {
         assert_eq!(parse_agent(b"claude"), Some(Agent::Claude));
         assert_eq!(parse_agent(b"claude\n"), Some(Agent::Claude));
-        // OpenCode was removed: a leftover value names nothing.
-        assert_eq!(parse_agent(b"opencode"), None);
-        assert_eq!(parse_agent(b"opencode\n"), None);
+        assert_eq!(parse_agent(b"codex"), Some(Agent::Codex));
+        assert_eq!(parse_agent(b"codex\n"), Some(Agent::Codex));
+        assert_eq!(parse_agent(b"opencode"), Some(Agent::OpenCode));
+        assert_eq!(parse_agent(b"opencode\n"), Some(Agent::OpenCode));
         // The first line only, as `head -n 1`.
         assert_eq!(parse_agent(b"claude\nopencode"), Some(Agent::Claude));
-        assert_eq!(parse_agent(b"opencode\nclaude"), None);
+        assert_eq!(parse_agent(b"opencode\nclaude"), Some(Agent::OpenCode));
+        assert_eq!(parse_agent(b"codex\nrm -rf"), Some(Agent::Codex));
         assert_eq!(parse_agent(b"claude\nrm -rf"), Some(Agent::Claude));
         for bad in [
             &b"Claude"[..],
             b"CLAUDE",
-            b"codex",
+            b"Codex",
+            b"CODEX",
+            b" codex",
+            b"codex ",
             b" claude",
             b"claude ",
             b"claude\r",
@@ -2467,7 +2484,7 @@ mod tests {
         assert_eq!(saved_agent(&missing), Agent::Claude);
         assert!(!missing.exists(), "reading never creates the file");
         assert_eq!(saved_agent(&fixture("empty", b"")), Agent::Claude);
-        assert_eq!(saved_agent(&fixture("unknown", b"codex\n")), Agent::Claude);
+        assert_eq!(saved_agent(&fixture("unknown", b"gemini\n")), Agent::Claude);
         assert_eq!(
             saved_agent(&fixture("control", b"opencode\r\n")),
             Agent::Claude
@@ -2476,8 +2493,9 @@ mod tests {
         assert_eq!(saved_agent(&fixture("claude", b"claude\n")), Agent::Claude);
         assert_eq!(
             saved_agent(&fixture("opencode", b"opencode\n")),
-            Agent::Claude
+            Agent::OpenCode
         );
+        assert_eq!(saved_agent(&fixture("codex", b"codex\n")), Agent::Codex);
     }
 
     #[test]
@@ -2488,7 +2506,7 @@ mod tests {
         first.append(&mut junk);
         assert_eq!(saved_agent(&fixture("huge-claude", &first)), Agent::Claude);
         // No line break within the limit: not a value.
-        let long = [b"opencode".as_slice(), &[b' '; 100]].concat();
+        let long = [b"codex".as_slice(), &[b' '; 100]].concat();
         assert_eq!(saved_agent(&fixture("long-line", &long)), Agent::Claude);
     }
 
@@ -2521,7 +2539,11 @@ mod tests {
 
     #[test]
     fn the_stored_value_never_reaches_a_command() {
-        let known = [Agent::Claude.command()];
+        let known = [
+            Agent::Claude.command(),
+            Agent::Codex.command(),
+            Agent::OpenCode.command(),
+        ];
         for hostile in [
             "opencode --yolo",
             "claude; rm -rf ~",

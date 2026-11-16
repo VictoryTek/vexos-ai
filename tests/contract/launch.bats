@@ -40,14 +40,56 @@ setup() { common_setup; }
   [ "$status" -eq 2 ]
 }
 
-@test "an agent file left by the removed OpenCode launches claude" {
+@test "codex starts codex, with the prompt after --, in the work directory" {
+  skip_without_pty
+  install_agents
+  set_file "$CONF/agent" codex
+  run_tty prompt hello there
+  [ "$status" -eq 0 ]
+  grep -qx 'argc=2' "$STUB_LOG/codex.log"
+  grep -qx 'arg=--' "$STUB_LOG/codex.log"
+  grep -qx 'arg=hello there' "$STUB_LOG/codex.log"
+  [ ! -e "$STUB_LOG/claude.log" ] && [ ! -e "$STUB_LOG/opencode.log" ]
+}
+
+@test "codex with no prompt starts codex with no arguments" {
+  skip_without_pty
+  install_agents
+  set_file "$CONF/agent" codex
+  run_tty
+  [ "$status" -eq 0 ]
+  grep -qx 'argc=0' "$STUB_LOG/codex.log"
+}
+
+@test "opencode starts opencode with --prompt" {
   skip_without_pty
   install_agents
   set_file "$CONF/agent" opencode
   run_tty prompt hello there
   [ "$status" -eq 0 ]
-  grep -qx 'argc=1' "$STUB_LOG/claude.log"
-  grep -qx 'arg=hello there' "$STUB_LOG/claude.log"
+  grep -qx 'argc=2' "$STUB_LOG/opencode.log"
+  grep -qx 'arg=--prompt' "$STUB_LOG/opencode.log"
+  grep -qx 'arg=hello there' "$STUB_LOG/opencode.log"
+  [ ! -e "$STUB_LOG/claude.log" ] && [ ! -e "$STUB_LOG/codex.log" ]
+}
+
+@test "a chosen assistant that is not installed is exit 3" {
+  skip_without_pty
+  for agent in codex opencode; do
+    set_file "$CONF/agent" "$agent"
+    run_tty prompt hi
+    [ "$status" -eq 3 ]
+  done
+}
+
+@test "no assistant ever gets an auto-approve flag" {
+  skip_without_pty
+  install_agents
+  for agent in claude codex opencode; do
+    set_file "$CONF/agent" "$agent"
+    run_tty prompt hi
+  done
+  ! grep -qiE 'yolo|dangerous|bypass|full-auto|approve|auto' "$STUB_LOG"/*.log
 }
 
 @test "claude runs with its default config, even with an old account pointer left" {
@@ -128,7 +170,7 @@ setup() { common_setup; }
   run --separate-stderr vexos pick emacs
   [ "$status" -eq 2 ]
   [ -z "$output" ]
-  [ "$stderr" = "vexos-ai: unknown assistant 'emacs' (use claude)" ]
+  [ "$stderr" = "vexos-ai: unknown assistant 'emacs' (use claude, codex or opencode)" ]
 }
 
 @test "the VexPortal recipes never open a dialog or a terminal, with a TTY and a display" {

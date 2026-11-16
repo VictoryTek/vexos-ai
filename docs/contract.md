@@ -35,7 +35,7 @@ replaces it (Phase 2): `tests/contract/*.bats` runs unchanged against both.
 | 0 | ok | |
 | 1 | runtime failure | corrupt `agent` file |
 | 2 | usage error: bad argv or value | unknown agent, unknown command, a removed command (`account …`, `panel`, `usage`) |
-| 3 | not found | `claude` not installed |
+| 3 | not found | the chosen agent (`claude`, `codex` or `opencode`) is not installed |
 | 4 | needs interaction, and none is allowed | `pick` with no agent and `--non-interactive`, or with no terminal or display |
 | 5 | busy | reserved: nothing returns it now. It was `account remove` or `rename` while a session used the account |
 
@@ -45,7 +45,7 @@ replaces it (Phase 2): `tests/contract/*.bats` runs unchanged against both.
 vexos-ai                                  open the assistant (in /etc/nixos)
 vexos-ai --prompt "<text>"                … with a task
 vexos-ai prompt <text…>                   same, words joined with spaces
-vexos-ai pick [claude]                    set the agent; no argument → ask
+vexos-ai pick [claude|codex|opencode]    set the agent; no argument → ask
 vexos-ai status [--json] [--refresh]      state; --refresh is accepted and ignored
 vexos-ai crash-mute                       list
 vexos-ai crash-mute <prog> [on|off]       default on
@@ -94,7 +94,7 @@ Notes:
 
 - `schema` is an integer. It changes only on a breaking change. Additive keys do
   not bump it, so **consumers must ignore unknown keys**.
-- `agent` is `null` until one is chosen (or if the file holds something else).
+- `agent` is `"claude"`, `"codex"` or `"opencode"`, and `null` until one is chosen (or if the file holds something else).
 - The account keys are kept with **fixed values** so that schema 1 consumers
   keep parsing: `accounts` is always `[]`, `activeAccount` is always `"main"`,
   and `switching` is always `{ "mode": "manual", "threshold": 95 }`, whatever
@@ -117,7 +117,7 @@ reads the files below directly and keeps working.
 
 | Path | Format |
 |---|---|
-| `$XDG_CONFIG_HOME/vexos/ai/agent` | `claude`. A leftover `opencode` (OpenCode was removed) launches Claude and shows as `null` in `status --json` |
+| `$XDG_CONFIG_HOME/vexos/ai/agent` | `claude`, `codex` or `opencode`, exactly (first line, no trimming or case folding). Anything else shows as `null` in `status --json` and the window falls back to Claude |
 | `…/crash-ignore/<prog>` | empty file per muted program |
 | `…/crash-capture-off` | flag file. The crash-watch unit has `ConditionPathExists=!%h/.config/vexos/ai/crash-capture-off` (systemd cannot see an `XDG_CONFIG_HOME` override) |
 
@@ -204,8 +204,8 @@ figure).
 ## What the safety policy covers, and what it does not
 
 The agents are fenced by managed policy (`nix/policy.nix`, asserted by
-`checks.policy`): applying a configuration is denied, and both agents ask before
-they edit or run commands. That is a guardrail. What to know:
+`checks.policy`): applying a configuration is denied, and every agent asks before
+it edits or runs commands. That is a guardrail. What to know:
 
 - The deny rules match **text**. `pkexec sh -c 'nixos-rebuild switch'` is not
   matched. The real gate is that applying needs root, and `sudo` or `pkexec`
@@ -226,14 +226,36 @@ they edit or run commands. That is a guardrail. What to know:
   `acceptEdits` and "Yes, and don't ask again" no longer skip the prompt for
   those tools and commands. That includes read-only `sed -n`; other read-only
   commands such as `ls` and `cat` still run without asking.
-- **OpenCode was removed.** Its one open route (a custom agent the user
-  selects, which bypassed the managed denies) no longer exists here. Claude
-  Code is the only assistant, and no OpenCode policy is installed.
+- **Codex** reads `/etc/codex/requirements.toml`, an admin-enforced layer that
+  user and project config cannot override: approvals are `untrusted` or
+  `on-request` (never `never`; `on-request` is what codex-acp sends in its
+  `read-only` mode), the reviewer is always `user` (never Codex's auto
+  reviewer), the sandbox is `read-only` (a write needs an approval the user
+  answers), and each applier, bare or behind `sudo` or `pkexec`, is a
+  `forbidden` rule. The other codex-acp modes (`agent`, `agent-full-access`)
+  ask for settings these requirements refuse. The window starts it in the ACP mode `read-only` and resets
+  any other (`agent`, `agent-full-access`, `auto`, `full-access`).
+- **OpenCode** reads `/etc/opencode/opencode.json`, written in the **2.x** format
+  (1.x's `permission`/`bash`/`task` keys are not used; nixpkgs-unstable ships
+  2.x, and the module refuses anything older). `permissions` makes edits and
+  shell commands `ask` and denies the `subagent` action, globally and on the
+  `build` agent the window pins (an agent's own rules are read after the global
+  ones). `policies` are the hard guarantees: each applier, bare or behind `sudo`
+  or `pkexec`, and starting any subagent are denied after every agent rule and
+  saved approval. The asks are not hard: a user's own "allow always" settles one
+  (OpenCode appends the system file's agent rules after the user's and the
+  project's, so their allow rules for `build` do not outrank ours). The window resets any agent other than `build`. The format comes from
+  OpenCode's published 2.x docs; no 2.x OpenCode was run for it.
+- **Not run live yet:** the Codex and OpenCode policies are asserted as rendered
+  files and the window's mode pinning is tested against a fake agent, but no real
+  codex-acp 2.x or OpenCode 2.x session was run for this. Run `spike/acp` against
+  each on a NixOS host and check that every edit and command asks, before relying
+  on it.
 
 ## Testing it
 
 `tests/contract/*.bats` is the executable form of this document: black-box, a
-fake `HOME`, fake system profiles, and stub `claude`,
+fake `HOME`, fake system profiles, and stub `claude`, `codex`, `opencode`,
 `curl`, `systemctl`, `zenity`, `xdg-terminal-exec`, `notify-send` and `gsettings`
 first on `PATH`. The stubs log their calls, so "never opens a dialog" is an
 assertion; the `curl` stub is a tripwire that fails and logs if anything calls
@@ -246,8 +268,8 @@ nix develop -c env VEXOS_AI_BIN=<path to a vexos-ai built without zenity,
   libnotify, xdg-terminal-exec in its runtime inputs> bats tests/contract
 ```
 
-By hand, `claude` must not be on `PATH`: the tests install its
-stub only where they want an agent, and a test that expects "not installed"
+By hand, none of `claude`, `codex` or `opencode` may be on `PATH`: the tests install
+their stubs only where they want an agent, and a test that expects "not installed"
 would otherwise start the real one.
 
 (`packages.<system>.default.passthru.mkScript [ … ]` builds that variant. The

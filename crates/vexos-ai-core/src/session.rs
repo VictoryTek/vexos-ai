@@ -376,6 +376,20 @@ impl Inner {
         let sid = self.session_id();
         let start = self.agent.start_mode();
         let failed = |e: Error| Error::ModePin(e.to_string());
+        if self.agent.mode_is_config_option() {
+            // OpenCode: its mode is a config option, and the answer says
+            // what it now is.
+            let params = json!({ "sessionId": sid, "configId": MODE_OPTION, "value": start });
+            let (result, ack) = self
+                .request_at("session/set_config_option", params)
+                .await
+                .map_err(failed)?;
+            let report = mode_report(&result["configOptions"]);
+            if report != ModeReport::Mode(start) {
+                return Err(Error::ModePin(format!("agent reports {report:?}")));
+            }
+            return Ok(ack);
+        }
         let (_, ack) = self
             .request_at(
                 "session/set_mode",

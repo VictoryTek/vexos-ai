@@ -1,5 +1,5 @@
-# The assistant's safety policy, as the managed Claude Code config that
-# nix/module.nix installs. Kept apart from the module so `checks.policy` can
+# The assistant's safety policy, as the managed agent configs (Claude Code,
+# Codex, OpenCode) that nix/module.nix installs. Kept apart from the module so `checks.policy` can
 # assert it without evaluating a NixOS system.
 #
 # Two rules, neither negotiable:
@@ -29,6 +29,31 @@ let
   fileTools = [ "Edit" "Write" "MultiEdit" "NotebookEdit" ];
   fileCommands = [ "mkdir" "touch" "rm" "rmdir" "mv" "cp" "sed" ];
   asked = fileTools ++ map (c: "Bash(${c} *)") fileCommands;
+
+  # OpenCode 2.x (the format nixpkgs-unstable ships; 1.x used `permission`,
+  # `bash` and `task` and is not supported). `permissions` is an ordered list
+  # where the last matching rule wins: edits and shell commands ask, and an agent
+  # may not start a subagent, because a subagent runs under rules of its own that
+  # this file cannot reach. `policies` are hard denies that apply after every
+  # agent rule and saved approval, and that no user or project config can lift.
+  opencodePermissions = [
+    { action = "edit"; resource = "*"; effect = "ask"; }
+    { action = "shell"; resource = "*"; effect = "ask"; }
+    { action = "subagent"; resource = "*"; effect = "deny"; }
+  ];
+  opencodePolicies = map
+    (c: { action = "tool.use"; resource = "shell:${c} *"; effect = "deny"; })
+    denied
+    ++ [ { action = "tool.use"; resource = "subagent:*"; effect = "deny"; } ];
+
+  # Codex: one forbidden prefix rule per applier and prefix. A command is its
+  # tokens, so "sudo" and "pkexec" are tokens of their own. Codex also matches
+  # these inside a shell wrapper it can parse.
+  codexRule = cmd: {
+    pattern = map (token: { inherit token; }) (lib.splitString " " cmd);
+    decision = "forbidden";
+    justification = "VexOS agents never apply a configuration: hand `${cmd}` to the user, who runs it (`just rebuild`), and use `nixos-rebuild dry-build` to check.";
+  };
 in
 {
   inherit denied asked;
@@ -48,5 +73,34 @@ in
       deny = map (c: "Bash(${c} *)") denied;
       ask = asked;
     };
+  };
+
+  # Codex: /etc/codex/requirements.toml, the admin-enforced layer that user and
+  # project config cannot override. Approvals always go to the user, never to
+  # Codex's auto reviewer, and never "never": `untrusted` (the default for a
+  # plain `codex`: only known read-only commands run unasked) and `on-request`
+  # (what codex-acp sends every turn in its `read-only` mode, the one mode the
+  # core allows). The sandbox is read-only, so a write needs an approval the user
+  # answers, and the appliers are forbidden outright. Rendered to TOML by the
+  # module and the check.
+  codex = {
+    allowed_approval_policies = [ "untrusted" "on-request" ];
+    allowed_approvals_reviewers = [ "user" ];
+    allowed_sandbox_modes = [ "read-only" ];
+    rules.prefix_rules = map codexRule denied;
+  };
+
+  # OpenCode: /etc/opencode/opencode.json, the system config, which OpenCode
+  # ranks above global and project config. The window starts it in the `build`
+  # agent (the core pins that), so the same asks are set on that agent too: an
+  # agent's own rules are read after the global ones, and a user's or project's
+  # `agents.build.permissions` would otherwise come last. Only `policies` are
+  # hard guarantees (the appliers, and starting a subagent); an ask can still be
+  # settled by the user's own "allow always". Written for 2.x from its published
+  # docs and not run live here: see docs/contract.md.
+  opencode = {
+    permissions = opencodePermissions;
+    agents.build.permissions = opencodePermissions;
+    policies = opencodePolicies;
   };
 }
