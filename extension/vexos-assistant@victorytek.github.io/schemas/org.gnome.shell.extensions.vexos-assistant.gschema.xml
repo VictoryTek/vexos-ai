@@ -18,5 +18,13 @@
       <default>'docked'</default>
       <summary>Assistant window: docked under the top bar, or floating</summary>
     </key>
+    <!-- The consent switch for plan limits. Off: the usage service reads nothing,
+         not even Claude's sign-in. The popup's "Show plan limits" switch is the
+         only thing that turns it on, and a missing key reads as off. -->
+    <key name="usage-enabled" type="b">
+      <default>false</default>
+      <summary>Show Claude plan limits in the top-bar panel</summary>
+      <description>When on, the usage service reads Claude Code's saved sign-in and asks Anthropic for your plan limits.</description>
+    </key>
   </schema>
 </schemalist>

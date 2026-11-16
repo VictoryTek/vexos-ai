@@ -19,7 +19,10 @@
 #   - on GNOME, the panel's Shell extension (tile and shortcut). Installed
 #     only: the module never enables it; each user runs
 #     `gnome-extensions enable vexos-assistant@victorytek.github.io` once
-{ mkVexosAi, mkVexosAiPanel, mkVexosAiExtension }:
+#   - with the extension, the usage service (vexos-ai-usage): D-Bus activated,
+#     it reads Claude's plan limits for the extension's top-bar panel, and
+#     reads nothing until the user switches plan limits on in that panel
+{ mkVexosAi, mkVexosAiPanel, mkVexosAiExtension, mkVexosAiUsage }:
 { config, lib, pkgs, ... }:
 let
   cfg = config.programs.vexos-ai;
@@ -50,6 +53,7 @@ let
   };
 
   extension = mkVexosAiExtension pkgs;
+  usage = mkVexosAiUsage pkgs;
 
   # A managed policy file the panel relies on: installed, enabled, unchanged.
   managed = path: text:
@@ -120,6 +124,18 @@ in
         This only installs it; the module never enables extensions. Each
         user enables it once with
         `gnome-extensions enable ${extension.extensionUuid}`.
+      '';
+    };
+
+    enableUsage = lib.mkOption {
+      type = lib.types.bool;
+      default = cfg.enablePanelExtension;
+      defaultText = lib.literalExpression "config.programs.vexos-ai.enablePanelExtension";
+      description = ''
+        Install the usage service (vexos-ai-usage), which the extension's
+        top-bar panel asks for Claude's plan limits. Installing it reads
+        nothing: the service stays idle, and reads Claude's saved sign-in only
+        after the user turns "Show plan limits" on in the panel.
       '';
     };
   };
@@ -194,6 +210,19 @@ in
     ];
 
     environment.systemPackages = [ extension ];
+  })
+
+  # ── Usage service ──────────────────────────────────────────────────────────
+  (lib.mkIf cfg.enableUsage {
+    assertions = [
+      {
+        assertion = cfg.enablePanelExtension;
+        message = "programs.vexos-ai.enableUsage needs programs.vexos-ai.enablePanelExtension: the service only answers the extension's top-bar panel.";
+      }
+    ];
+
+    environment.systemPackages = [ usage ];
+    services.dbus.packages = [ usage ];
   })
   ];
 }

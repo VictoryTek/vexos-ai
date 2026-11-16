@@ -1,11 +1,12 @@
 // VexOS Assistant: a Quick Settings tile and a shortcut that show or hide the
-// assistant window (crates/vexos-ai-panel), sliding it down from the top.
+// assistant window (crates/vexos-ai-panel), sliding it down from the top, and a
+// top-bar icon with a quick panel (indicator.js: plan limits and starter tiles).
 //
 // A thin client. It calls the app's `toggle` action by app id over D-Bus,
 // which takes no parameter, and places the app's main window. It reads no
 // conversation, answers no approval, starts no agent and shows no mode: all of
 // that stays in the app. Without this extension the app is a plain centred
-// window.
+// window. The quick panel's own calls are all in bus.js.
 //
 // Placement follows assistant_panel_spec.md 5.4 (Mutter has returned stale
 // positions after a move, and crashed in move_resize_frame): the window is
@@ -39,6 +40,8 @@ import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import * as QuickSettings from 'resource:///org/gnome/shell/ui/quickSettings.js';
 
+import {Bus} from './bus.js';
+import {AssistantButton} from './indicator.js';
 import {DEFAULT_NORMAL, DOCKED, FALLBACK_MS, FLOATING, SLIDE_EASING, SLIDE_MS, dockedRect,
     floatingRect, normalSize, parseMode, slideDecision, slideStart} from './layout.js';
 
@@ -91,6 +94,15 @@ export default class AssistantExtension extends Extension {
         Main.wm.addKeybinding(SHORTCUT, this._settings, Meta.KeyBindingFlags.NONE,
             Shell.ActionMode.NORMAL | Shell.ActionMode.OVERVIEW, () => this._toggle());
 
+        // The top-bar icon and its quick panel.
+        this._button = new AssistantButton({
+            path: this.path,
+            settings: this._settings,
+            bus: new Bus(this._cancellable),
+            onToggleWindow: () => this._toggle(),
+        });
+        Main.panel.addToStatusArea(this.uuid, this._button, 0, 'right');
+
         this._createdId = global.display.connect('window-created',
             (_display, window) => this._watch(window));
         this._modeId = this._settings.connect(`changed::${MODE_KEY}`,
@@ -125,6 +137,8 @@ export default class AssistantExtension extends Extension {
         this._windows = null;
         this._cancellable.cancel();
         this._cancellable = null;
+        this._button?.destroy();
+        this._button = null;
         this._indicator.destroy();
         this._indicator = null;
         this._settings = null;

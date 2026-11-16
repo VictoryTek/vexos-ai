@@ -1,0 +1,158 @@
+// Run with: node --test tests/extension/   (EXT=<dir> to test a built copy)
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {join, resolve} from 'node:path';
+import {pathToFileURL} from 'node:url';
+
+const dir = resolve(process.env.EXT ?? 'extension/vexos-assistant@victorytek.github.io');
+const view = await import(pathToFileURL(join(dir, 'usage_view.js')));
+const {parseRecord, currentWindows, formatCountdown, formatAge, percentText, isUrgent,
+    displayWindows, statusLine, refreshDelaySeconds, shouldRefreshOnOpen, STATUSES, MESSAGES,
+    MAX_FILE_BYTES, URGENT_PERCENT} = view;
+
+const NOW = 1_800_000_000_000;
+const MIN = 60_000;
+const HOUR = 60 * MIN;
+const DAY = 24 * HOUR;
+
+const record = (over = {}, windows = []) => JSON.stringify({
+    schema: 1, updatedAt: NOW, fetchedAt: NOW, probedAt: NOW, nextAt: 0, failures: 0,
+    enabled: true, status: 'ok', plan: 'Pro', stale: false, windows, ...over,
+});
+const win = (id, percent, resetsAt = 0, label = id) => ({id, label, percent, resetsAt});
+
+test('parseRecord: a good record is read field by field', () => {
+    const r = parseRecord(record({}, [win('session', 12.5, NOW + HOUR, 'Session'), win('weekly', 40, 0, 'Weekly')]));
+    assert.equal(r.enabled, true);
+    assert.equal(r.status, 'ok');
+    assert.equal(r.plan, 'Pro');
+    assert.equal(r.windows.length, 2);
+    assert.deepEqual(r.windows[0], {id: 'session', label: 'Session', percent: 12.5, resetsAt: NOW + HOUR});
+});
+
+test('parseRecord: anything that is not a record of this version is null', () => {
+    const bad = ['', 'null', '[]', '"x"', '{}', 'not json', record({schema: 2}), record({schema: '1'}),
+        record({status: 'bogus'}), record({status: 7}), JSON.stringify({schema: 1, status: 'ok'}),
+        JSON.stringify({schema: 1, status: 'ok', windows: 'x'}), undefined, null, 5, {}];
+    for (const text of bad)
+        assert.equal(parseRecord(text), null, String(text).slice(0, 40));
+    assert.equal(parseRecord(record() + ' '.repeat(MAX_FILE_BYTES)), null, 'oversize');
+});
+
+test('parseRecord: every status the service writes is known', () => {
+    for (const status of STATUSES)
+        assert.equal(parseRecord(record({status}))?.status, status);
+});
+
+test('parseRecord: bad windows are dropped, good ones kept, numbers bounded', () => {
+    const r = parseRecord(record({}, [
+        win('a', -1), win('b', NaN), {id: 'c', label: 'c', percent: 'high'}, null, 5,
+        {id: '', label: 'x', percent: 1}, {id: 'd', label: '', percent: 1},
+        win('e', 250, -5), win('f', 10, 1.9),
+    ].map(w => (w && w.percent !== undefined && Number.isNaN(w.percent) ? {...w, percent: null} : w))));
+    assert.deepEqual(r.windows.map(w => w.id), ['e', 'f']);
+    assert.equal(r.windows[0].percent, 100);
+    assert.equal(r.windows[0].resetsAt, 0);
+    assert.equal(r.windows[1].resetsAt, 1);
+    // Never more than 16.
+    const many = Array.from({length: 40}, (_, i) => win(`w${i}`, 1));
+    assert.equal(parseRecord(record({}, many)).windows.length, 16);
+});
+
+test('parseRecord: text from the file is cut to printable ASCII', () => {
+    const r = parseRecord(record({plan: 'Max‮ 5x\u0000\n<b>'}, [
+        win('scoped:x', 5, 0, 'Fa‮ble\u001b[31m Weekly'.padEnd(200, 'z'))]));
+    assert.equal(r.plan, 'Max 5x<b>');
+    assert.equal(r.windows[0].label, 'Fable[31m Weekly'.padEnd(60, 'z'));
+    for (const text of [r.plan, r.windows[0].label, r.windows[0].id])
+        assert.ok(/^[\x20-\x7e]*$/.test(text));
+});
+
+test('currentWindows: an elapsed window reads zero, the rest are untouched', () => {
+    const r = parseRecord(record({}, [win('a', 80, NOW - 1), win('b', 80, NOW), win('c', 80, NOW + 1), win('d', 80, 0)]));
+    const w = currentWindows(r, NOW);
+    assert.deepEqual(w.map(x => [x.percent, x.resetsAt]), [[0, 0], [0, 0], [80, NOW + 1], [80, 0]]);
+    assert.deepEqual(currentWindows(null, NOW), []);
+});
+
+test('formatCountdown', () => {
+    const cases = [[NOW + 30_000, '<1m'], [NOW + MIN, '1m'], [NOW + 59 * MIN + 59_000, '59m'],
+        [NOW + HOUR, '1h 0m'], [NOW + 3 * HOUR + 11 * MIN, '3h 11m'], [NOW + DAY - 1, '23h 59m'],
+        [NOW + DAY, '1d 0h'], [NOW + 4 * DAY + 6 * HOUR, '4d 6h'], [NOW, ''], [NOW - 5, ''],
+        [0, ''], [NaN, ''], [Infinity, '']];
+    for (const [at, text] of cases)
+        assert.equal(formatCountdown(at, NOW), text, String(at - NOW));
+});
+
+test('formatAge and percentText', () => {
+    assert.equal(formatAge(NOW - 5_000, NOW), 'just now');
+    assert.equal(formatAge(NOW - 12 * MIN, NOW), '12 min ago');
+    assert.equal(formatAge(NOW - 3 * HOUR, NOW), '3 h ago');
+    assert.equal(formatAge(NOW - 2 * DAY, NOW), '2 d ago');
+    assert.equal(formatAge(0, NOW), '');
+    assert.equal(percentText(12.4), '12%');
+    assert.equal(percentText(12.5), '13%');
+    assert.equal(percentText(250), '100%');
+    assert.equal(percentText(-3), '0%');
+});
+
+test('isUrgent: 90% or more in any window, only when plan limits are on', () => {
+    assert.equal(URGENT_PERCENT, 90);
+    const at = p => parseRecord(record({}, [win('session', 5), win('weekly', p)]));
+    assert.equal(isUrgent(at(89.9), NOW), false);
+    assert.equal(isUrgent(at(90), NOW), true);
+    assert.equal(isUrgent(at(100), NOW), true);
+    // A window that has reset is not urgent.
+    assert.equal(isUrgent(parseRecord(record({}, [win('weekly', 99, NOW - 1)])), NOW), false);
+    assert.equal(isUrgent(parseRecord(record({enabled: false}, [win('weekly', 99)])), NOW), false);
+    assert.equal(isUrgent(null, NOW), false);
+});
+
+test('displayWindows: Session, Weekly, then scoped, each group in the file order', () => {
+    const r = parseRecord(record({}, [win('scoped:b', 1), win('weekly', 2), win('scoped:a', 3), win('session', 4)]));
+    assert.deepEqual(displayWindows(r, NOW).map(w => w.id), ['session', 'weekly', 'scoped:b', 'scoped:a']);
+});
+
+test('statusLine: one fixed sentence per situation, with the age of kept numbers', () => {
+    for (const status of STATUSES) {
+        const line = statusLine(parseRecord(record({status}, [win('session', 5)])), NOW);
+        if (status === 'ok' || status === 'disabled')
+            assert.equal(line, null, status);
+        else
+            assert.equal(line, MESSAGES[status], status);
+    }
+    const stale = statusLine(parseRecord(record({status: 'unavailable', stale: true, fetchedAt: NOW - 12 * MIN})), NOW);
+    assert.equal(stale, `${MESSAGES.unavailable} Last updated 12 min ago.`);
+    assert.equal(statusLine(parseRecord(record({enabled: false, status: 'paused'})), NOW), null);
+    assert.equal(statusLine(null, NOW), null);
+    for (const text of Object.values(MESSAGES))
+        assert.ok(/^[\x20-\x7e]+$/.test(text) && text.length < 100, text);
+});
+
+test('refreshDelaySeconds: 15 min, 3 near a limit, 30 s when unreachable, never inside a backoff', () => {
+    assert.equal(refreshDelaySeconds(null, NOW), 900);
+    assert.equal(refreshDelaySeconds(parseRecord(record({}, [win('session', 5)])), NOW), 900);
+    assert.equal(refreshDelaySeconds(parseRecord(record({}, [win('session', 95)])), NOW), 180);
+    assert.equal(refreshDelaySeconds(parseRecord(record({status: 'unreachable'})), NOW), 30);
+    // The service's own backoff wins.
+    assert.equal(refreshDelaySeconds(parseRecord(record({status: 'rate-limited', nextAt: NOW + 20 * MIN})), NOW), 1200);
+    assert.equal(refreshDelaySeconds(parseRecord(record({status: 'unreachable', nextAt: NOW + 5_000})), NOW), 30);
+    // Plan limits off: the slow default, never faster than 15 s.
+    assert.equal(refreshDelaySeconds(parseRecord(record({enabled: false})), NOW), 900);
+    for (const r of [null, parseRecord(record({status: 'unreachable'}))])
+        assert.ok(refreshDelaySeconds(r, NOW) >= 15);
+});
+
+test('shouldRefreshOnOpen: when on and last asked over 2 min ago and not in a backoff, or the record has not caught up', () => {
+    const at = over => parseRecord(record(over));
+    assert.equal(shouldRefreshOnOpen(at({probedAt: NOW - 3 * MIN}), NOW, true), true);
+    assert.equal(shouldRefreshOnOpen(at({probedAt: NOW - MIN}), NOW, true), false);
+    assert.equal(shouldRefreshOnOpen(at({probedAt: NOW - 3 * MIN, nextAt: NOW + 1}), NOW, true), false);
+    // The setting is on but the record says off, or there is none yet: ask.
+    assert.equal(shouldRefreshOnOpen(at({enabled: false, probedAt: 1}), NOW, true), true);
+    assert.equal(shouldRefreshOnOpen(null, NOW, true), true);
+    // The setting is off: never.
+    assert.equal(shouldRefreshOnOpen(at({probedAt: 1}), NOW, false), false);
+    assert.equal(shouldRefreshOnOpen(null, NOW, false), false);
+    assert.equal(shouldRefreshOnOpen(null, NOW), true, 'on by default');
+});

@@ -7,6 +7,7 @@ mod notify;
 #[cfg(test)]
 mod scan_tests;
 mod style;
+mod terminal;
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -19,10 +20,9 @@ use style::TagColors;
 use vexos_ai_core::{Agent, Config, Decision, Error, Session};
 use vexos_ai_viewmodel::{
     AGENT_FILE, Answer, ApprovalCard, CARD_LIMIT, Composer, Conversation, DiffLine,
-    EXTENSION_BUS_NAME, Empty, Item, Offer, Outgoing, PANEL_SETTINGS_FILE, PanelSettings,
-    Placement, Proposal, Sent, Startup, State, USAGE_LOCK, Via, WINDOW_MODE_KEY, WINDOW_SCHEMA,
-    WindowMode, agent_label, docked_layout, markdown, mode_label, saved_agent, since_process_start,
-    window_look,
+    EXTENSION_BUS_NAME, Empty, Item, Offer, Outgoing, Placement, Proposal, STARTERS, Sent, Startup,
+    State, Via, WINDOW_MODE_KEY, WINDOW_SCHEMA, WindowMode, agent_label, docked_layout, markdown,
+    mode_label, saved_agent, since_process_start, starter, window_look,
 };
 
 const APP_ID: &str = "io.github.victorytek.VexosAssistant";
@@ -31,16 +31,9 @@ const WORKDIR: &str = "/etc/nixos";
 /// The agent starts after the window's first frame, because its start takes
 /// CPU the first frame needs; or after this long if no frame ever comes.
 const START_DEADLINE: Duration = Duration::from_secs(3);
-
-/// The panel's own settings, read once; the file is never written.
-fn panel_settings() -> PanelSettings {
-    static SETTINGS: OnceLock<PanelSettings> = OnceLock::new();
-    *SETTINGS.get_or_init(|| {
-        std::fs::read_to_string(glib::user_config_dir().join(PANEL_SETTINGS_FILE))
-            .map(|text| PanelSettings::parse(&text))
-            .unwrap_or_default()
-    })
-}
+/// Closing the window hides it and keeps the session warm, so the next open is
+/// instant. A window left hidden this long ends its session and the app exits.
+const HIDDEN_LIMIT: Duration = Duration::from_secs(10 * 60);
 
 thread_local! {
     /// Start-up times of this process, taken by its first window. Display
@@ -114,10 +107,12 @@ fn main() -> glib::ExitCode {
         let slot = slot.clone();
         move |app| window(app, &slot).window.present()
     });
-    // For the Shell extension, over D-Bus (`org.freedesktop.Application`). It
-    // takes no parameter, so a caller can show or hide the window and nothing
-    // else. Hiding keeps the session and any pending approval as they are;
-    // only closing the window ends the session (and denies what is pending).
+    // For the Shell extension, over D-Bus (`org.freedesktop.Application`). The
+    // `toggle` action takes no parameter, so a caller can show or hide the
+    // window and nothing else. Hiding (and closing, which hides) keeps the
+    // session and any pending approval as they are; only `new-session`, the
+    // window's "End session" and the hidden-too-long timer end a session, and
+    // each denies what is pending.
     let toggle_action = gio::ActionEntry::builder("toggle")
         .activate({
             let slot = slot.clone();
@@ -125,12 +120,52 @@ fn main() -> glib::ExitCode {
                 let shown = slot.borrow().as_ref().map(|ui| ui.window.is_visible());
                 match toggle(shown) {
                     Toggle::Open | Toggle::Show => window(app, &slot).window.present(),
-                    Toggle::Hide => window(app, &slot).window.set_visible(false),
+                    Toggle::Hide => window(app, &slot).hide(),
                 }
             }
         })
         .build();
-    app.add_action_entries([toggle_action]);
+    // A starter tile: an id, mapped here to a fixed prompt that goes into the
+    // input as a draft. Nothing is sent: the user reads it and clicks Send. An
+    // id that is not a starter does nothing.
+    let draft_action = gio::ActionEntry::builder("draft")
+        .parameter_type(Some(glib::VariantTy::STRING))
+        .activate({
+            let slot = slot.clone();
+            move |app: &adw::Application, _, parameter| {
+                let Some(found) = parameter.and_then(|p| p.str()).and_then(starter) else {
+                    return;
+                };
+                let ui = window(app, &slot);
+                ui.hold_draft(found.prompt.to_owned());
+                ui.window.present();
+            }
+        })
+        .build();
+    // A fresh conversation: the session ends (denying what is pending) and a
+    // new window starts the saved agent again.
+    let new_session_action = gio::ActionEntry::builder("new-session")
+        .activate({
+            let slot = slot.clone();
+            move |app: &adw::Application, _, _| {
+                let open = slot.borrow().clone();
+                if let Some(ui) = open {
+                    ui.end();
+                }
+                window(app, &slot).window.present();
+            }
+        })
+        .build();
+    // The same assistant in a terminal, as `vexos-ai` does: fixed argv.
+    let terminal_action = gio::ActionEntry::builder("terminal")
+        .activate(|_: &adw::Application, _, _| terminal::open())
+        .build();
+    app.add_action_entries([
+        toggle_action,
+        draft_action,
+        new_session_action,
+        terminal_action,
+    ]);
     app.add_action_entries(notify::actions(&slot));
     app.run()
 }
@@ -144,12 +179,11 @@ fn window(app: &adw::Application, slot: &Slot) -> Rc<Ui> {
     let ui = Ui::build(app);
     let built = Instant::now();
     time_first_frame(&ui);
-    // Runs after the session's own close handler.
-    ui.window.connect_close_request({
+    // The window is destroyed only by `Ui::end`; the slot empties with it.
+    ui.window.connect_destroy({
         let slot = slot.clone();
         move |_| {
             slot.borrow_mut().take();
-            glib::Propagation::Proceed
         }
     });
     *slot.borrow_mut() = Some(ui.clone());
@@ -214,19 +248,20 @@ struct Ui {
     stack: gtk::Stack,
     empty_title: gtk::Label,
     empty_hint: gtk::Label,
+    /// The mark above the greeting, and the starter cards: only on the ready page.
+    empty_hero: gtk::Image,
+    starters: gtk::Box,
     empty_spinner: adw::Spinner,
+    /// Over the empty input.
+    placeholder: gtk::Label,
     scroller: gtk::ScrolledWindow,
     rows: RefCell<Vec<gtk::Widget>>,
     input: gtk::TextView,
     send: gtk::Button,
-    /// The usage line under the header. Its text is only ever the
-    /// view-model's label, and a click sends the view-model's constant
-    /// `/usage`; it has no other behaviour.
-    usage: gtk::Button,
-    /// The window is narrow: the usage line shows only the percent.
-    narrow: Cell<bool>,
-    /// Above the input while the launch `/usage` holds it (its note slides in).
-    lock_reveal: gtk::Revealer,
+    /// Runs while the window is hidden: when it fires the session ends.
+    hidden_timer: RefCell<Option<glib::SourceId>>,
+    /// `end` has run: a session that was still starting is dropped when it arrives.
+    ended: Cell<bool>,
     cancel: gtk::Button,
     /// Docked or floating, shown only with the Shell extension running. Its
     /// only action is writing `WindowMode::as_str()` to the shared setting.
@@ -262,6 +297,18 @@ impl Ui {
             .build();
         let header = adw::HeaderBar::builder().title_widget(&title).build();
         header.pack_start(&cancel);
+        // New chat, the terminal, and ending the session (closing only hides
+        // the window). Fixed entries: app actions and one window action.
+        let menu = gio::Menu::new();
+        menu.append(Some("New chat"), Some("app.new-session"));
+        menu.append(Some("Open in a terminal"), Some("app.terminal"));
+        menu.append(Some("End session"), Some("win.end"));
+        let menu_button = gtk::MenuButton::builder()
+            .icon_name("open-menu-symbolic")
+            .tooltip_text("Menu")
+            .menu_model(&menu)
+            .build();
+        header.pack_end(&menu_button);
         let dock_toggle = gtk::Button::builder()
             .visible(false)
             .focus_on_click(false)
@@ -281,10 +328,16 @@ impl Ui {
             .margin_start(16)
             .margin_end(16)
             .build();
+        // A readable column on a wide window.
+        let column = adw::Clamp::builder()
+            .maximum_size(760)
+            .tightening_threshold(560)
+            .child(&list)
+            .build();
         let scroller = gtk::ScrolledWindow::builder()
             .hscrollbar_policy(gtk::PolicyType::Never)
             .vexpand(true)
-            .child(&list)
+            .child(&column)
             .build();
         // Multi-line, so a draft shows exactly what would be sent. Enter
         // sends, Shift+Enter starts a new line.
@@ -309,7 +362,7 @@ impl Ui {
         input_scroller.add_css_class("vexos-input");
         // Until the draft is edited, Enter does not send it; the Send button does.
         let banner = adw::Banner::builder()
-            .title("Draft from a notification: review it, then click Send")
+            .title("Draft: review it, then click Send")
             .button_label("_Discard")
             .revealed(false)
             .build();
@@ -329,19 +382,23 @@ impl Ui {
             .margin_start(16)
             .margin_end(16)
             .build();
-        composer.append(&input_scroller);
+        // A hint over the empty input; it takes no clicks.
+        let placeholder = gtk::Label::builder()
+            .label("Ask about this system…")
+            .halign(gtk::Align::Start)
+            .valign(gtk::Align::Start)
+            .margin_start(14)
+            .margin_top(10)
+            .can_target(false)
+            .build();
+        placeholder.add_css_class("vexos-quiet");
+        let input_overlay = gtk::Overlay::builder()
+            .hexpand(true)
+            .child(&input_scroller)
+            .build();
+        input_overlay.add_overlay(&placeholder);
+        composer.append(&input_overlay);
         composer.append(&send);
-        let lock_note = gtk::Label::builder()
-            .label("Checking usage… The input opens when it finishes, or in 15 seconds.")
-            .wrap(true)
-            .build();
-        lock_note.add_css_class("vexos-quiet");
-        lock_note.add_css_class("caption");
-        let lock_reveal = gtk::Revealer::builder()
-            .transition_type(gtk::RevealerTransitionType::SlideUp)
-            .transition_duration(150)
-            .child(&lock_note)
-            .build();
         // The page before the first message: a spinner while the session
         // starts (the starting note stays above the input, visible whatever
         // the list shows), then which agent is ready. Plain labels only.
@@ -357,8 +414,34 @@ impl Ui {
             .build();
         let empty_title = gtk::Label::builder().wrap(true).build();
         empty_title.add_css_class("title-3");
-        let empty_hint = gtk::Label::new(Some("Ask about this system."));
+        let empty_hint =
+            gtk::Label::new(Some("Ask about this system, or start with one of these."));
         empty_hint.add_css_class("vexos-quiet");
+        let empty_hero = gtk::Image::builder()
+            .icon_name("utilities-terminal-symbolic")
+            .pixel_size(56)
+            .visible(false)
+            .build();
+        empty_hero.add_css_class("vexos-hero");
+        // The same starters as the top-bar panel: each fills the input with a
+        // draft that needs a click on Send. Wired once the window exists.
+        let starters = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(8)
+            .margin_top(16)
+            .visible(false)
+            .build();
+        let starter_buttons: Vec<(gtk::Button, &str)> = STARTERS
+            .iter()
+            .map(|s| {
+                let label = gtk::Label::builder().label(s.title).xalign(0.0).build();
+                label.add_css_class("heading");
+                let button = gtk::Button::builder().child(&label).build();
+                button.add_css_class("vexos-starter");
+                starters.append(&button);
+                (button, s.prompt)
+            })
+            .collect();
         let empty = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
             .spacing(8)
@@ -366,9 +449,11 @@ impl Ui {
             .halign(gtk::Align::Center)
             .build();
         empty.add_css_class("vexos-empty");
+        empty.append(&empty_hero);
         empty.append(&empty_spinner);
         empty.append(&empty_title);
         empty.append(&empty_hint);
+        empty.append(&starters);
         let stack = gtk::Stack::builder()
             .transition_type(gtk::StackTransitionType::Crossfade)
             .transition_duration(150)
@@ -381,26 +466,10 @@ impl Ui {
         chat.append(&stack);
         chat.append(&banner);
         chat.append(&starting_note);
-        chat.append(&lock_reveal);
         chat.append(&composer);
-
-        // The usage line: flat, under the header, and the only control that
-        // shows the full report. Shown once a Claude session exists.
-        let usage = gtk::Button::builder()
-            .label("Usage: loading")
-            .halign(gtk::Align::Center)
-            .visible(false)
-            .sensitive(false)
-            .build();
-        usage.add_css_class("flat");
-        usage.add_css_class("caption");
-        usage.add_css_class("numeric");
-        usage.add_css_class("vexos-quiet");
-        usage.add_css_class("vexos-usage");
 
         let content = adw::ToolbarView::new();
         content.add_top_bar(&header);
-        content.add_top_bar(&usage);
         content.set_content(Some(&chat));
 
         let window = adw::ApplicationWindow::builder()
@@ -408,7 +477,6 @@ impl Ui {
             .title("VexOS Assistant")
             .default_width(760)
             .default_height(820)
-            // A breakpoint needs a minimum size.
             .width_request(360)
             .height_request(400)
             .content(&content)
@@ -422,14 +490,16 @@ impl Ui {
             stack,
             empty_title,
             empty_hint,
+            empty_hero,
+            starters,
             empty_spinner,
+            placeholder,
             scroller,
             rows: RefCell::new(Vec::new()),
             input,
             send,
-            usage,
-            narrow: Cell::new(false),
-            lock_reveal,
+            hidden_timer: RefCell::new(None),
+            ended: Cell::new(false),
             cancel,
             dock_toggle,
             mode_settings,
@@ -448,36 +518,23 @@ impl Ui {
             let ui = ui.clone();
             move |_| ui.submit(Via::SendButton)
         });
-        ui.usage.connect_clicked({
+        // A starter card puts its fixed prompt in the input as a draft. Nothing
+        // is sent: the user reads it and clicks Send.
+        for (button, prompt) in starter_buttons {
             let ui = ui.clone();
-            move |_| ui.check_usage()
-        });
-        // Narrow windows show only the percent.
-        if let Ok(condition) = adw::BreakpointCondition::parse("max-width: 480sp") {
-            let breakpoint = adw::Breakpoint::new(condition);
-            for narrow in [true, false] {
-                let ui = ui.clone();
-                let redraw = move |_: &adw::Breakpoint| {
-                    ui.narrow.set(narrow);
-                    ui.redraw_usage();
-                };
-                if narrow {
-                    breakpoint.connect_apply(redraw);
-                } else {
-                    breakpoint.connect_unapply(redraw);
+            button.connect_clicked(move |_| ui.hold_draft(prompt.to_owned()));
+        }
+        // The menu's "End session".
+        let end_action = gio::SimpleAction::new("end", None);
+        end_action.connect_activate({
+            let weak = Rc::downgrade(&ui);
+            move |_, _| {
+                if let Some(ui) = weak.upgrade() {
+                    ui.end();
                 }
             }
-            ui.window.add_breakpoint(breakpoint);
-        }
-        // Ages "updated N min ago". It only redraws the line.
-        let weak = Rc::downgrade(&ui);
-        glib::timeout_add_seconds_local(30, move || match weak.upgrade() {
-            Some(ui) => {
-                ui.redraw_usage();
-                glib::ControlFlow::Continue
-            }
-            None => glib::ControlFlow::Break,
         });
+        ui.window.add_action(&end_action);
         // Enter goes to the composer, which refuses it for a draft not yet
         // reviewed. Either way it never inserts a line (that would count as
         // an edit); Shift+Enter does.
@@ -582,17 +639,62 @@ impl Ui {
                 }
             });
         }
+        // The window's Close button hides it and keeps the session warm. It
+        // comes back at once, and ends only through `end`.
         ui.window.connect_close_request({
-            let ui = ui.clone();
+            let weak = Rc::downgrade(&ui);
             move |_| {
-                if let Some(unwatch) = ui.watcher.borrow_mut().take() {
-                    unwatch();
+                if let Some(ui) = weak.upgrade() {
+                    ui.hide();
                 }
-                ui.close_session();
-                glib::Propagation::Proceed
+                glib::Propagation::Stop
+            }
+        });
+        // Showing the window again cancels the hidden-too-long timer.
+        ui.window.connect_map({
+            let weak = Rc::downgrade(&ui);
+            move |_| {
+                if let Some(ui) = weak.upgrade() {
+                    ui.cancel_hidden_timer();
+                }
             }
         });
         ui
+    }
+
+    /// Hides the window and keeps everything as it is. A window hidden for
+    /// `HIDDEN_LIMIT` ends its session and the app exits.
+    fn hide(self: &Rc<Self>) {
+        self.window.set_visible(false);
+        self.cancel_hidden_timer();
+        let weak = Rc::downgrade(self);
+        let id = glib::timeout_add_local_once(HIDDEN_LIMIT, move || {
+            if let Some(ui) = weak.upgrade() {
+                ui.hidden_timer.borrow_mut().take();
+                if !ui.window.is_visible() {
+                    ui.end();
+                }
+            }
+        });
+        *self.hidden_timer.borrow_mut() = Some(id);
+    }
+
+    fn cancel_hidden_timer(&self) {
+        if let Some(id) = self.hidden_timer.borrow_mut().take() {
+            id.remove();
+        }
+    }
+
+    /// Ends the session (denying what is pending) and destroys the window.
+    /// With no other window or hold the app then exits.
+    fn end(self: &Rc<Self>) {
+        self.ended.set(true);
+        self.cancel_hidden_timer();
+        if let Some(unwatch) = self.watcher.borrow_mut().take() {
+            unwatch();
+        }
+        self.close_session();
+        self.window.destroy();
     }
 
     fn mode(&self) -> WindowMode {
@@ -657,8 +759,9 @@ impl Ui {
         if self.conversation.borrow().is_some() {
             return;
         }
+        // Plan limits live in the top-bar panel; this window never asks for them.
         let mut conversation = Conversation::new(agent)
-            .usage_on_launch(panel_settings().usage_on_launch)
+            .usage_on_launch(false)
             .window_requested(requested);
         if let Some(startup) = STARTUP.take() {
             conversation = conversation.startup(startup);
@@ -691,6 +794,13 @@ impl Ui {
         glib::spawn_future_local(async move {
             let mut events = match starting.await {
                 Ok(Ok((session, events))) => {
+                    // Ended while it was starting ("New chat" before it was
+                    // ready): the agent goes at once, and nothing is shown.
+                    if ui.ended.get() {
+                        let _guard = runtime().enter();
+                        drop(session);
+                        return;
+                    }
                     *ui.session.borrow_mut() = Some(Arc::new(session));
                     ui.with_conversation(|c| {
                         c.started();
@@ -717,26 +827,16 @@ impl Ui {
         self.session.borrow().clone()
     }
 
-    /// Runs `f` on the conversation, then redraws the items it reports. If
-    /// `f` made the session ready, the view-model hands out the launch
-    /// `/usage` (once per conversation, only right then), and it is sent.
+    /// Runs `f` on the conversation, then redraws the items it reports.
     fn with_conversation(self: &Rc<Self>, f: impl FnOnce(&mut Conversation) -> Vec<usize>) {
-        let (changed, launch) = match self.conversation.borrow_mut().as_mut() {
-            Some(c) => {
-                let changed = f(c);
-                (changed, c.take_launch_usage())
-            }
+        let changed = match self.conversation.borrow_mut().as_mut() {
+            Some(c) => f(c),
             None => return,
         };
         for index in changed {
             self.render(index);
         }
         self.refresh();
-        if let Some(out) = launch
-            && self.session().is_some()
-        {
-            self.send_prompt(out);
-        }
     }
 
     /// Fills the input from the composer.
@@ -757,7 +857,7 @@ impl Ui {
     /// The input has text and a draft arrived: replace, add below, or keep.
     fn ask_placement(self: &Rc<Self>) {
         let dialog = adw::AlertDialog::new(
-            Some("Use the draft from the notification?"),
+            Some("Use this draft?"),
             Some(
                 "The input already has text. Replace it with the draft, add the draft below it, \
                  or keep your text and drop the draft. Nothing is sent either way.",
@@ -797,27 +897,8 @@ impl Ui {
         }
     }
 
-    /// A click on the usage line: the view-model decides, and its message is
-    /// the constant `/usage`, shown with its full reply. The input is left as
-    /// it is: with a session and a message, `send_prompt` sends rather than
-    /// restoring, and a refused `/usage` is never handed back to the input
-    /// (`turn_ended`).
-    fn check_usage(self: &Rc<Self>) {
-        if self.session().is_none() {
-            return;
-        }
-        let out = self
-            .conversation
-            .borrow()
-            .as_ref()
-            .and_then(Conversation::check_usage);
-        if let Some(out) = out {
-            self.send_prompt(out);
-        }
-    }
-
     /// The one place a prompt goes to the agent, with an `Outgoing` from the
-    /// composer or the view-model's `/usage`.
+    /// composer.
     fn send_prompt(self: &Rc<Self>, out: Outgoing) {
         let sent = match self.session() {
             Some(_) => self
@@ -835,19 +916,10 @@ impl Ui {
         };
         let text = out.into_text();
         self.show_input();
-        match sent {
-            Sent::Shown(index) => self.render(index),
-            // The launch `/usage` holds the input for at most `USAGE_LOCK`;
-            // then the input opens and the turn keeps running.
-            Sent::Hidden => {
-                let ui = self.clone();
-                glib::timeout_add_local_once(USAGE_LOCK, move || {
-                    if let Some(c) = ui.conversation.borrow_mut().as_mut() {
-                        c.release_usage_lock();
-                    }
-                    ui.refresh();
-                });
-            }
+        // Only the composer makes a message, and the conversation shows it; a
+        // message that is not shown does not come from here.
+        if let Sent::Shown(index) = sent {
+            self.render(index);
         }
         self.refresh();
         let turn = runtime().spawn(async move { session.prompt(&text).await });
@@ -928,7 +1000,6 @@ impl Ui {
             .set_subtitle(&format!("{} · {state}", agent_label(c.agent())));
         self.input.set_sensitive(c.can_send());
         self.send.set_sensitive(c.can_send());
-        self.lock_reveal.set_reveal_child(c.usage_locked());
         let note = c.starting_note(self.composer.borrow().waiting());
         self.starting_note.set_label(note.as_deref().unwrap_or(""));
         self.starting_note.set_visible(note.is_some());
@@ -943,33 +1014,12 @@ impl Ui {
         let ready = matches!(empty, Some(Empty::Ready(_)));
         self.empty_title.set_visible(ready);
         self.empty_hint.set_visible(ready);
+        self.empty_hero.set_visible(ready);
+        self.starters.set_visible(ready);
+        self.placeholder
+            .set_visible(self.composer.borrow().text().is_empty());
         self.title.set_tooltip_text(c.launch_summary().as_deref());
         self.cancel.set_sensitive(c.turn_running());
-        self.show_usage(c);
-    }
-
-    /// The usage line from the view-model: its label, accessible name,
-    /// tooltip and state. Nothing else sets its text.
-    fn show_usage(&self, c: &Conversation) {
-        let line = c.usage_button(Instant::now());
-        let text = if self.narrow.get() {
-            line.narrow
-        } else {
-            line.wide
-        };
-        self.usage.set_label(&text);
-        self.usage
-            .update_property(&[gtk::accessible::Property::Label(&text)]);
-        self.usage.set_tooltip_text(Some(line.tooltip));
-        self.usage.set_visible(line.visible);
-        self.usage.set_sensitive(line.enabled);
-    }
-
-    /// Redraws only the usage line: for its age and the window width.
-    fn redraw_usage(&self) {
-        if let Some(c) = self.conversation.borrow().as_ref() {
-            self.show_usage(c);
-        }
     }
 
     fn render(self: &Rc<Self>, index: usize) {
@@ -1004,13 +1054,20 @@ impl Ui {
                 label.add_css_class("vexos-user");
                 label.upcast()
             }
-            Item::Agent(text) => reply(text, &TagColors::of(&self.window)).upcast(),
+            Item::Agent(text) => {
+                let card = gtk::Box::new(gtk::Orientation::Vertical, 0);
+                card.add_css_class("vexos-agent");
+                card.append(&reply(text, &TagColors::of(&self.window)));
+                card.upcast()
+            }
             Item::Tool(card) => {
                 let name = card.name();
                 let status = c.tool_status(card);
                 let label = text_label(&format!("{name} — {status}"));
                 label.add_css_class("vexos-quiet");
                 label.add_css_class("caption");
+                label.add_css_class("vexos-tool");
+                label.set_halign(gtk::Align::Start);
                 label.upcast()
             }
             Item::Notice(text) => {
@@ -1040,7 +1097,12 @@ impl Ui {
         frame.append(&inner);
         let heading = text_label(&format!("Approve: {}", card.title));
         heading.add_css_class("heading");
-        inner.append(&heading);
+        let warn = gtk::Image::from_icon_name("dialog-warning-symbolic");
+        warn.add_css_class("vexos-warn");
+        let head = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        head.append(&warn);
+        head.append(&heading);
+        inner.append(&head);
         inner.append(&proposal(&card.proposal, colors));
 
         let buttons = card.buttons();

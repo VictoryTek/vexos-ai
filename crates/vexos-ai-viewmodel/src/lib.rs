@@ -32,7 +32,12 @@
 //!   running.
 //! - The usage line shows the 5-hour limit read by a strict parser from a
 //!   `/usage` reply, or "unknown". It is display text only: never sent,
-//!   logged or stored, and nothing else depends on it.
+//!   logged or stored, and nothing else depends on it. The assistant window no
+//!   longer uses it (plan limits moved to the top-bar panel, fed by the usage
+//!   service); the helper crate still does.
+//! - A starter ([`STARTERS`]) is an id with a fixed prompt. The top-bar panel
+//!   sends only the id; the prompt goes into the input as a draft, and only a
+//!   click on Send sends it.
 
 mod composer;
 mod conversation;
@@ -42,6 +47,7 @@ mod markdown;
 mod notify;
 mod proposal;
 mod redact;
+mod starters;
 mod usage;
 mod window;
 
@@ -59,6 +65,7 @@ pub use diagnose::{
 pub use markdown::{Block, BlockKind, Run, Style, blocks, markdown};
 pub use notify::{Crashes, FailedUnits, SETTINGS_FILE, Settings};
 pub use proposal::{DiffLine, Proposal, line_diff};
+pub use starters::{STARTERS, Starter, starter};
 pub use usage::{
     CLICK_TOOLTIP, Disabled, FiveHour, PANEL_SETTINGS_FILE, PanelSettings, USAGE_LOCK, UsageButton,
     five_hour, freshness, tooltip,

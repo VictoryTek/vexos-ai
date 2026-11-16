@@ -1,0 +1,22 @@
+[package]
+name = "vexos-ai-usage"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT"
+description = "VexOS usage service: reads Claude's plan limits for the top-bar panel, on request, and writes numbers only"
+
+[dependencies]
+serde_json = "1"
+# Blocking HTTPS with rustls (ring) and the bundled web PKI roots. No
+# compression, cookies, proxies or JSON helpers: one GET with two headers.
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+
+# The D-Bus service is Linux only; the library builds and tests anywhere.
+[target.'cfg(target_os = "linux")'.dependencies]
+gio = "0.22"
+glib = "0.22"
+
+[[bin]]
+name = "vexos-ai-usage"
+path = "src/main.rs"

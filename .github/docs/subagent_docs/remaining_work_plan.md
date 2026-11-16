@@ -46,7 +46,7 @@ Put this file at `.github/docs/subagent_docs/remaining_work_plan.md`. Claude Cod
 - Nothing is auto-approved. Timeouts, cancels, closes and disconnects deny.
 - `Composer::submit` is the only way user-typed text is sent. `check_usage` is the only other sender and sends only the constant `/usage`. Notification drafts need a Send click.
 - Agent text is untrusted. It never becomes markup, a command, a path or a setting.
-- Nothing in the repo reads Claude's login file or token or calls private endpoints.
+- Nothing in the repo reads Claude's login file or token or calls private endpoints, **except the usage service** (`crates/vexos-ai-usage`, added 2026-11-16 at the user's request, opt-in, off by default; see `docs/contract.md`, "Usage service"). The CLI, the window and the extension still never do.
 - The panel never runs a command that applies system changes. Applying changes stays a terminal action: `just rebuild`.
 - The managed policy (nix/policy.nix) only changes through an item that says so.
 - An approval request whose card would show more than 16 KiB (counted after escaping) is denied at once and cannot be approved in the panel. Its content is never shown, not even cut. (B3b)

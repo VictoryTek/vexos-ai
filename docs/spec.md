@@ -3,6 +3,13 @@
 > **2026-10-31: OpenCode was removed.** Claude Code is the only assistant. Every OpenCode
 > statement below is history and superseded; `docs/contract.md` is current.
 
+> **2026-11-16: a top-bar panel, a usage service and a warm window.** The Shell
+> extension gained a top-bar icon with a quick panel (plan limits, starter tasks);
+> a new opt-in service, `vexos-ai-usage`, reads Claude's plan limits for it (this
+> reverses the 2026-10-27 removal of the token probe, for that service only); the
+> assistant window lost its usage line and now hides on close, keeping the session
+> warm for 10 minutes. See `docs/contract.md`, "Usage service".
+
 Status: **decided 2026-10-06** (A: VexPortal deep link · B: Rust, Phase 1 in bash ·
 C: both agents ask · D: top-bar extension last). Phases 0 and 1 done; Phase 2 next.
 

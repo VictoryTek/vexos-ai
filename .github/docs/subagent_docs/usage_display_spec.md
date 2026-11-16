@@ -902,3 +902,15 @@ raw reply bytes or the line on screen.
 
 Weekly limits, cost, tokens, bars, and any other figure from `/usage`. The
 `Event::Usage` context line stays separate and unapproved.
+
+## Update 2026-11-16: usage moved to the top-bar panel
+
+Decision (the user's): plan limits (Session and Weekly) now live in the top-bar
+panel, fed by a new opt-in service, `vexos-ai-usage`, that reads Claude Code's
+saved sign-in and calls Anthropic's usage endpoint. This **reverses** the
+2026-10-27 removal of the token probe (section 3.3), for that one service only.
+The assistant window no longer shows a usage line, sends no hidden `/usage`
+turn and no longer locks its input for up to 15 s. The CLI is unchanged: no
+network, no credentials. See "Usage service" in `docs/contract.md`. The
+viewmodel's `/usage` parser and `Conversation::check_usage` stay, because the
+helper crate still builds on them; they are dead code in the window.

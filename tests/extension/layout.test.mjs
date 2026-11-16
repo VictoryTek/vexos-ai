@@ -1,7 +1,7 @@
 // Run with: node --test tests/extension/layout.test.mjs   (EXT=<dir> to test a built copy)
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {readFileSync} from 'node:fs';
+import {readFileSync, readdirSync} from 'node:fs';
 import {join, resolve} from 'node:path';
 import {pathToFileURL} from 'node:url';
 
@@ -91,29 +91,115 @@ test('normalSize: the first-show size, unless it is already the docked size', ()
 const sources = ['extension.js', 'layout.js'].map(f => [f, readFileSync(join(dir, f), 'utf8')]);
 const code = text => text.split('\n').filter(l => !l.trim().startsWith('//')).join('\n');
 
-test('source scan: the extension carries no agent text', () => {
-    for (const [name, text] of sources) {
-        for (const word of ['get_title', 'Subprocess', 'spawn', 'Gio.File', 'Clipboard',
-            'Notification', 'Eval', 'GLib.file_get_contents', 'read_bytes'])
-            assert.ok(!code(text).includes(word), `${name}: ${word}`);
+// Every module of the extension, by name.
+const modules = ['extension.js', 'layout.js', 'indicator.js', 'usage_view.js', 'usage_store.js',
+    'bus.js', 'starters.js'];
+const all = Object.fromEntries(modules.map(f => [f, code(readFileSync(join(dir, f), 'utf8'))]));
+
+test('the extension is exactly these modules', () => {
+    const present = readdirSync(dir).filter(f => f.endsWith('.js')).sort();
+    assert.deepEqual(present, [...modules].sort());
+});
+
+test('source scan: the extension carries no agent text, starts nothing and runs no code', () => {
+    for (const [name, text] of Object.entries(all)) {
+        for (const word of ['get_title', 'Subprocess', 'spawn', 'Clipboard', 'Notification',
+            'Eval', 'GLib.file_get_contents', 'read_bytes', 'eval(', 'Function(', 'GLib.spawn'])
+            assert.ok(!text.includes(word), `${name}: ${word}`);
     }
 });
 
-test('source scan: one D-Bus call, to the app toggle action, with no parameter', () => {
+test('source scan: only usage_store.js touches the file system, and it only reads one file', () => {
+    for (const [name, text] of Object.entries(all)) {
+        if (name === 'usage_store.js')
+            continue;
+        for (const word of ['Gio.File', 'load_contents', 'replace_contents', 'FileMonitor',
+            'monitor_file', 'file_set_contents', 'GLib.mkdir', 'GLib.unlink', 'GLib.rename',
+            'GLib.get_user_state_dir'])
+            assert.ok(!text.includes(word), `${name}: ${word}`);
+    }
+    const store = all['usage_store.js'];
+    for (const word of ['replace', 'create', 'delete', 'append_to', 'copy', 'move', 'trash', 'set_contents'])
+        assert.ok(!new RegExp(`\\b\\w*\\.${word}\\w*\\(`).test(store), `usage_store.js: ${word}`);
+    assert.deepEqual([...store.matchAll(/new_for_path\(/g)].length, 1);
+    assert.ok(store.includes("'vexos-ai', 'usage.json'"));
+});
+
+test('source scan: the window toggle is the only D-Bus call in extension.js, with no parameter', () => {
     const ext = code(sources[0][1]);
     assert.equal(ext.match(/\.call\(/g).length, 1);
     assert.ok(ext.includes("'ActivateAction', new GLib.Variant('(sava{sv})', ['toggle', [], {}])"));
 });
 
-test('source scan: only the two known settings keys are used, and set is never called', () => {
-    const ext = code(sources[0][1]);
-    assert.ok(!/\.set_\w+\(/.test(ext), 'the extension never writes a setting');
-    assert.deepEqual([...ext.matchAll(/(?:SHORTCUT|MODE_KEY) = '([^']+)'/g)].map(m => m[1]).sort(),
-        ['toggle-assistant', 'window-mode']);
+test('source scan: bus.js makes one kind of call, and only these actions', () => {
+    const bus = all['bus.js'];
+    // One call site: ActivateAction on an app id.
+    assert.equal(bus.match(/\.call\(/g).length, 1);
+    assert.ok(bus.includes("'org.freedesktop.Application',\n            'ActivateAction'"));
+    assert.ok(bus.includes("new GLib.Variant('(sava{sv})', [action, parameter, {}])"));
+    // The actions, their targets and their parameters.
+    const used = [...bus.matchAll(/this\._activate\((\w+), (\w+), ([^,]+), (\[[^\]]*\]|\[new GLib\.Variant\('s', id\)\])\)/g)]
+        .map(m => `${m[1]} ${m[3].trim()} ${m[4]}`).sort();
+    assert.deepEqual(used, [
+        "APP_ID 'draft' [new GLib.Variant('s', id)]",
+        "APP_ID 'new-session' []",
+        "APP_ID 'terminal' []",
+        "USAGE_ID force ? 'refresh-now' : 'refresh' []",
+    ].sort());
+    // A draft goes out only for a known starter id.
+    assert.ok(/draft\(id\) \{\s+if \(!isStarter\(id\)\)\s+return;/.test(bus));
+    // The two target app ids.
+    assert.deepEqual([...bus.matchAll(/const (\w+_ID) = '([^']+)'/g)].map(m => `${m[1]}=${m[2]}`), [
+        'APP_ID=io.github.victorytek.VexosAssistant',
+        'USAGE_ID=io.github.victorytek.VexosAssistant.Usage',
+    ]);
 });
 
-test('source scan: layout.js imports nothing', () => {
-    assert.ok(!/^\s*import\b/m.test(code(sources[1][1])));
+test('source scan: no other module calls D-Bus', () => {
+    for (const [name, text] of Object.entries(all)) {
+        if (name === 'extension.js' || name === 'bus.js')
+            continue;
+        assert.ok(!text.includes('Gio.DBus') && !/\.call\(/.test(text) && !text.includes('call_sync'),
+            name);
+    }
+});
+
+test('source scan: the known settings keys, and the one setting the extension writes', () => {
+    const ext = all['extension.js'];
+    assert.ok(!/\.set_\w+\(/.test(ext), 'extension.js never writes a setting');
+    assert.deepEqual([...ext.matchAll(/(?:SHORTCUT|MODE_KEY) = '([^']+)'/g)].map(m => m[1]).sort(),
+        ['toggle-assistant', 'window-mode']);
+    // The panel's consent switch is written in indicator.js and nowhere else, as
+    // a boolean from the user's own click.
+    for (const [name, text] of Object.entries(all)) {
+        const sets = [...text.matchAll(/\.set_\w+\(([^)]*)\)/g)].map(m => m[0]);
+        if (name !== 'indicator.js') {
+            assert.deepEqual(sets.filter(s => /set_(boolean|string|strv|int|value)/.test(s)), [], name);
+            continue;
+        }
+        const writes = sets.filter(s => /set_(boolean|string|strv|int|value)\(/.test(s));
+        assert.equal(writes.length, 2, writes.join('\n'));
+        for (const w of writes)
+            assert.ok(/^\.set_boolean\(USAGE_KEY, (true|false)\)$/.test(w), w);
+    }
+    assert.ok(all['indicator.js'].includes("const USAGE_KEY = 'usage-enabled';"));
+});
+
+test('source scan: the pure modules import nothing', () => {
+    for (const name of ['layout.js', 'usage_view.js', 'starters.js'])
+        assert.ok(!/^\s*import\b/m.test(all[name]), name);
+});
+
+test('source scan: the top-bar button is added once and gives right and middle click their jobs', () => {
+    const ind = all['indicator.js'];
+    // Shell 50 opens the menu from a click gesture: left stays the menu's, and
+    // right and middle are gestures of our own.
+    assert.ok(ind.includes('this._clickGesture?.set_required_button(Clutter.BUTTON_PRIMARY);'));
+    assert.ok(!ind.includes('vfunc_event'));
+    assert.ok(/_addGesture\(Clutter\.BUTTON_SECONDARY, \(\) => \{\s+this\.menu\.close\(\);\s+this\._onToggleWindow\(\);/.test(ind));
+    assert.ok(/_addGesture\(Clutter\.BUTTON_MIDDLE, \(\) => \{\s+if \(this\._enabled\(\)\)\s+this\._bus\.refreshUsage\(true\);/.test(ind));
+    assert.ok(ind.includes('new Clutter.ClickGesture({required_button: button})'));
+    assert.equal(all['extension.js'].match(/addToStatusArea\(/g).length, 1);
 });
 
 test('slide: about 250 ms, ease-out, and a fallback that outlasts the slide start', () => {

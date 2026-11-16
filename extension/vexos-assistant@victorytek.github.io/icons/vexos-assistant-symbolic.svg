@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
+  <!-- A robot head: antenna, rounded head with two eyes cut out, and ear pads. -->
+  <path fill="#bebebe" fill-rule="evenodd" d="M7 1h2v2h2.5A2.5 2.5 0 0 1 14 5.5V11a2.5 2.5 0 0 1-2.5 2.5h-7A2.5 2.5 0 0 1 2 11V5.5A2.5 2.5 0 0 1 4.5 3H7V1zM5 6.25a1.25 1.25 0 1 0 0 2.5 1.25 1.25 0 0 0 0-2.5zm6 0a1.25 1.25 0 1 0 0 2.5 1.25 1.25 0 0 0 0-2.5zM5.5 10.5a.5.5 0 0 0 0 1h5a.5.5 0 0 0 0-1h-5z"/>
+  <path fill="#bebebe" d="M0 6h1v4H0zm15 0h1v4h-1z"/>
+</svg>

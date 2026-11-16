@@ -138,19 +138,68 @@ released VexPortal did) must stop trusting it. They are harmless leftovers.
 
 ## Credentials and the network
 
-- **No network.** The CLI makes no network request. Nothing in it calls
+- **The CLI: no network.** The CLI makes no network request. Nothing in it calls
   `api.anthropic.com` or any other endpoint, and `curl` is not one of its
-  runtime inputs. The usage probe (a timer that read the login token and called
-  Anthropic's undocumented OAuth usage endpoint) is removed. A caller that wants
-  usage asks the agent itself: the assistant panel shows the 5-hour line that
-  Claude Code's own `/usage` reports.
-- **No credentials.** Nothing in this repo opens Claude's login file
-  (`.credentials.json`): not the CLI, the module, the panel or the spike
-  scripts. `credentials.bats` fails if any script or module names it. The
+  runtime inputs. The old usage probe (a timer in the CLI that read the login
+  token) stays removed.
+- **The CLI: no credentials.** The CLI, the module, the assistant window, the
+  Shell extension and the spike scripts never open Claude's login file
+  (`.credentials.json`). `credentials.bats` fails if any of them names it. The
   CLI does not read, copy, move or delete credentials, and never runs a
   sign-in. A token is never printed, logged, sent anywhere or written to any
   file; a test plants one and greps every output and every file under `HOME`
   for it.
+- **The one exception: the usage service** (below). Exactly one source file in
+  the repo, `crates/vexos-ai-usage/src/credentials.rs`, opens the login file,
+  and only after the user has switched plan limits on.
+
+## Usage service
+
+`vexos-ai-usage` (`crates/vexos-ai-usage`) gives the top-bar panel Claude's
+plan limits (Session, Weekly and any model-scoped windows). It is not part of
+the CLI and has no argv contract: it is a D-Bus activated program that the
+Shell extension asks by calling the `refresh` or `refresh-now` action of
+`io.github.victorytek.VexosAssistant.Usage`. It exits after 30 s idle.
+
+- **Off until the user says so.** The GSettings key `usage-enabled` (schema
+  `org.gnome.shell.extensions.vexos-assistant`, default `false`) is read
+  before anything else. A missing schema or key means off. Off reads no file and
+  makes no request, and the record is cleared. The panel's "Show plan limits"
+  button is the only thing that turns it on, and says what it reads.
+- **What it reads and sends.** On, it reads the access token and plan from
+  Claude Code's saved sign-in (under `CLAUDE_CONFIG_DIR`, default `~/.claude`)
+  and the CLI's profile, and sends the token in the `Authorization` header of
+  one `GET https://api.anthropic.com/api/oauth/usage` request, with the
+  `anthropic-beta: oauth-2025-04-20` header. The host and path are constants.
+  The request is https only, follows no redirect, times out after 10 s and reads
+  at most 64 KiB. It never refreshes, rewrites or deletes the sign-in: only the
+  Claude CLI renews the token, so a lapsed one is reported ("paused" or "sign-in
+  expired"), not fixed.
+- **What it writes.** `$XDG_STATE_HOME/vexos-ai/usage.json` (mode 0600,
+  replaced atomically), schema 1: `updatedAt`, `fetchedAt`, `probedAt`,
+  `nextAt`, `failures`, `enabled`, `status`, `plan`, `stale` and `windows`
+  (`id`, `label`, `percent` 0 to 100, `resetsAt` in ms, 0 when unknown).
+  `status` is one of `ok`, `disabled`, `waiting-for-auth`, `paused`,
+  `signin-expired`, `unavailable`, `rate-limited`, `unreachable`,
+  `format-changed`. Consumers must ignore unknown keys; a new schema number is a
+  breaking change. The file never holds a token, a header, an email or other text
+  from the other side beyond a cleaned model label.
+- **Pacing.** A request is never made twice within 15 s unless forced
+  (`refresh-now`). After a 429 the service waits `Retry-After`, else 1, 2, 4 ...
+  60 minutes; a refused sign-in waits 15 minutes; nothing answering retries after
+  1 minute without counting as a failure. `refresh-now` skips that 15 s interval and the
+  15-minute wait after a refused sign-in (so signing in again takes effect at
+  once), but never any other backoff. On a failure the last numbers stay, marked `stale`; a window
+  whose reset has passed reads 0%.
+- **The token is a `Secret`.** Its `Debug` prints `[redacted]`; it has no
+  `Display`, `Clone` or serialisation, and tests plant one and check that no
+  record, file or print holds it.
+
+This is Anthropic's undocumented endpoint, the one Claude Code's own `/usage`
+uses, and Anthropic's terms restrict third-party products from offering rate
+limits. It is therefore opt-in, isolated in one crate and one file, and may stop
+working without notice (an unknown answer shows "format-changed", never a wrong
+figure).
 
 ## What the safety policy covers, and what it does not
 

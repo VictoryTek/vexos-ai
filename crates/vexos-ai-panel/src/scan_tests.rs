@@ -11,7 +11,7 @@ const MAIN: &str = include_str!("main.rs");
 const STYLE: &str = include_str!("style.rs");
 
 /// The view-model's sources, where an `Outgoing` can be made.
-const VIEWMODEL: [(&str, &str); 10] = [
+const VIEWMODEL: [(&str, &str); 11] = [
     (
         "lib.rs",
         include_str!("../../vexos-ai-viewmodel/src/lib.rs"),
@@ -51,6 +51,10 @@ const VIEWMODEL: [(&str, &str); 10] = [
     (
         "window.rs",
         include_str!("../../vexos-ai-viewmodel/src/window.rs"),
+    ),
+    (
+        "starters.rs",
+        include_str!("../../vexos-ai-viewmodel/src/starters.rs"),
     ),
 ];
 
@@ -179,35 +183,30 @@ fn the_launch_usage_is_armed_only_by_the_ready_transition() {
 }
 
 #[test]
-fn usage_is_sent_only_at_launch_and_from_its_line() {
+fn the_panel_has_no_usage_and_never_sends_the_usage_command() {
+    // Plan limits live in the top-bar panel. This window neither asks for them
+    // nor shows them, so nothing in it can send `/usage`.
     let main = code(MAIN);
-    // The launch: taken in one place, right after each call into the
-    // conversation, and sent only with a session.
-    assert_eq!(main.matches("take_launch_usage()").count(), 1);
-    let with = body("with_conversation");
-    assert!(with.contains("(changed, c.take_launch_usage())"));
-    assert!(with.contains("if let Some(out) = launch\n            && self.session().is_some()"));
-    // A click: one call, from the usage line's click handler.
-    assert_eq!(main.matches(".check_usage()").count(), 1);
-    assert!(main.contains(
-        "ui.usage.connect_clicked({\n            let ui = ui.clone();\n            move |_| ui.check_usage()\n        });"
-    ));
-    for name in [
-        "start",
-        "refresh",
-        "hold_draft",
-        "show_input",
-        "submit",
-        "show_usage",
+    for word in [
+        "check_usage",
+        "take_launch_usage",
+        "usage_button",
+        "release_usage_lock",
+        "usage_locked",
+        "usage_disabled",
+        "USAGE",
+        "five_hour",
+        "PanelSettings",
+        "PANEL_SETTINGS_FILE",
+        "lock_reveal",
+        "vexos-usage",
     ] {
-        let f = body(name);
-        assert!(
-            !f.contains(".check_usage()") && !f.contains("Conversation::check_usage"),
-            "{name}"
-        );
+        assert!(!main.contains(word), "{word:?} in main.rs");
     }
-    // Timers can't reach it: each timer's closure only redraws or releases
-    // the input lock.
+    // The conversation is built with the launch `/usage` switched off.
+    assert_eq!(main.matches(".usage_on_launch(").count(), 1);
+    assert!(main.contains(".usage_on_launch(false)"));
+    // The two timers: the agent's start deadline and the hidden-too-long limit.
     let timers: Vec<&str> = main
         .match_indices("timeout_add")
         .map(|(at, _)| {
@@ -215,8 +214,7 @@ fn usage_is_sent_only_at_launch_and_from_its_line() {
             &rest[..rest.find("});").expect("timer end")]
         })
         .collect();
-    // The two usage timers, and the deadline that starts the agent.
-    assert_eq!(timers.len(), 3);
+    assert_eq!(timers.len(), 2);
     assert_eq!(
         timers
             .iter()
@@ -224,10 +222,13 @@ fn usage_is_sent_only_at_launch_and_from_its_line() {
             .count(),
         1
     );
+    assert_eq!(
+        timers.iter().filter(|t| t.contains("HIDDEN_LIMIT")).count(),
+        1
+    );
     for timer in timers {
         for word in [
             "check_usage",
-            "take_launch_usage",
             "with_conversation",
             "send_prompt",
             "submit",
@@ -236,50 +237,10 @@ fn usage_is_sent_only_at_launch_and_from_its_line() {
             assert!(!timer.contains(word), "{word:?} in a timer: {timer}");
         }
     }
-    // The separate "Check usage" button is gone: the line is the only control.
-    assert!(!main.contains("\"Check usage\""));
-    assert!(!main.contains("composer.append(&usage)"));
-    assert!(main.contains("content.add_top_bar(&usage);"));
-    assert_eq!(main.matches("ui.usage.connect_").count(), 1);
-}
-
-#[test]
-fn the_usage_label_comes_only_from_the_parser() {
-    let main = code(MAIN);
-    // The line's text is set in one place, from the view-model's label.
-    assert_eq!(main.matches("self.usage.set_label(").count(), 1);
-    let show = body("show_usage");
-    assert!(show.contains("let line = c.usage_button(Instant::now());"));
-    assert!(show.contains("self.usage.set_label(&text);"));
-    assert!(show.contains("update_property(&[gtk::accessible::Property::Label(&text)])"));
-    // In the view-model, a figure exists only from the parser.
-    let (_, conversation) = VIEWMODEL[2];
-    let (_, usage) = VIEWMODEL[8];
-    let mut known = Vec::new();
-    let mut parsed = Vec::new();
-    for (name, file) in VIEWMODEL {
-        let code = shipped(file);
-        known.extend(code.matches("Shown::Known(").map(|_| name));
-        parsed.extend(code.matches("FiveHour {").map(|_| name));
-    }
-    assert_eq!(known, ["conversation.rs", "usage.rs"]);
-    assert_eq!(parsed, ["usage.rs", "usage.rs"]);
-    assert!(vm_body(conversation, "record_usage").contains("reply.and_then(five_hour)"));
-    assert!(vm_body(usage, "five_hour").contains("Some(FiveHour {"));
-}
-
-#[test]
-fn the_usage_click_sends_only_the_view_models_message() {
-    // It sends the view-model's message as is, and never touches the input.
-    let f = body("check_usage");
-    assert!(f.starts_with("fn check_usage(self: &Rc<Self>)"));
-    // Without a session, `send_prompt` would put the text in the input.
-    assert!(f.contains("if self.session().is_none() {\n            return;\n        }"));
-    assert!(f.contains(".and_then(Conversation::check_usage);"));
-    assert!(f.contains("self.send_prompt(out);"));
-    for word in ["composer", "input", "text", "submit", "format!"] {
-        assert!(!f.contains(word), "{word:?} in check_usage");
-    }
+    assert!(
+        !include_str!("style.css").contains("usage"),
+        "usage in style.css"
+    );
 }
 
 #[test]
@@ -292,15 +253,11 @@ fn prompts_go_out_only_through_the_composer() {
     assert!(send.starts_with("fn send_prompt(self: &Rc<Self>, out: Outgoing)"));
     assert!(send.contains("let text = out.into_text();"));
     assert!(send.contains("session.prompt(&text)"));
-    // `send_prompt` is called only by `submit`, with what the composer let
-    // out, and with the view-model's `/usage`: by `check_usage` on a click,
-    // and by `with_conversation` at launch.
-    assert_eq!(main.matches("send_prompt(").count(), 4);
+    // `send_prompt` is called only by `submit`, with what the composer let out.
+    assert_eq!(main.matches("send_prompt(").count(), 2);
     let submit = body("submit");
     assert!(submit.contains("self.composer.borrow_mut().submit(via, can_send)"));
     assert!(submit.contains("self.send_prompt(out)"));
-    assert!(body("check_usage").contains("self.send_prompt(out)"));
-    assert!(body("with_conversation").contains("self.send_prompt(out)"));
     // And `submit` only by the Send button and the Enter key.
     assert_eq!(main.matches(".submit(Via::SendButton)").count(), 1);
     assert_eq!(main.matches(".submit(Via::EnterKey)").count(), 1);
@@ -716,4 +673,90 @@ fn the_agent_starts_after_the_first_frame_or_at_the_deadline_and_never_twice() {
     // ... and it is given the id to disconnect, or `take()` finds nothing.
     assert_eq!(hook.matches("handler.set(Some(id))").count(), 1);
     assert!(main.contains("const START_DEADLINE: Duration = Duration::from_secs(3);"));
+}
+
+const TERMINAL: &str = include_str!("terminal.rs");
+
+#[test]
+fn the_extension_can_only_fill_the_input_start_over_or_open_a_terminal() {
+    let main = code(MAIN);
+    // The app actions, all of them: the window toggle, a starter's draft, a
+    // fresh conversation and the terminal. (The notification actions are in
+    // notify.rs.)
+    assert_eq!(main.matches("gio::ActionEntry::builder(").count(), 4);
+    for name in ["toggle", "draft", "new-session", "terminal"] {
+        assert!(
+            main.contains(&format!("gio::ActionEntry::builder(\"{name}\")")),
+            "{name}"
+        );
+    }
+    // A draft: a known starter's fixed prompt goes into the input as a draft,
+    // which needs a click on Send. Nothing is sent from here.
+    let from = main
+        .find("gio::ActionEntry::builder(\"draft\")")
+        .expect("draft action");
+    let draft = &main[from..from + main[from..].find(".build();").expect("its end")];
+    assert!(draft.contains(".and_then(starter)"));
+    assert!(draft.contains("ui.hold_draft(found.prompt.to_owned());"));
+    for word in ["submit", "send_prompt", "prompt(", "Outgoing", "session"] {
+        assert!(!draft.contains(word), "{word:?} in the draft action");
+    }
+    // The terminal: one constant program, no arguments, no shell.
+    let terminal = code(TERMINAL);
+    assert_eq!(terminal.matches("Subprocess::newv(").count(), 1);
+    assert!(terminal.contains("const PROGRAM: &str = \"vexos-ai\";"));
+    assert!(terminal.contains("&[OsStr::new(PROGRAM)]"));
+    for word in [
+        "format!",
+        "String",
+        "args",
+        "\"-c\"",
+        "sh ",
+        "spawn_command_line",
+        "Command::new",
+        "env",
+    ] {
+        assert!(!terminal.contains(word), "{word:?} in terminal.rs");
+    }
+    assert!(main.contains(".activate(|_: &adw::Application, _, _| terminal::open())"));
+    // Nothing else in main.rs starts a process.
+    assert!(!main.contains("Subprocess") && !main.contains("Command::new"));
+}
+
+#[test]
+fn closing_the_window_hides_it_and_only_end_destroys_it() {
+    let main = code(MAIN);
+    // The Close button hides the window and keeps the session.
+    assert_eq!(main.matches("connect_close_request(").count(), 1);
+    let from = main.find("connect_close_request(").expect("the handler");
+    let handler = &main[from..from + main[from..].find("\n        });").expect("its end")];
+    assert!(handler.contains("ui.hide();"));
+    assert!(handler.contains("glib::Propagation::Stop"));
+    assert!(!handler.contains("Proceed") && !handler.contains("close_session"));
+    // Only `end` destroys the window, after it has denied what is pending.
+    assert_eq!(main.matches(".destroy()").count(), 1);
+    let end = body("end");
+    assert!(end.find("self.close_session();") < end.find("self.window.destroy();"));
+    assert!(end.contains("self.window.destroy();"));
+    // `end` is reached from the new-session action, the menu's "End session"
+    // and the hidden-too-long timer, nowhere else.
+    assert_eq!(main.matches(".end()").count(), 3);
+    let hide = body("hide");
+    assert!(hide.contains("HIDDEN_LIMIT") && hide.contains("if !ui.window.is_visible() {"));
+    assert!(main.contains("const HIDDEN_LIMIT: Duration = Duration::from_secs(10 * 60);"));
+    // Showing the window cancels the timer.
+    assert!(main.contains("ui.cancel_hidden_timer();"));
+}
+
+#[test]
+fn a_starter_card_only_fills_the_input() {
+    let main = code(MAIN);
+    // The card's click puts the fixed prompt in the input as a draft, which
+    // needs a click on Send. It cannot send.
+    assert!(main.contains("button.connect_clicked(move |_| ui.hold_draft(prompt.to_owned()));"));
+    assert_eq!(main.matches("hold_draft(").count(), 3); // the action, the card, the method
+    assert!(main.contains("for (button, prompt) in starter_buttons {"));
+    assert!(main.contains(".map(|s| {") && main.contains("(button, s.prompt)"));
+    // The prompts are the view-model's constants, never built here.
+    assert!(!main.contains("format!(\"{}\", s.prompt"));
 }
