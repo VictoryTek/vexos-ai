@@ -25,7 +25,8 @@
 #     `gnome-extensions enable vexos-assistant@victorytek.github.io` once
 #   - with the extension, the usage service (vexos-ai-usage): D-Bus activated,
 #     it reads Claude's plan limits for the extension's top-bar panel, and
-#     reads nothing until the user switches plan limits on in that panel
+#     reads Claude's sign-in only while plan limits are on (the default; the
+#     panel has an off link)
 { mkVexosAi, mkVexosAiPanel, mkVexosAiExtension, mkVexosAiUsage }:
 { config, lib, pkgs, ... }:
 let
@@ -216,8 +217,8 @@ in
         top-bar panel asks for plan limits: Claude's, from Claude Code's saved
         sign-in, and Codex's, from `codex app-server` (Codex's own login; this
         service never reads it). Installing it reads nothing: the service stays
-        idle, and asks only after the user turns "Show plan limits" on in the
-        panel. With `codexPackage` set, that Codex is the one it asks.
+        idle until the extension's panel asks, and asks only while plan limits
+        are on (the default; the panel has a "Turn off plan limits" link). With `codexPackage` set, that Codex is the one it asks.
       '';
     };
   };

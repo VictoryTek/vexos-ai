@@ -1,7 +1,8 @@
 //! The usage service: Claude's and Codex's plan limits for the top-bar panel.
 //!
 //! It exists so that exactly one small, tested piece of this project ever
-//! opens Claude's sign-in, and only when the user has switched plan limits on.
+//! opens Claude's sign-in, and only while plan limits are on (the default, with an
+//! off switch in the panel).
 //! It asks Anthropic's usage endpoint once per request, and writes numbers and
 //! fixed words to a private file that the Shell extension reads. See
 //! `docs/contract.md`, "Usage service".

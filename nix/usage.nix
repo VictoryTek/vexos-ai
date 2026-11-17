@@ -1,8 +1,8 @@
 # vexos-ai-usage — the usage service (crates/vexos-ai-usage): on request, it
 # reads Claude's plan limits for the top-bar panel and writes numbers to a
 # private file. D-Bus activated by the Shell extension, exits when idle, and
-# reads nothing at all until the user switches plan limits on (the extension
-# schema's `usage-enabled` key).
+# reads nothing at all while plan limits are off (the extension schema's
+# `usage-enabled` key; on by default, with an off link in the panel).
 { lib, rustPlatform, pkg-config, wrapGAppsNoGuiHook, glib, dconf }:
 
 let

@@ -93,7 +93,7 @@ const code = text => text.split('\n').filter(l => !l.trim().startsWith('//')).jo
 
 // Every module of the extension, by name.
 const modules = ['extension.js', 'layout.js', 'indicator.js', 'usage_view.js', 'usage_store.js',
-    'bus.js', 'starters.js'];
+    'bus.js', 'starters.js', 'tooltip.js'];
 const all = Object.fromEntries(modules.map(f => [f, code(readFileSync(join(dir, f), 'utf8'))]));
 
 test('the extension is exactly these modules', () => {
@@ -143,6 +143,7 @@ test('source scan: bus.js makes one kind of call, and only these actions', () =>
     assert.deepEqual(used, [
         "APP_ID 'draft' [new GLib.Variant('s', id)]",
         "APP_ID 'new-session' []",
+        "APP_ID 'prewarm' []",
         "APP_ID 'terminal' []",
         "USAGE_ID force ? 'refresh-now' : 'refresh' []",
     ].sort());
@@ -270,4 +271,27 @@ test('source scan: the extension never reads the frame position during the slide
     const armed = ext.slice(ext.indexOf('_armSlide(window, entry, actor, start) {'), ext.indexOf('_sync() {'));
     for (const word of ['get_frame_rect', 'get_buffer_rect', 'translation_y;', 'get_position'])
         assert.ok(!armed.includes(word), word);
+});
+
+test('source scan: the popup has a fixed width, every button tracks hover, and hints are fixed strings', () => {
+    const css = readFileSync(join(dir, 'stylesheet.css'), 'utf8');
+    assert.ok(/\.vexos-popup\s*\{[^}]*\bwidth:\s*\d+px/.test(css), 'the popup needs a width, not a min-width');
+    assert.ok(!/\.vexos-popup\s*\{[^}]*min-width/.test(css));
+    for (const name of ['indicator.js']) {
+        const text = all[name];
+        // Every St.Button is created with track_hover, or its :hover style never applies.
+        const buttons = [...text.matchAll(/new St\.Button\(\{([^}]*)\}\)/g)];
+        assert.ok(buttons.length >= 3, 'buttons found');
+        for (const b of buttons)
+            assert.ok(b[1].includes('track_hover: true'), b[1]);
+    }
+    // The hover hint reads and sends nothing: only the caller's text, shown.
+    const tip = all['tooltip.js'];
+    assert.ok(!/Gio\.|\.call\(|get_title|clipboard/i.test(tip));
+});
+
+test('source scan: plan limits are on by default and the panel has no opt-in button', () => {
+    assert.ok(!all['indicator.js'].includes('Show plan limits'));
+    const xml = readFileSync(join(dir, 'schemas', 'org.gnome.shell.extensions.vexos-assistant.gschema.xml'), 'utf8');
+    assert.ok(/<key name="usage-enabled" type="b">\s*<default>true<\/default>/.test(xml));
 });

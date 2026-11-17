@@ -58,7 +58,15 @@ mod service {
         glib::spawn_future_local(async move {
             loop {
                 let on = enabled();
-                let _ = gio::spawn_blocking(move || vexos_ai_usage::run(on, force)).await;
+                let done = gio::spawn_blocking(move || vexos_ai_usage::run(on, force)).await;
+                // One line for the journal, so a panel that shows nothing can
+                // be diagnosed: the switch and a fixed status word, no data.
+                let outcome = match done {
+                    Ok(Some(record)) => record.status.as_str(),
+                    Ok(None) => "no-home",
+                    Err(_) => "crashed",
+                };
+                eprintln!("vexos-ai-usage: enabled={on} force={force} status={outcome}");
                 match flight.again.take() {
                     Some(queued) => force = queued,
                     None => break,

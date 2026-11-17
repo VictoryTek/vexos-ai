@@ -151,7 +151,8 @@ released VexPortal did) must stop trusting it. They are harmless leftovers.
   for it.
 - **The one exception: the usage service** (below). Exactly one source file in
   the repo, `crates/vexos-ai-usage/src/credentials.rs`, opens the login file,
-  and only after the user has switched plan limits on.
+  and only while plan limits are on (the default; the panel has a "Turn off plan
+  limits" link).
 
 ## Usage service
 
@@ -161,11 +162,18 @@ the CLI and has no argv contract: it is a D-Bus activated program that the
 Shell extension asks by calling the `refresh` or `refresh-now` action of
 `io.github.victorytek.VexosAssistant.Usage`. It exits after 30 s idle.
 
-- **Off until the user says so.** The GSettings key `usage-enabled` (schema
-  `org.gnome.shell.extensions.vexos-assistant`, default `false`) is read
-  before anything else. A missing schema or key means off. Off reads no file and
-  makes no request, and the record is cleared. The panel's "Show plan limits"
-  button is the only thing that turns it on, and says what it reads.
+- **On by default, with an off switch.** The GSettings key `usage-enabled`
+  (schema `org.gnome.shell.extensions.vexos-assistant`, default `true`, so the
+  top-bar panel shows the numbers with no click, as Omarchy's does) is read
+  before anything else. A missing schema or key (a broken install) means off.
+  Off reads no file and makes no request, and the record is cleared. The
+  panel's "Turn off plan limits" and "Turn on plan limits" links are the only
+  things that write it. Reversed on 2026-11-17 from "off until the user switches
+  it on", at the user's request, after the first test on a VM.
+- **Diagnosable.** Each request writes one line to the journal
+  (`vexos-ai-usage: enabled=<bool> force=<bool> status=<fixed word>`), no
+  numbers, no text from the other side. With plan limits on and no record after
+  12 s, the panel says the service did not answer rather than waiting for ever.
 - **What it reads and sends.** On, it reads the access token and plan from
   Claude Code's saved sign-in (under `CLAUDE_CONFIG_DIR`, default `~/.claude`)
   and the CLI's profile, and sends the token in the `Authorization` header of
@@ -215,8 +223,8 @@ Shell extension asks by calling the `refresh` or `refresh-now` action of
 
 This is Anthropic's undocumented endpoint, the one Claude Code's own `/usage`
 uses, and Anthropic's terms restrict third-party products from offering rate
-limits. It is therefore opt-in, isolated in one crate and one file, and may stop
-working without notice (an unknown answer shows "format-changed", never a wrong
+limits. It is therefore isolated in one crate and one file, can be turned off in
+the panel, and may stop working without notice (an unknown answer shows "format-changed", never a wrong
 figure).
 
 ## What the safety policy covers, and what it does not

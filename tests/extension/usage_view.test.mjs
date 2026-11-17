@@ -227,3 +227,28 @@ test("Claude's backoff does not hold back a healthy Codex", () => {
     assert.equal(refreshDelaySeconds(alone, NOW), 3600);
     assert.equal(shouldRefreshOnOpen(alone, NOW), false);
 });
+
+test('pendingLine: checking at first, then the no-answer sentence, never an endless spinner', () => {
+    const {pendingLine, PENDING_MS, CHECKING_TEXT, NO_SERVICE_TEXT} = view;
+    assert.equal(pendingLine(NOW, 0), CHECKING_TEXT);
+    assert.equal(pendingLine(NOW, NOW), CHECKING_TEXT);
+    assert.equal(pendingLine(NOW + PENDING_MS - 1, NOW), CHECKING_TEXT);
+    assert.equal(pendingLine(NOW + PENDING_MS, NOW), NO_SERVICE_TEXT);
+    assert.equal(pendingLine(NOW + 10 * PENDING_MS, NOW), NO_SERVICE_TEXT);
+    // Bad input reads as checking, never as a crash.
+    assert.equal(pendingLine(NaN, NOW), CHECKING_TEXT);
+    assert.ok(NO_SERVICE_TEXT.length < 200 && /^[\x20-\x7e]+$/.test(NO_SERVICE_TEXT.replace(/…/g, '')));
+});
+
+test('pendingDelayMs: one redraw is scheduled for the deadline, and none after it (no timer loop)', () => {
+    const {pendingDelayMs, PENDING_MS} = view;
+    assert.equal(pendingDelayMs(NOW, 0), 0);
+    assert.equal(pendingDelayMs(NaN, NOW), 0);
+    // Just started: wait for the deadline plus a little.
+    assert.equal(pendingDelayMs(NOW, NOW), PENDING_MS + 200);
+    // The timer fires after the deadline, so the redraw it causes schedules nothing.
+    const fired = NOW + pendingDelayMs(NOW, NOW);
+    assert.equal(pendingDelayMs(fired, NOW), 0);
+    assert.equal(pendingDelayMs(NOW + PENDING_MS, NOW), 0);
+    assert.equal(pendingDelayMs(NOW + 5 * PENDING_MS, NOW), 0);
+});

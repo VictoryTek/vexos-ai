@@ -657,8 +657,9 @@ fn the_agent_starts_after_the_first_frame_or_at_the_deadline_and_never_twice() {
         close.contains("{\n        self.pending_start.set(None);\n        let Some(session)"),
         "{close}"
     );
-    // Reached from the deadline timer and the first-frame hook, nowhere else.
-    assert_eq!(main.matches("begin_start()").count(), 2);
+    // Reached from the deadline timer, the first-frame hook and the prewarm
+    // action (a window that is never shown never paints), nowhere else.
+    assert_eq!(main.matches("begin_start()").count(), 3);
     assert!(start.contains("glib::timeout_add_local_once(START_DEADLINE"));
     assert!(start.contains("ui.begin_start();"));
     let from = main.find("fn time_first_frame(").expect("hook");
@@ -681,10 +682,10 @@ const TERMINAL: &str = include_str!("terminal.rs");
 fn the_extension_can_only_fill_the_input_start_over_or_open_a_terminal() {
     let main = code(MAIN);
     // The app actions, all of them: the window toggle, a starter's draft, a
-    // fresh conversation and the terminal. (The notification actions are in
-    // notify.rs.)
-    assert_eq!(main.matches("gio::ActionEntry::builder(").count(), 4);
-    for name in ["toggle", "draft", "new-session", "terminal"] {
+    // fresh conversation, the terminal and prewarm. (The notification actions
+    // are in notify.rs.)
+    assert_eq!(main.matches("gio::ActionEntry::builder(").count(), 5);
+    for name in ["toggle", "draft", "new-session", "terminal", "prewarm"] {
         assert!(
             main.contains(&format!("gio::ActionEntry::builder(\"{name}\")")),
             "{name}"
@@ -759,4 +760,55 @@ fn a_starter_card_only_fills_the_input() {
     assert!(main.contains(".map(|s| {") && main.contains("(button, s.prompt)"));
     // The prompts are the view-model's constants, never built here.
     assert!(!main.contains("format!(\"{}\", s.prompt"));
+}
+
+#[test]
+fn prewarm_builds_the_window_unshown_and_sends_nothing() {
+    let main = code(MAIN);
+    let from = main
+        .find("gio::ActionEntry::builder(\"prewarm\")")
+        .expect("prewarm action");
+    let prewarm = &main[from..from + main[from..].find(".build();").expect("its end")];
+    // No parameter: a caller can warm the app and nothing else.
+    assert!(!prewarm.contains("parameter_type"));
+    // With a window already open it does nothing; otherwise it builds the
+    // window, starts the agent and hides it, which arms the hidden timer.
+    assert!(prewarm.contains("if slot.borrow().is_some() {"));
+    assert!(prewarm.contains("ui.begin_start();") && prewarm.contains("ui.hide();"));
+    assert!(prewarm.find("ui.begin_start();") < prewarm.find("ui.hide();"));
+    // It shows nothing and sends nothing.
+    for word in [
+        "present",
+        "submit",
+        "send_prompt",
+        "prompt(",
+        "Outgoing",
+        "hold_draft",
+        "composer",
+    ] {
+        assert!(!prewarm.contains(word), "{word:?} in the prewarm action");
+    }
+}
+
+#[test]
+fn a_streamed_reply_is_updated_in_place_and_followed_after_layout() {
+    let main = code(MAIN);
+    // Drawing a row never scrolls by itself: the list follows `upper` after
+    // layout, and only while the user is at the end.
+    let render = body("render");
+    assert!(!render.contains("set_value") && !render.contains("upper()"));
+    assert!(main.contains("adjustment.connect_upper_notify("));
+    assert!(
+        main.contains(
+            "adjustment.set_value(end_value(adjustment.upper(), adjustment.page_size()));"
+        )
+    );
+    assert!(main.contains("ui.follow.set(at_end("));
+    // A grown reply is filled into its existing view; replacing the widget
+    // would shrink the list and throw the scroll position.
+    let update = body("update");
+    assert!(update.contains("fill_reply(&view.buffer(), &text);"));
+    assert!(!update.contains("self.list.remove("));
+    // Sending asks to see the answer.
+    assert!(body("send_prompt").contains("self.follow.set(true);"));
 }

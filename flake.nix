@@ -217,15 +217,16 @@
           diff <(cd ${dir} && find . -type f | sort) <(printf '%s\n' ./bus.js ./extension.js ./icons/vexos-assistant-symbolic.svg \
             ./indicator.js ./layout.js ./metadata.json ./schemas/gschemas.compiled \
             ./schemas/org.gnome.shell.extensions.vexos-assistant.gschema.xml ./starters.js ./stylesheet.css \
-            ./usage_store.js ./usage_view.js)
+            ./tooltip.js ./usage_store.js ./usage_view.js)
           for f in ${dir}/*.js; do node --check "$f"; done
           gsettings --schemadir ${dir}/schemas list-keys org.gnome.shell.extensions.vexos-assistant \
             | grep -x toggle-assistant >/dev/null
           keys=$(gsettings --schemadir ${dir}/schemas list-keys org.gnome.shell.extensions.vexos-assistant)
           grep -qx window-mode <<<"$keys"
-          # The consent switch for plan limits: off by default, a plain boolean.
+          # The plan-limits switch: on by default (the panel shows the numbers
+          # with no click), a plain boolean the panel's off link can clear.
           grep -qx usage-enabled <<<"$keys"
-          [ "$(gsettings --schemadir ${dir}/schemas get org.gnome.shell.extensions.vexos-assistant usage-enabled)" = false ]
+          [ "$(gsettings --schemadir ${dir}/schemas get org.gnome.shell.extensions.vexos-assistant usage-enabled)" = true ]
           [ "$(gsettings --schemadir ${dir}/schemas range org.gnome.shell.extensions.vexos-assistant usage-enabled)" = type\ b ]
           # The shared value: two choices, docked by default, nothing else storable.
           range=$(gsettings --schemadir ${dir}/schemas range org.gnome.shell.extensions.vexos-assistant window-mode)

@@ -1,7 +1,7 @@
 // Every D-Bus call the extension makes, in one place, so one test can list them.
 //
 // All of them are `org.freedesktop.Application.ActivateAction` on an app id:
-//   - the assistant app: `new-session`, `terminal`, and `draft` with a starter
+//   - the assistant app: `prewarm`, `new-session`, `terminal`, and `draft` with a starter
 //     id (the app maps the id to a fixed prompt and puts it in the input as a
 //     draft; nothing is sent until the user clicks Send there)
 //   - the usage service: `refresh` and `refresh-now`, with no parameter
@@ -28,6 +28,13 @@ export class Bus {
         if (!isStarter(id))
             return;
         this._activate(APP_ID, APP_PATH, 'draft', [new GLib.Variant('s', id)]);
+    }
+
+    // Ask the app to start its agent now, hidden, so a tile or the window is
+    // ready when it is used. No parameter, nothing sent; an unused session
+    // ends by itself.
+    prewarm() {
+        this._activate(APP_ID, APP_PATH, 'prewarm', []);
     }
 
     newSession() {

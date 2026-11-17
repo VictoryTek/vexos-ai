@@ -12,20 +12,24 @@ import Clutter from 'gi://Clutter';
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import GObject from 'gi://GObject';
+import Pango from 'gi://Pango';
 import St from 'gi://St';
 
 import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 
 import {STARTERS} from './starters.js';
+import {Tooltips} from './tooltip.js';
 import {UsageStore} from './usage_store.js';
-import {displayWindows, formatCountdown, isUrgent, percentText, refreshDelaySeconds,
-    shouldRefreshOnOpen, sources, statusLine, URGENT_PERCENT} from './usage_view.js';
+import {displayWindows, formatCountdown, isUrgent, pendingDelayMs, pendingLine, percentText,
+    refreshDelaySeconds, shouldRefreshOnOpen, sources, statusLine, URGENT_PERCENT} from './usage_view.js';
 
 const USAGE_KEY = 'usage-enabled';
 const ICON_FILE = 'icons/vexos-assistant-symbolic.svg';
 // While the panel is open, countdowns are redrawn this often.
 const OPEN_TICK_SECONDS = 30;
+// Opening the panel warms the app at most this often.
+const WARM_EVERY_MS = 60 * 1000;
 
 // A rounded track with a fill that grows to a percentage.
 const Meter = GObject.registerClass(
@@ -72,10 +76,12 @@ const label = (text, styleClass) => new St.Label({
     y_align: Clutter.ActorAlign.CENTER,
 });
 
+// Every button tracks the pointer, so its :hover style applies.
 const iconButton = (iconName, name, styleClass, onClicked) => {
     const button = new St.Button({
         style_class: styleClass,
         can_focus: true,
+        track_hover: true,
         accessible_name: name,
         child: new St.Icon({icon_name: iconName, icon_size: 16}),
     });
@@ -92,6 +98,12 @@ class VexosAssistantButton extends PanelMenu.Button {
         this._onToggleWindow = onToggleWindow;
         this._timer = 0;
         this._tick = 0;
+        // Plan limits are on and no record has arrived: since when (ms), and
+        // the timer that turns "checking" into "no answer".
+        this._waitingSince = 0;
+        this._pendingTimer = 0;
+        this._warmedAt = 0;
+        this._tips = new Tooltips();
         this._iconFile = `${path}/${ICON_FILE}`;
 
         this._icon = new St.Icon({
@@ -142,7 +154,11 @@ class VexosAssistantButton extends PanelMenu.Button {
             GLib.source_remove(this._timer);
         if (this._tick)
             GLib.source_remove(this._tick);
-        this._timer = this._tick = 0;
+        if (this._pendingTimer)
+            GLib.source_remove(this._pendingTimer);
+        this._timer = this._tick = this._pendingTimer = 0;
+        this._tips?.hide();
+        this._tips = null;
         if (this._settingsId)
             this._settings.disconnect(this._settingsId);
         this._settingsId = 0;
@@ -160,6 +176,8 @@ class VexosAssistantButton extends PanelMenu.Button {
     }
 
     _build() {
+        // The popup's own look (the VexOS palette) hangs on this class.
+        this.menu.actor.add_style_class_name('vexos-menu');
         const item = new PopupMenu.PopupBaseMenuItem({reactive: false, can_focus: false});
         this._root = new St.BoxLayout({
             orientation: Clutter.Orientation.VERTICAL,
@@ -186,14 +204,18 @@ class VexosAssistantButton extends PanelMenu.Button {
         this._subtitle = label('AI help for this system', 'vexos-subtitle');
         names.add_child(this._subtitle);
         hero.add_child(names);
-        hero.add_child(iconButton('list-add-symbolic', 'New chat', 'vexos-hero-button', () => {
+        const newChat = iconButton('list-add-symbolic', 'New chat', 'vexos-hero-button', () => {
             this.menu.close();
             this._bus.newSession();
-        }));
-        hero.add_child(iconButton('utilities-terminal-symbolic', 'Open in a terminal', 'vexos-hero-button', () => {
+        });
+        this._tips.attach(newChat, 'New chat');
+        hero.add_child(newChat);
+        const terminal = iconButton('utilities-terminal-symbolic', 'Open in a terminal', 'vexos-hero-button', () => {
             this.menu.close();
             this._bus.terminal();
-        }));
+        });
+        this._tips.attach(terminal, 'Open in a terminal');
+        hero.add_child(terminal);
         this._root.add_child(hero);
         this._root.add_child(new St.Widget({style_class: 'vexos-separator'}));
 
@@ -213,9 +235,11 @@ class VexosAssistantButton extends PanelMenu.Button {
             const tile = new St.Button({
                 style_class: 'vexos-tile',
                 can_focus: true,
+                track_hover: true,
                 x_expand: true,
                 accessible_name: starter.title,
             });
+            this._tips.attach(tile, 'Starts a draft in the chat. Nothing is sent until you click Send.');
             const body = new St.BoxLayout({
                 orientation: Clutter.Orientation.VERTICAL,
                 x_align: Clutter.ActorAlign.CENTER,
@@ -252,19 +276,52 @@ class VexosAssistantButton extends PanelMenu.Button {
             ? 'system-status-icon vexos-icon vexos-urgent'
             : 'system-status-icon vexos-icon';
 
+        this._tips.hide();
         this._usage.destroy_all_children();
         if (!enabled) {
-            this._renderOptIn();
+            this._waiting(false);
+            this._renderOff();
             return;
         }
-        if (!record) {
-            this._usage.add_child(label('Checking your limits…', 'vexos-note'));
+        // On, but nothing usable yet: no file, or one the service wrote while
+        // the switch was off. Say "checking", and after a while say it is not
+        // answering, so a service that never ran is not an endless spinner.
+        if (!record || !record.enabled) {
+            this._waiting(true);
+            this._usage.add_child(this._note(pendingLine(now, this._waitingSince)));
             this._usage.add_child(this._offLink());
             return;
         }
+        this._waiting(false);
         for (const source of sources(record))
             this._usage.add_child(this._section(source, now));
         this._usage.add_child(this._offLink());
+    }
+
+    // Starts or stops the wait for a record, and schedules the redraw that
+    // turns "checking" into "no answer".
+    _waiting(on) {
+        if (!on) {
+            this._waitingSince = 0;
+            if (this._pendingTimer) {
+                GLib.source_remove(this._pendingTimer);
+                this._pendingTimer = 0;
+            }
+            return;
+        }
+        if (!this._waitingSince)
+            this._waitingSince = Date.now();
+        if (this._pendingTimer)
+            return;
+        // Once the wait is over the sentence is already showing: no more timers.
+        const left = pendingDelayMs(Date.now(), this._waitingSince);
+        if (left <= 0)
+            return;
+        this._pendingTimer = GLib.timeout_add(GLib.PRIORITY_DEFAULT, left, () => {
+            this._pendingTimer = 0;
+            this._render();
+            return GLib.SOURCE_REMOVE;
+        });
     }
 
     // One agent: its name and plan, its meters, and the sentence its situation
@@ -300,24 +357,20 @@ class VexosAssistantButton extends PanelMenu.Button {
         return row;
     }
 
+    // Wraps inside the popup's fixed width, never widens it.
     _note(text) {
         const note = label(text, 'vexos-note');
         note.clutter_text.line_wrap = true;
+        note.clutter_text.ellipsize = Pango.EllipsizeMode.NONE;
         return note;
     }
 
-    // Plan limits are off until the user says so: the service reads Claude's
-    // sign-in only after this switch.
-    _renderOptIn() {
-        this._usage.add_child(label('PLAN LIMITS', 'vexos-section'));
-        this._usage.add_child(this._note(
-            "See how much of your Claude and Codex plans are used. This reads Claude Code's saved sign-in and asks Anthropic for your limits. If Codex is installed, it asks Codex for its own."));
-        const on = new St.Button({
-            label: 'Show plan limits',
-            style_class: 'vexos-action',
-            can_focus: true,
-            x_align: Clutter.ActorAlign.START,
-        });
+    // Plan limits are on unless the user turned them off here: this is the way
+    // back. The service reads Claude's sign-in only while the switch is on.
+    _renderOff() {
+        this._usage.add_child(this._note('Plan limits are off.'));
+        const on = this._link('Turn on plan limits',
+            "Shows your Claude and Codex plan limits. Reads Claude Code's saved sign-in and asks Anthropic; if Codex is installed, asks Codex.");
         on.connect('clicked', () => {
             this._settings.set_boolean(USAGE_KEY, true);
             // Written out first: the service reads the setting itself.
@@ -328,12 +381,8 @@ class VexosAssistantButton extends PanelMenu.Button {
     }
 
     _offLink() {
-        const off = new St.Button({
-            label: 'Turn off plan limits',
-            style_class: 'vexos-link',
-            can_focus: true,
-            x_align: Clutter.ActorAlign.START,
-        });
+        const off = this._link('Turn off plan limits',
+            "Stops reading Claude Code's sign-in. You can turn it back on here.");
         off.connect('clicked', () => {
             this._settings.set_boolean(USAGE_KEY, false);
             Gio.Settings.sync();
@@ -342,13 +391,37 @@ class VexosAssistantButton extends PanelMenu.Button {
         return off;
     }
 
+    // A quiet text button with a hover hint.
+    _link(text, hint) {
+        const link = new St.Button({
+            label: text,
+            style_class: 'vexos-link',
+            can_focus: true,
+            track_hover: true,
+            x_align: Clutter.ActorAlign.START,
+        });
+        this._tips.attach(link, hint);
+        return link;
+    }
+
     _opened(open) {
         if (this._tick) {
             GLib.source_remove(this._tick);
             this._tick = 0;
         }
+        this._tips.hide();
         if (!open)
             return;
+        // Someone who opens this panel will often open the chat next: have the
+        // agent start now, hidden. At most once a minute.
+        const now = Date.now();
+        if (now - this._warmedAt > WARM_EVERY_MS) {
+            this._warmedAt = now;
+            this._bus.prewarm();
+        }
+        // A fresh look at an empty panel gets its full wait again.
+        if (this._waitingSince)
+            this._waitingSince = Date.now();
         this._store.reload();
         if (shouldRefreshOnOpen(this._store.record, Date.now(), this._enabled()))
             this._bus.refreshUsage(false);

@@ -35,6 +35,28 @@ export const CODEX_MESSAGES = {
 
 export const AGENT_NAMES = {claude: 'Claude Code', codex: 'Codex'};
 
+// With plan limits on and no record yet, the panel says it is checking. If
+// the service has not written anything after this long, it says so instead of
+// waiting for ever, because a service that never started looks the same.
+export const PENDING_MS = 12 * 1000;
+export const CHECKING_TEXT = 'Checking your limits…';
+export const NO_SERVICE_TEXT = "The usage service did not answer. Log out and back in; if this stays, check `journalctl --user -g vexos-ai-usage`.";
+
+// The sentence for "on, but no record": checking, then the failure. `since` is
+// when the panel began waiting (ms), 0 when it has not.
+export function pendingLine(nowMs, since) {
+    return since > 0 && nowMs - since >= PENDING_MS ? NO_SERVICE_TEXT : CHECKING_TEXT;
+}
+
+// Milliseconds until the panel should redraw to show the no-answer sentence;
+// 0 when that time has come (nothing left to wait for, so no timer).
+export function pendingDelayMs(nowMs, since) {
+    if (!(since > 0) || !Number.isFinite(nowMs))
+        return 0;
+    const left = PENDING_MS - (nowMs - since);
+    return left > 0 ? Math.ceil(left) + 200 : 0;
+}
+
 const MINUTE = 60 * 1000;
 const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;

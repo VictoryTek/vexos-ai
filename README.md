@@ -51,15 +51,18 @@ is installed; Session and Weekly, with reset times) and three starter tasks. Rig
 refreshes the limits, and the icon turns red at 90% of a limit. A starter only
 puts a draft in the chat's input; nothing is sent until you click Send.
 
-Plan limits are **off until you switch them on** in the panel. Switched on, a
-small service reads Claude Code's saved sign-in and asks Anthropic's usage
+Plan limits are **on by default**, as in Omarchy (the panel has a "Turn off plan
+limits" link). A small service reads Claude Code's saved sign-in and asks Anthropic's usage
 endpoint for your limits (the same one Claude Code's `/usage` uses). If Codex
 is installed it also asks Codex itself (`codex app-server`) for its limits,
 using Codex's own login, which the service never reads. It is the only code in
 this repo that opens Claude's sign-in; see "Usage service" in `docs/contract.md`.
 
 Closing the chat window hides it and keeps the session warm, so it reopens at
-once; a window hidden for 10 minutes ends its session.
+once; a window hidden for 10 minutes ends its session. Opening the top-bar panel
+also starts the assistant's agent in the background (nothing is sent and no
+window shows), so a starter or the window is ready when you use it; if you do
+not, that session ends after the same 10 minutes.
 
 ## Safety limits
 

@@ -1,8 +1,8 @@
 #!/usr/bin/env bats
 # Exactly one file in this repo opens Claude's login file (docs/contract.md
 # §Credentials and the network): the usage service's
-# crates/vexos-ai-usage/src/credentials.rs, which reads a token only after the
-# user switches plan limits on. No script or module names it: not the CLI, the
+# crates/vexos-ai-usage/src/credentials.rs, which reads a token only while plan
+# limits are on (the default; the panel can turn them off). No script or module names it: not the CLI, the
 # Nix files, the other crates, the extension, the skills, or the spike scripts.
 # Only the docs (docs/ and .github/docs/) and this suite's fixtures may: the
 # fixtures plant a fake one under the test HOME to prove that nothing in the

@@ -21,8 +21,8 @@ use vexos_ai_core::{Agent, Config, Decision, Error, Session};
 use vexos_ai_viewmodel::{
     AGENT_FILE, Answer, ApprovalCard, CARD_LIMIT, Composer, Conversation, DiffLine,
     EXTENSION_BUS_NAME, Empty, Item, Offer, Outgoing, Placement, Proposal, STARTERS, Sent, Startup,
-    State, Via, WINDOW_MODE_KEY, WINDOW_SCHEMA, WindowMode, agent_label, docked_layout, markdown,
-    mode_label, saved_agent, since_process_start, starter, window_look,
+    State, Via, WINDOW_MODE_KEY, WINDOW_SCHEMA, WindowMode, agent_label, at_end, docked_layout,
+    end_value, markdown, mode_label, saved_agent, since_process_start, starter, window_look,
 };
 
 const APP_ID: &str = "io.github.victorytek.VexosAssistant";
@@ -160,11 +160,31 @@ fn main() -> glib::ExitCode {
     let terminal_action = gio::ActionEntry::builder("terminal")
         .activate(|_: &adw::Application, _, _| terminal::open())
         .build();
+    // The extension calls this when its panel opens, so the agent is already
+    // starting when a tile or the window is used. It takes no parameter and
+    // sends nothing: the window is built but not shown, the agent starts at
+    // once (a window that is never shown never paints, which is what the
+    // normal start waits for), and the hidden timer ends an unused session.
+    // With a window already open it does nothing.
+    let prewarm_action = gio::ActionEntry::builder("prewarm")
+        .activate({
+            let slot = slot.clone();
+            move |app: &adw::Application, _, _| {
+                if slot.borrow().is_some() {
+                    return;
+                }
+                let ui = window(app, &slot);
+                ui.begin_start();
+                ui.hide();
+            }
+        })
+        .build();
     app.add_action_entries([
         toggle_action,
         draft_action,
         new_session_action,
         terminal_action,
+        prewarm_action,
     ]);
     app.add_action_entries(notify::actions(&slot));
     app.run()
@@ -256,6 +276,12 @@ struct Ui {
     placeholder: gtk::Label,
     scroller: gtk::ScrolledWindow,
     rows: RefCell<Vec<gtk::Widget>>,
+    /// Rows to redraw at the next idle moment: a burst of streamed text is one
+    /// redraw, not one per chunk.
+    dirty: RefCell<Vec<usize>>,
+    /// The list scrolls to follow new text: true while the user is at the end
+    /// (and after they send), false once they scroll up to read.
+    follow: Cell<bool>,
     input: gtk::TextView,
     send: gtk::Button,
     /// Runs while the window is hidden: when it fires the session ends.
@@ -496,6 +522,8 @@ impl Ui {
             placeholder,
             scroller,
             rows: RefCell::new(Vec::new()),
+            dirty: RefCell::new(Vec::new()),
+            follow: Cell::new(true),
             input,
             send,
             hidden_timer: RefCell::new(None),
@@ -517,6 +545,34 @@ impl Ui {
         ui.send.connect_clicked({
             let ui = ui.clone();
             move |_| ui.submit(Via::SendButton)
+        });
+        // Follow growing text, once it has been laid out (`upper` is the list's
+        // height after layout). A change of the value that leaves the user short
+        // of the end is them scrolling up to read: stop following until they
+        // come back down or send. The window's own growth never changes the
+        // value, so it never ends following.
+        let adjustment = ui.scroller.vadjustment();
+        adjustment.connect_upper_notify({
+            let weak = Rc::downgrade(&ui);
+            move |adjustment| {
+                if let Some(ui) = weak.upgrade()
+                    && ui.follow.get()
+                {
+                    adjustment.set_value(end_value(adjustment.upper(), adjustment.page_size()));
+                }
+            }
+        });
+        adjustment.connect_value_changed({
+            let weak = Rc::downgrade(&ui);
+            move |adjustment| {
+                if let Some(ui) = weak.upgrade() {
+                    ui.follow.set(at_end(
+                        adjustment.value(),
+                        adjustment.upper(),
+                        adjustment.page_size(),
+                    ));
+                }
+            }
         });
         // A starter card puts its fixed prompt in the input as a draft. Nothing
         // is sent: the user reads it and clicks Send.
@@ -919,6 +975,8 @@ impl Ui {
         // Only the composer makes a message, and the conversation shows it; a
         // message that is not shown does not come from here.
         if let Sent::Shown(index) = sent {
+            // Sending is asking to see the answer: follow it from the start.
+            self.follow.set(true);
             self.render(index);
         }
         self.refresh();
@@ -1022,10 +1080,58 @@ impl Ui {
         self.cancel.set_sensitive(c.turn_running());
     }
 
+    /// Queues row `index` for redraw. Streamed text arrives in many small
+    /// chunks; they are drawn once per idle moment, and the scrolling follows
+    /// after layout (see `build`), so the list never jumps.
     fn render(self: &Rc<Self>, index: usize) {
+        let first = {
+            let mut dirty = self.dirty.borrow_mut();
+            let first = dirty.is_empty();
+            dirty.push(index);
+            first
+        };
+        if first {
+            let ui = self.clone();
+            glib::idle_add_local_once(move || ui.flush());
+        }
+    }
+
+    /// Draws the queued rows, in order (a new row is appended at its index).
+    fn flush(self: &Rc<Self>) {
+        let mut rows: Vec<usize> = self.dirty.take();
+        rows.sort_unstable();
+        rows.dedup();
+        for index in rows {
+            self.update(index);
+        }
+    }
+
+    /// An agent reply that grew is updated inside its existing card: replacing
+    /// the widget would shrink the list for a moment and throw the scroll
+    /// position. Anything else is redrawn in place as before.
+    fn update(self: &Rc<Self>, index: usize) {
+        let text = match self
+            .conversation
+            .borrow()
+            .as_ref()
+            .and_then(|c| c.items().get(index))
+        {
+            Some(Item::Agent(text)) => Some(text.clone()),
+            _ => None,
+        };
+        if let Some(text) = text {
+            let view = self
+                .rows
+                .borrow()
+                .get(index)
+                .and_then(|row| row.first_child())
+                .and_then(|child| child.downcast::<gtk::TextView>().ok());
+            if let Some(view) = view {
+                fill_reply(&view.buffer(), &text);
+                return;
+            }
+        }
         self.replace(index);
-        let adjustment = self.scroller.vadjustment();
-        glib::idle_add_local_once(move || adjustment.set_value(adjustment.upper()));
     }
 
     /// Draws row `index` from the conversation, in place or at the end.
@@ -1171,6 +1277,14 @@ fn reply(text: &str, colors: &TagColors) -> gtk::TextView {
         ],
     );
     buffer.create_tag(Some("heading"), &[("scale", &1.15), ("weight", &700)]);
+    fill_reply(&buffer, text);
+    view
+}
+
+/// Puts a reply's formatted runs in the buffer, replacing what it held. The
+/// tags are made once, with the view.
+fn fill_reply(buffer: &gtk::TextBuffer, text: &str) {
+    buffer.set_text("");
     for run in markdown(text) {
         let style = run.style;
         let tags: Vec<&str> = [
@@ -1185,7 +1299,6 @@ fn reply(text: &str, colors: &TagColors) -> gtk::TextView {
         let mut end = buffer.end_iter();
         buffer.insert_with_tags_by_name(&mut end, &run.text, &tags);
     }
-    view
 }
 
 fn monospace(text: &str) -> gtk::Label {
