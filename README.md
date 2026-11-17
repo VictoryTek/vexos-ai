@@ -1,7 +1,7 @@
 # vexos-ai
 
 The VexOS AI assistant: Claude Code (or Codex, or OpenCode: `vexos-ai pick`), taught how VexOS works
-(`skills/`), fenced off from applying changes and kept asking before it acts
+(`skills/`, shipped here and linked by vexos-nix), fenced off from applying changes and kept asking before it acts
 (managed policy, `nix/policy.nix`), with a
 launcher, theme sync and "diagnose with AI".
 
@@ -18,14 +18,25 @@ install-only (`programs.vexos-ai.enable`).
 | `packages.<system>.vexos-ai-panel-extension` | the GNOME Shell extension: top-bar icon and quick panel, Quick Settings tile, shortcut |
 | `packages.<system>.vexos-ai-usage` | the usage service behind the quick panel's plan limits |
 | `nixosModules.default` | `programs.vexos-ai.{enable,claudePackage,enablePanel,enablePanelExtension,enableUsage,...}` |
+| `programs.vexos-ai.skills` | read-only `{ path; names; }`: the shipped `skills/` directory and the skill names under it; set whether or not `enable` is |
 | `overlays.default` | `pkgs.vexos-ai` |
+
+## Skills
+
+This repo ships its skills but does not link them. The module exposes them as
+the read-only option `programs.vexos-ai.skills`, and vexos-nix owns the central
+skills location and the links into `~/.claude/skills` and `~/.agents/skills`.
+
+A standalone user of this module (not through vexos-nix) must link
+`programs.vexos-ai.skills.path` into those directories themselves: without that,
+no agent finds the skills.
 
 ## Layout
 
 - `bin/vexos-ai.sh` — launcher and helpers
 - `crates/` — the assistant window, its core and view-model, and the usage service
 - `extension/` — the GNOME Shell extension (top-bar panel with starters and plan limits)
-- `skills/` — agent skills, linked into `~/.claude/skills` and `~/.agents/skills`
+- `skills/` — agent skills, shipped here and exposed as `programs.vexos-ai.skills`; the consumer (vexos-nix) links them into `~/.claude/skills` and `~/.agents/skills`
 - `nix/package.nix`, `nix/module.nix`
 - `nix/policy.nix` — the managed agent policy (asserted by `checks.policy`)
 - `docs/contract.md` — argv, exit codes and `status --json` for callers (VexPortal)

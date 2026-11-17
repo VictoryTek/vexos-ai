@@ -12,8 +12,9 @@
 #     them (vexos-nix installs the CLIs itself), but their managed policy is
 #     always installed, so choosing one with `vexos-ai pick` is as safe as Claude
 #   - vexos-ai: launcher, first-run picker, theme sync, "diagnose with AI"
-#   - the VexOS skills at /etc/vexos/ai/skills, linked into ~/.claude/skills
-#     (Claude Code reads it) and ~/.agents/skills (the generic spot)
+#   - nothing for the skills: they are shipped in skills/ and exposed as the
+#     read-only option programs.vexos-ai.skills ({ path; names; }). The consumer
+#     (vexos-nix) links them into ~/.claude/skills and ~/.agents/skills
 #   - system-wide (managed) agent policy: never apply (switch/boot/rebuild
 #     denied), always ask (no auto-approving modes); see nix/policy.nix
 #   - user services: crash watcher, theme watcher, welcome
@@ -33,7 +34,11 @@ let
 
   policy = import ./policy.nix { inherit lib; };
 
-  skills = [ "vexos" "vexos-diagnose" ];
+  # The skills this repo ships. Read from the source path, never from a built
+  # derivation, so reading `names` builds nothing.
+  skillsDir = ../skills;
+  skillNames = lib.attrNames
+    (lib.filterAttrs (_: type: type == "directory") (builtins.readDir skillsDir));
 
   # The panel drives the agents over ACP; the Claude version was tested live
   # (assistant_panel_spike_results.md). 26.05's claude-agent-acp is 0.36.1. The
@@ -134,6 +139,19 @@ in
       '';
     };
 
+    skills = lib.mkOption {
+      type = lib.types.attrs;
+      readOnly = true;
+      description = ''
+        The agent skills this repo ships, for the consumer to link: `path` is the
+        directory that holds them, `names` the skill directories under it. Read
+        only, and set whether or not `enable` is. This module links nothing:
+        vexos-nix owns the central skills location and the links into
+        `~/.claude/skills` and `~/.agents/skills`. Used on its own, link
+        `skills.path` yourself.
+      '';
+    };
+
     enablePanel = lib.mkOption {
       type = lib.types.bool;
       default = cfg.enable;
@@ -184,22 +202,14 @@ in
     };
   };
 
-  config = lib.mkMerge [ (lib.mkIf cfg.enable {
+  config = lib.mkMerge [
+  { programs.vexos-ai.skills = { path = skillsDir; names = skillNames; }; }
+
+  (lib.mkIf cfg.enable {
     environment.systemPackages = [
       cfg.claudePackage
       package
     ] ++ optionalAgents;
-
-    # ── Skills ───────────────────────────────────────────────────────────────
-    environment.etc."vexos/ai/skills".source = ../skills;
-
-    # One link per skill (not the whole directory) so the user's own skills in
-    # ~/.claude/skills are left alone. L+ only replaces the link itself.
-    # ~/.agents/skills is the generic location other agents use, so the
-    # skills are linked there as well.
-    systemd.user.tmpfiles.rules = lib.concatMap
-      (dir: map (s: "L+ %h/${dir}/${s} - - - - /etc/vexos/ai/skills/${s}") skills)
-      [ ".claude/skills" ".agents/skills" ];
 
     # ── Agent policy ─────────────────────────────────────────────────────────
     # Never apply, always ask: see nix/policy.nix.

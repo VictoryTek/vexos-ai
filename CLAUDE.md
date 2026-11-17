@@ -1,5 +1,5 @@
 # CLAUDE.md
-**vexos-ai** — Install-only Nix flake (NixOS module + packaged shell CLI + Rust assistant panel + GNOME Shell extension + agent skills + managed agent safety policy), consumed as a flake input by vexos-nix. Languages: Nix, Bash (shellchecked), Rust, GJS (extension), Markdown (skills and docs); Bats for tests. Frameworks: NixOS module system (`nixosModules.default`, option set `programs.vexos-ai`), nixpkgs `writeShellApplication` and `buildRustPackage`, GTK4/libadwaita, Claude Code managed settings. Package manager(s): Nix flakes (`flake.nix` + `flake.lock`, sole input `nixpkgs` at `github:NixOS/nixpkgs/nixos-26.05`) and Cargo (`Cargo.lock`, built through Nix).
+**vexos-ai** — Install-only Nix flake (NixOS module + packaged shell CLI + Rust assistant panel + GNOME Shell extension + agent skills shipped here and linked by the consumer + managed agent safety policy), consumed as a flake input by vexos-nix. Languages: Nix, Bash (shellchecked), Rust, GJS (extension), Markdown (skills and docs); Bats for tests. Frameworks: NixOS module system (`nixosModules.default`, option set `programs.vexos-ai`), nixpkgs `writeShellApplication` and `buildRustPackage`, GTK4/libadwaita, Claude Code managed settings. Package manager(s): Nix flakes (`flake.nix` + `flake.lock`, sole input `nixpkgs` at `github:NixOS/nixpkgs/nixos-26.05`) and Cargo (`Cargo.lock`, built through Nix).
 
 ## Commands
 
@@ -16,10 +16,11 @@ Test (one check at a time; use `x86_64-linux` unless you have an aarch64 builder
 - `nix build .#checks.x86_64-linux.helper` (the D-Bus helper: its rules, and its tests on a private `dbus-daemon`, plus clippy)
 - `nix build .#checks.x86_64-linux.panel` (the GTK panel builds and passes clippy)
 - `nix build .#checks.x86_64-linux.module` (the NixOS module's assertions)
+- `nix build .#checks.x86_64-linux.skills` (`programs.vexos-ai.skills` names exactly `vexos` and `vexos-diagnose`, each with a SKILL.md)
 - `nix build .#checks.x86_64-linux.extension` (the GNOME Shell extension as built)
 - `nix develop -c cargo fmt --all --check`
 
-Preflight (final gate): `scripts/preflight.sh` (package build, the seven checks above, module eval, rustfmt)
+Preflight (final gate): `scripts/preflight.sh` (package build, the checks above and `usage`, module eval, rustfmt)
 Fast verify (also run by the Stop hook): `scripts/preflight.sh`
 
 ## Repository
@@ -29,7 +30,7 @@ Fast verify (also run by the Stop hook): `scripts/preflight.sh`
   - `nix/` — `package.nix` (shellchecked CLI + desktop entry), `module.nix` (`programs.vexos-ai`), `policy.nix` (managed agent safety policy), `panel.nix`, `extension.nix`
   - `crates/` — Rust workspace: `vexos-ai-core` (ACP client), `vexos-ai-viewmodel` (panel rules, no GTK), `vexos-ai-helper` (headless D-Bus helper: who may call it, what a call may carry, and the session behind it), `vexos-ai-panel` (GTK4 window)
   - `extension/` — the GNOME Shell extension
-  - `skills/` — agent skills (`vexos`, `vexos-diagnose`) linked into `~/.claude/skills` and `~/.agents/skills`
+  - `skills/` — agent skills (`vexos`, `vexos-diagnose`), shipped here and exposed as `programs.vexos-ai.skills`; vexos-nix links them into `~/.claude/skills` and `~/.agents/skills`, this repo links nothing
   - `docs/` — `contract.md` (argv, exit codes and `status --json` for callers such as VexPortal) and `spec.md` (roadmap and decisions)
   - `tests/contract/` — Bats suite plus PATH stubs (`stubs/`)
   - `scripts/` — `preflight.sh`, `verify-host.sh` (read-only post-rebuild host check)
@@ -48,7 +49,7 @@ Fast verify (also run by the Stop hook): `scripts/preflight.sh`
 - `nix/policy.nix` is the assistant's safety policy, asserted by `checks.policy`: agents must never be able to apply a configuration (`nixos-rebuild switch|boot|test`, `just rebuild|switch|update|update-all`) or run `nix flake check`, and must always ask before acting (no Claude auto or bypass mode). Any change to `nix/policy.nix` must keep `checks.policy` in `flake.nix` in step with it
 - Validate with `nix build` here and `dry-build` in vexos-nix; never `nixos-rebuild switch|boot` from automation
 - `docs/contract.md` is a public contract for callers (VexPortal, the GNOME panel, tests); `tests/contract/*.bats` must keep passing unchanged against `bin/vexos-ai.sh` and its planned Rust replacement. A change to argv, exit codes or `status --json` is a contract change and needs `docs/contract.md` and the Bats suite updated together
-- Which check covers which change: `nix build` for `bin/vexos-ai.sh` or `nix/package.nix`; the module `nix eval` for `nix/module.nix` or `flake.nix`; `checks.policy` for `nix/policy.nix` or the `policy` check; `checks.contract` for `bin/vexos-ai.sh`, `docs/contract.md` or `tests/contract/`; `checks.core`/`checks.helper`/`checks.panel` for `crates/`; `checks.extension` for `extension/`
+- Which check covers which change: `nix build` for `bin/vexos-ai.sh` or `nix/package.nix`; the module `nix eval` for `nix/module.nix` or `flake.nix`; `checks.skills` for `skills/` or the option; `checks.policy` for `nix/policy.nix` or the `policy` check; `checks.contract` for `bin/vexos-ai.sh`, `docs/contract.md` or `tests/contract/`; `checks.core`/`checks.helper`/`checks.panel` for `crates/`; `checks.extension` for `extension/`
 - Context7 documents libraries, not nixpkgs or NixOS options; for nixpkgs packages and NixOS options use the `nixos` MCP server (`mcp__nixos__nix`) as the authoritative source
 
 ## Forbidden commands

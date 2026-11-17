@@ -1,7 +1,8 @@
 # vexos-ai — VexOS AI assistant launcher (modules/ai.nix).
 #
-# Opens Claude Code in a terminal, working in /etc/nixos, with the VexOS skills
-# (files/ai/skills) installed in ~/.claude/skills. Also owns the pieces
+# Opens Claude Code in a terminal, working in /etc/nixos. The VexOS skills it
+# names are shipped in this repo's skills/ and linked into the agents' skills
+# directories by vexos-nix, not by this script. Also owns the pieces
 # around it: first-run picker, theme sync, and "diagnose with AI" for crashes,
 # failed units and failed rebuilds. Claude always runs with its default
 # sign-in (~/.claude); the multiple-accounts feature is removed.

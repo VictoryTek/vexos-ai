@@ -245,6 +245,43 @@
           touch $out
         '';
 
+        # The skills the module exposes as `programs.vexos-ai.skills`: exactly the
+        # two this repo ships, each with a SKILL.md, defined with the module on or
+        # off, and nothing linked or published by the module itself.
+        skills = let
+          inherit (nixpkgs) lib;
+          eval = settings: (nixpkgs.lib.nixosSystem {
+            inherit (pkgs.stdenv.hostPlatform) system;
+            modules = [
+              self.nixosModules.default
+              { boot.isContainer = true; system.stateVersion = "26.05"; }
+              settings
+            ];
+          }).config;
+          off = eval { };
+          on = eval { programs.vexos-ai.enable = true; };
+          expected = [ "vexos" "vexos-diagnose" ];
+          hasSkillMd = skills: lib.all (n: builtins.pathExists (skills.path + "/${n}/SKILL.md")) skills.names;
+          cases = {
+            "names is exactly vexos and vexos-diagnose (module off)" = off.programs.vexos-ai.skills.names == expected;
+            "names is exactly vexos and vexos-diagnose (module on)" = on.programs.vexos-ai.skills.names == expected;
+            "each skill has a SKILL.md (module off)" = hasSkillMd off.programs.vexos-ai.skills;
+            "each skill has a SKILL.md (module on)" = hasSkillMd on.programs.vexos-ai.skills;
+            "path is the skills directory of this source" = off.programs.vexos-ai.skills.path == ./skills;
+            "the option is read-only" = !(builtins.tryEval (eval { programs.vexos-ai.skills = { }; }).programs.vexos-ai.skills).success;
+            "the module publishes no skills under /etc" = !(on.environment.etc ? "vexos/ai/skills");
+            "the module links no skills" =
+              !lib.any (r: lib.hasInfix "skills" r) on.systemd.user.tmpfiles.rules;
+          };
+        in pkgs.runCommand "vexos-ai-skills" { } ''
+          failed=0
+          ${lib.concatStrings (lib.mapAttrsToList (name: ok: ''
+            echo ${lib.escapeShellArg ((if ok then "ok   " else "FAIL ") + name)}
+            ${lib.optionalString (!ok) "failed=1"}
+          '') cases)}
+          [ "$failed" = 0 ] && touch $out
+        '';
+
         # The module's panel contract: the panel comes with the AI feature, never
         # without the managed policy or with untested agents, and it runs the
         # pinned agents. Evaluates the module (stand-in agents, so nothing unfree

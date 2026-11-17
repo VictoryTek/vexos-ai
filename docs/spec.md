@@ -466,3 +466,19 @@ Not planned: more agents, auto-approve, mise, a transcript token scanner.
 | B | Rust rewrite, and whether Phase 1 is bash first | **Rust; Phase 1 in bash with bats contract tests** |
 | C | Phase 0: make both agents actually ask (Claude: no auto/bypass; OpenCode: `ask` for edit and bash) | **Yes.** It is what "VexOS agents ask" already claims |
 | D | Top-bar GNOME Shell extension | **Yes, last phase** |
+
+---
+
+## Note: skill linking moved to vexos-nix
+
+This repo no longer publishes or links its skills. It ships `skills/vexos` and
+`skills/vexos-diagnose` and exposes them through the read-only option
+`programs.vexos-ai.skills` (`{ path; names; }`, set whether or not `enable` is;
+`names` is read from the source directory, never from a built derivation).
+vexos-nix owns the central skills location and the links into `~/.claude/skills`
+and `~/.agents/skills`. This supersedes the earlier text in this file about
+linking the skills into those directories (findings 7 and 8, the Skills row of
+the gap table, and Phase 1). `checks.skills` asserts the option. A standalone
+user of the module must link `skills.path` themselves. Rollout: until vexos-nix
+adopts this, nothing links the skills, so vexos-nix takes the lock bump together
+with its agent-skills module, in one rebuild.
