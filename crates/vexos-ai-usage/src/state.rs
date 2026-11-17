@@ -36,6 +36,8 @@ pub enum Status {
     Unreachable,
     /// The answer was not the shape we know.
     FormatChanged,
+    /// Signed in, but this sign-in has no plan limits (an API key).
+    NoPlan,
 }
 
 impl Status {
@@ -50,6 +52,7 @@ impl Status {
             Status::RateLimited => "rate-limited",
             Status::Unreachable => "unreachable",
             Status::FormatChanged => "format-changed",
+            Status::NoPlan => "no-plan",
         }
     }
 
@@ -64,9 +67,85 @@ impl Status {
             Status::RateLimited,
             Status::Unreachable,
             Status::FormatChanged,
+            Status::NoPlan,
         ]
         .into_iter()
         .find(|s| s.as_str() == text)
+    }
+}
+
+/// Another agent's limits, kept beside Claude's (the top-level fields are
+/// Claude's). Present only when that agent is installed and plan limits are on.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Source {
+    pub status: Status,
+    pub plan: String,
+    pub windows: Vec<Window>,
+    /// The windows are older than the last check: it failed and they were kept.
+    pub stale: bool,
+    /// When the numbers were last measured, in ms; 0 when never.
+    pub fetched_at_ms: u64,
+    /// Not before this time is another request made, in ms.
+    pub next_at_ms: u64,
+}
+
+fn windows_json(windows: &[Window]) -> Vec<Value> {
+    windows
+        .iter()
+        .map(|w| {
+            json!({
+                "id": w.id,
+                "label": w.label,
+                "percent": w.percent,
+                "resetsAt": w.resets_at_ms,
+            })
+        })
+        .collect()
+}
+
+fn windows_from(value: &Value) -> Option<Vec<Window>> {
+    Some(
+        value
+            .as_array()?
+            .iter()
+            .filter_map(|w| {
+                Some(Window {
+                    id: w.get("id")?.as_str()?.to_owned(),
+                    label: w.get("label")?.as_str()?.to_owned(),
+                    percent: w.get("percent")?.as_f64()?,
+                    resets_at_ms: w.get("resetsAt").and_then(Value::as_u64).unwrap_or(0),
+                })
+            })
+            .collect(),
+    )
+}
+
+impl Source {
+    fn to_json(&self) -> Value {
+        json!({
+            "status": self.status.as_str(),
+            "plan": self.plan,
+            "stale": self.stale,
+            "fetchedAt": self.fetched_at_ms,
+            "nextAt": self.next_at_ms,
+            "windows": windows_json(&self.windows),
+        })
+    }
+
+    fn from_json(v: &Value) -> Option<Source> {
+        let num = |k: &str| v.get(k).and_then(Value::as_u64).unwrap_or(0);
+        Some(Source {
+            status: Status::parse(v.get("status")?.as_str()?)?,
+            plan: v
+                .get("plan")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned(),
+            windows: windows_from(v.get("windows")?)?,
+            stale: v.get("stale").and_then(Value::as_bool).unwrap_or(false),
+            fetched_at_ms: num("fetchedAt"),
+            next_at_ms: num("nextAt"),
+        })
     }
 }
 
@@ -88,6 +167,8 @@ pub struct Record {
     pub windows: Vec<Window>,
     /// The windows are older than the last check: it failed and they were kept.
     pub stale: bool,
+    /// Codex's limits, when Codex is installed.
+    pub codex: Option<Source>,
 }
 
 impl Record {
@@ -103,23 +184,12 @@ impl Record {
             plan: String::new(),
             windows: Vec::new(),
             stale: false,
+            codex: None,
         }
     }
 
     pub fn to_json(&self) -> String {
-        let windows: Vec<Value> = self
-            .windows
-            .iter()
-            .map(|w| {
-                json!({
-                    "id": w.id,
-                    "label": w.label,
-                    "percent": w.percent,
-                    "resetsAt": w.resets_at_ms,
-                })
-            })
-            .collect();
-        let mut text = json!({
+        let mut value = json!({
             "schema": SCHEMA,
             "updatedAt": self.updated_at_ms,
             "fetchedAt": self.fetched_at_ms,
@@ -130,9 +200,12 @@ impl Record {
             "status": self.status.as_str(),
             "plan": self.plan,
             "stale": self.stale,
-            "windows": windows,
-        })
-        .to_string();
+            "windows": windows_json(&self.windows),
+        });
+        if let Some(codex) = &self.codex {
+            value["codex"] = codex.to_json();
+        }
+        let mut text = value.to_string();
         text.push('\n');
         text
     }
@@ -145,19 +218,7 @@ impl Record {
             return None;
         }
         let num = |k: &str| v.get(k).and_then(Value::as_u64).unwrap_or(0);
-        let windows = v
-            .get("windows")?
-            .as_array()?
-            .iter()
-            .filter_map(|w| {
-                Some(Window {
-                    id: w.get("id")?.as_str()?.to_owned(),
-                    label: w.get("label")?.as_str()?.to_owned(),
-                    percent: w.get("percent")?.as_f64()?,
-                    resets_at_ms: w.get("resetsAt").and_then(Value::as_u64).unwrap_or(0),
-                })
-            })
-            .collect();
+        let windows = windows_from(v.get("windows")?)?;
         Some(Record {
             updated_at_ms: num("updatedAt"),
             fetched_at_ms: num("fetchedAt"),
@@ -173,6 +234,8 @@ impl Record {
                 .to_owned(),
             windows,
             stale: v.get("stale").and_then(Value::as_bool).unwrap_or(false),
+            // A damaged codex section is no section; Claude's numbers still count.
+            codex: v.get("codex").and_then(Source::from_json),
         })
     }
 }
@@ -263,6 +326,14 @@ mod tests {
             plan: "Max 5x".to_owned(),
             windows: vec![window("session", 12.5, 100), window("weekly", 40.0, 0)],
             stale: true,
+            codex: Some(Source {
+                status: Status::Ok,
+                plan: "Plus".to_owned(),
+                windows: vec![window("session", 25.0, 200)],
+                stale: false,
+                fetched_at_ms: 6,
+                next_at_ms: 0,
+            }),
         }
     }
 
@@ -284,6 +355,7 @@ mod tests {
             Status::RateLimited,
             Status::Unreachable,
             Status::FormatChanged,
+            Status::NoPlan,
         ];
         for status in all {
             assert_eq!(Status::parse(status.as_str()), Some(status));
@@ -323,6 +395,7 @@ mod tests {
         assert_eq!(
             keys,
             [
+                "codex",
                 "enabled",
                 "failures",
                 "fetchedAt",
@@ -336,6 +409,32 @@ mod tests {
                 "windows"
             ]
         );
+        // Codex's section has numbers and fixed words too, and no more.
+        let mut inner: Vec<&str> = value["codex"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        inner.sort_unstable();
+        assert_eq!(
+            inner,
+            ["fetchedAt", "nextAt", "plan", "stale", "status", "windows"]
+        );
+        // Without Codex there is no section at all.
+        let mut bare = sample();
+        bare.codex = None;
+        let value: Value = serde_json::from_str(&bare.to_json()).unwrap();
+        assert!(value.get("codex").is_none());
+    }
+
+    #[test]
+    fn a_damaged_codex_section_leaves_claudes_numbers() {
+        let mut record = sample();
+        let mut value: Value = serde_json::from_str(&record.to_json()).unwrap();
+        value["codex"] = serde_json::json!({"status": "bogus", "windows": []});
+        record.codex = None;
+        assert_eq!(Record::from_json(&value.to_string()), Some(record));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 // The top-bar icon and its drop-down: the assistant's quick panel.
 //
-// Left click opens the panel (hero, plan limits, starter tiles). Right click
+// Left click opens the panel (hero, each agent's plan limits, starter tiles). Right click
 // shows or hides the chat window. Middle click asks the usage service for fresh
 // numbers. The icon turns urgent when a limit is at 90% or more.
 //
@@ -20,7 +20,7 @@ import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 import {STARTERS} from './starters.js';
 import {UsageStore} from './usage_store.js';
 import {displayWindows, formatCountdown, isUrgent, percentText, refreshDelaySeconds,
-    shouldRefreshOnOpen, statusLine, URGENT_PERCENT} from './usage_view.js';
+    shouldRefreshOnOpen, sources, statusLine, URGENT_PERCENT} from './usage_view.js';
 
 const USAGE_KEY = 'usage-enabled';
 const ICON_FILE = 'icons/vexos-assistant-symbolic.svg';
@@ -183,7 +183,7 @@ class VexosAssistantButton extends PanelMenu.Button {
             y_align: Clutter.ActorAlign.CENTER,
         });
         names.add_child(label('Assistant', 'vexos-title'));
-        this._subtitle = label('Claude Code', 'vexos-subtitle');
+        this._subtitle = label('AI help for this system', 'vexos-subtitle');
         names.add_child(this._subtitle);
         hero.add_child(names);
         hero.add_child(iconButton('list-add-symbolic', 'New chat', 'vexos-hero-button', () => {
@@ -251,7 +251,6 @@ class VexosAssistantButton extends PanelMenu.Button {
         this._icon.style_class = urgent
             ? 'system-status-icon vexos-icon vexos-urgent'
             : 'system-status-icon vexos-icon';
-        this._subtitle.text = enabled && record?.plan ? `Claude Code · ${record.plan}` : 'Claude Code';
 
         this._usage.destroy_all_children();
         if (!enabled) {
@@ -263,12 +262,30 @@ class VexosAssistantButton extends PanelMenu.Button {
             this._usage.add_child(this._offLink());
             return;
         }
-        for (const w of displayWindows(record, now))
-            this._usage.add_child(this._row(w, now));
-        const line = statusLine(record, now);
-        if (line)
-            this._usage.add_child(this._note(line));
+        for (const source of sources(record))
+            this._usage.add_child(this._section(source, now));
         this._usage.add_child(this._offLink());
+    }
+
+    // One agent: its name and plan, its meters, and the sentence its situation
+    // needs. Claude's always; Codex's when the service found Codex.
+    _section({agent, name, data}, now) {
+        const section = new St.BoxLayout({
+            orientation: Clutter.Orientation.VERTICAL,
+            style_class: 'vexos-agent',
+            x_expand: true,
+        });
+        const head = new St.BoxLayout({x_expand: true});
+        head.add_child(label(name, 'vexos-agent-name'));
+        if (data.plan)
+            head.add_child(label(data.plan, 'vexos-agent-plan'));
+        section.add_child(head);
+        for (const w of displayWindows(data, now))
+            section.add_child(this._row(w, now));
+        const line = statusLine(data, now, agent);
+        if (line)
+            section.add_child(this._note(line));
+        return section;
     }
 
     _row(w, now) {
@@ -294,7 +311,7 @@ class VexosAssistantButton extends PanelMenu.Button {
     _renderOptIn() {
         this._usage.add_child(label('PLAN LIMITS', 'vexos-section'));
         this._usage.add_child(this._note(
-            "See how much of your Claude plan is used. This reads Claude Code's saved sign-in and asks Anthropic for your limits."));
+            "See how much of your Claude and Codex plans are used. This reads Claude Code's saved sign-in and asks Anthropic for your limits. If Codex is installed, it asks Codex for its own."));
         const on = new St.Button({
             label: 'Show plan limits',
             style_class: 'vexos-action',

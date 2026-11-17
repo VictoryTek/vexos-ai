@@ -155,8 +155,8 @@ released VexPortal did) must stop trusting it. They are harmless leftovers.
 
 ## Usage service
 
-`vexos-ai-usage` (`crates/vexos-ai-usage`) gives the top-bar panel Claude's
-plan limits (Session, Weekly and any model-scoped windows). It is not part of
+`vexos-ai-usage` (`crates/vexos-ai-usage`) gives the top-bar panel Claude's and
+Codex's plan limits (Session, Weekly and any model-scoped windows). It is not part of
 the CLI and has no argv contract: it is a D-Bus activated program that the
 Shell extension asks by calling the `refresh` or `refresh-now` action of
 `io.github.victorytek.VexosAssistant.Usage`. It exits after 30 s idle.
@@ -175,13 +175,29 @@ Shell extension asks by calling the `refresh` or `refresh-now` action of
   at most 64 KiB. It never refreshes, rewrites or deletes the sign-in: only the
   Claude CLI renews the token, so a lapsed one is reported ("paused" or "sign-in
   expired"), not fixed.
+- **Codex's limits, asked of Codex.** On, and only if a `codex` is on the
+  service's PATH (the module puts the Codex it was given there), the service
+  starts `codex app-server` (JSON lines on stdin and stdout), sends
+  `initialize`, `account/read` and, when the account is a ChatGPT plan,
+  `account/rateLimits/read`, and kills it. Codex uses its own login: this
+  service reads no Codex file, holds no Codex token and copies no email, and
+  keeps from the answer only the plan word and each window's `usedPercent`,
+  `windowDurationMins` and `resetsAt`. The request ends after 15 s and reads at
+  most 256 KiB. A window's length names it (300 minutes Session, 10080 Weekly,
+  otherwise "N-hour" or "N-day"); a window Codex does not report is absent, not
+  zero. With no `codex`, or with the switch off, there is no `codex` section.
+  Not run live here: the request shapes come from Codex's published protocol
+  source, so check them against the installed Codex.
 - **What it writes.** `$XDG_STATE_HOME/vexos-ai/usage.json` (mode 0600,
   replaced atomically), schema 1: `updatedAt`, `fetchedAt`, `probedAt`,
   `nextAt`, `failures`, `enabled`, `status`, `plan`, `stale` and `windows`
-  (`id`, `label`, `percent` 0 to 100, `resetsAt` in ms, 0 when unknown).
-  `status` is one of `ok`, `disabled`, `waiting-for-auth`, `paused`,
+  (`id`, `label`, `percent` 0 to 100, `resetsAt` in ms, 0 when unknown). Those
+  fields are Claude's. When Codex is installed there is also a `codex` object
+  with `status`, `plan`, `stale`, `fetchedAt`, `nextAt` and `windows`, in the same
+  shapes. `status` is one of `ok`, `disabled`, `waiting-for-auth`, `paused`,
   `signin-expired`, `unavailable`, `rate-limited`, `unreachable`,
-  `format-changed`. Consumers must ignore unknown keys; a new schema number is a
+  `format-changed`, `no-plan` (Codex signed in with an API key, which has no plan
+  limits). Consumers must ignore unknown keys; a new schema number is a
   breaking change. The file never holds a token, a header, an email or other text
   from the other side beyond a cleaned model label.
 - **Pacing.** A request is never made twice within 15 s unless forced
@@ -190,7 +206,9 @@ Shell extension asks by calling the `refresh` or `refresh-now` action of
   1 minute without counting as a failure. `refresh-now` skips that 15 s interval and the
   15-minute wait after a refused sign-in (so signing in again takes effect at
   once), but never any other backoff. On a failure the last numbers stay, marked `stale`; a window
-  whose reset has passed reads 0%.
+  whose reset has passed reads 0%. Codex has its own pacing: the same 15 s
+  interval, five minutes after it failed to answer, and a short pause after
+  "waiting for a sign-in" that a forced refresh skips.
 - **The token is a `Secret`.** Its `Debug` prints `[redacted]`; it has no
   `Display`, `Clone` or serialisation, and tests plant one and check that no
   record, file or print holds it.

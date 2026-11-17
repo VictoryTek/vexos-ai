@@ -67,6 +67,20 @@
     spacing: 8px;
 }
 
+.vexos-agent {
+    spacing: 6px;
+}
+
+.vexos-agent-name {
+    font-weight: bold;
+}
+
+.vexos-agent-plan {
+    margin-left: 8px;
+    font-size: 8.5pt;
+    color: rgba(128, 128, 128, 1);
+}
+
 .vexos-limit {
     spacing: 10px;
     min-height: 22px;

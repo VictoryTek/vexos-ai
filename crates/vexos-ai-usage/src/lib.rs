@@ -1,4 +1,4 @@
-//! The usage service: Claude's plan limits for the top-bar panel.
+//! The usage service: Claude's and Codex's plan limits for the top-bar panel.
 //!
 //! It exists so that exactly one small, tested piece of this project ever
 //! opens Claude's sign-in, and only when the user has switched plan limits on.
@@ -9,6 +9,7 @@
 //! The library builds and tests on any platform; the D-Bus service around it
 //! (`src/main.rs`) is Linux only.
 
+pub mod codex;
 pub mod credentials;
 pub mod parse;
 pub mod probe;
@@ -19,7 +20,7 @@ pub mod time;
 
 use std::path::PathBuf;
 
-pub use refresh::{Env, refresh};
+pub use refresh::{Env, refresh, refresh_with};
 pub use state::{Record, Status};
 
 /// The home directory: `$HOME`.
@@ -43,5 +44,9 @@ pub fn run(enabled: bool, force: bool) -> Option<Record> {
         enabled,
         force,
     };
-    Some(refresh(&env, &probe::Anthropic::new()))
+    Some(refresh_with(
+        &env,
+        &probe::Anthropic::new(),
+        &codex::AppServer::new(),
+    ))
 }

@@ -8,7 +8,7 @@ const dir = resolve(process.env.EXT ?? 'extension/vexos-assistant@victorytek.git
 const view = await import(pathToFileURL(join(dir, 'usage_view.js')));
 const {parseRecord, currentWindows, formatCountdown, formatAge, percentText, isUrgent,
     displayWindows, statusLine, refreshDelaySeconds, shouldRefreshOnOpen, STATUSES, MESSAGES,
-    MAX_FILE_BYTES, URGENT_PERCENT} = view;
+    CODEX_MESSAGES, sources, MAX_FILE_BYTES, URGENT_PERCENT} = view;
 
 const NOW = 1_800_000_000_000;
 const MIN = 60_000;
@@ -116,7 +116,8 @@ test('displayWindows: Session, Weekly, then scoped, each group in the file order
 test('statusLine: one fixed sentence per situation, with the age of kept numbers', () => {
     for (const status of STATUSES) {
         const line = statusLine(parseRecord(record({status}, [win('session', 5)])), NOW);
-        if (status === 'ok' || status === 'disabled')
+        // Claude's sign-in is never "no plan": that status is Codex's.
+        if (status === 'ok' || status === 'disabled' || status === 'no-plan')
             assert.equal(line, null, status);
         else
             assert.equal(line, MESSAGES[status], status);
@@ -155,4 +156,74 @@ test('shouldRefreshOnOpen: when on and last asked over 2 min ago and not in a ba
     assert.equal(shouldRefreshOnOpen(at({probedAt: 1}), NOW, false), false);
     assert.equal(shouldRefreshOnOpen(null, NOW, false), false);
     assert.equal(shouldRefreshOnOpen(null, NOW), true, 'on by default');
+});
+
+const codex = (over = {}, windows = []) => ({
+    status: 'ok', plan: 'Plus', stale: false, fetchedAt: NOW, nextAt: 0, windows, ...over,
+});
+
+test('parseRecord: Codex is an optional section read the same careful way', () => {
+    const plain = parseRecord(record());
+    assert.equal(plain.codex, null);
+    const r = parseRecord(record({codex: codex({}, [win('session', 25, NOW + HOUR, 'Session')])}));
+    assert.equal(r.codex.status, 'ok');
+    assert.equal(r.codex.plan, 'Plus');
+    assert.equal(r.codex.enabled, true);
+    assert.deepEqual(r.codex.windows, [{id: 'session', label: 'Session', percent: 25, resetsAt: NOW + HOUR}]);
+    // A damaged section is no section; Claude's numbers still read.
+    for (const bad of [null, 'x', [], {status: 'bogus', windows: []}, {status: 'ok'}, {status: 'ok', windows: 5}]) {
+        const damaged = parseRecord(record({codex: bad}, [win('session', 5)]));
+        assert.equal(damaged.codex, null, JSON.stringify(bad));
+        assert.equal(damaged.windows.length, 1);
+    }
+});
+
+test('sources: Claude always, Codex when the service found it', () => {
+    assert.deepEqual(sources(null), []);
+    assert.deepEqual(sources(parseRecord(record())).map(x => x.agent), ['claude']);
+    const both = sources(parseRecord(record({codex: codex()})));
+    assert.deepEqual(both.map(x => x.agent), ['claude', 'codex']);
+    assert.deepEqual(both.map(x => x.name), ['Claude Code', 'Codex']);
+});
+
+test('isUrgent and the refresh pace follow every agent, not only Claude', () => {
+    const calm = parseRecord(record({codex: codex({}, [win('weekly', 95, NOW + HOUR)])}, [win('session', 5)]));
+    assert.equal(isUrgent(calm, NOW), true, 'Codex alone is enough');
+    assert.equal(refreshDelaySeconds(calm, NOW), 3 * 60);
+    const elapsed = parseRecord(record({codex: codex({}, [win('weekly', 95, NOW - MIN)])}, [win('session', 5)]));
+    assert.equal(isUrgent(elapsed, NOW), false, 'a reset window is untouched');
+    const off = parseRecord(record({enabled: false, codex: codex({}, [win('weekly', 95)])}));
+    assert.equal(isUrgent(off, NOW), false);
+});
+
+test('statusLine: Codex has its own fixed words and the same age rule', () => {
+    for (const status of STATUSES) {
+        const r = parseRecord(record({codex: codex({status}, [win('session', 5)])}));
+        const line = statusLine(r.codex, NOW, 'codex');
+        if (CODEX_MESSAGES[status])
+            assert.equal(line, CODEX_MESSAGES[status], status);
+        else
+            assert.equal(line, null, status);
+    }
+    const stale = parseRecord(record({codex: codex({status: 'unavailable', stale: true, fetchedAt: NOW - 12 * MIN})}));
+    assert.equal(statusLine(stale.codex, NOW, 'codex'), `${CODEX_MESSAGES.unavailable} Last updated 12 min ago.`);
+    for (const text of Object.values(CODEX_MESSAGES))
+        assert.ok(/^[ -~]+$/.test(text) && text.length < 100, text);
+});
+
+test("Claude's backoff does not hold back a healthy Codex", () => {
+    const stuck = parseRecord(record({status: 'rate-limited', nextAt: NOW + HOUR, probedAt: NOW - 10 * MIN,
+        codex: codex({fetchedAt: NOW - 10 * MIN}, [win('weekly', 95, NOW + DAY)])}, [win('session', 5)]));
+    assert.equal(refreshDelaySeconds(stuck, NOW), 3 * 60, 'the near-limit pace, not the hour');
+    assert.equal(shouldRefreshOnOpen(stuck, NOW), true, 'Codex is due on open');
+    // Both waiting: nothing to ask before the earlier wait ends.
+    const both = parseRecord(record({status: 'rate-limited', nextAt: NOW + HOUR, probedAt: NOW - 10 * MIN,
+        codex: codex({status: 'unavailable', nextAt: NOW + 20 * MIN, fetchedAt: NOW - 10 * MIN}, [win('weekly', 95, NOW + DAY)])},
+    [win('session', 5)]));
+    assert.equal(refreshDelaySeconds(both, NOW), 20 * 60);
+    assert.equal(shouldRefreshOnOpen(both, NOW), false);
+    // Claude's wait alone still holds when there is no Codex.
+    const alone = parseRecord(record({status: 'rate-limited', nextAt: NOW + HOUR, probedAt: NOW - 10 * MIN}, [win('session', 5)]));
+    assert.equal(refreshDelaySeconds(alone, NOW), 3600);
+    assert.equal(shouldRefreshOnOpen(alone, NOW), false);
 });

@@ -7,10 +7,11 @@
 use std::cell::Cell;
 use std::path::PathBuf;
 
+use crate::codex::{self, CodexError, Limits, NoCodex, Outcome};
 use crate::credentials::{self, NoLogin};
 use crate::parse::{Window, parse_usage};
 use crate::probe::{Fetch, FetchError};
-use crate::state::{self, Record, Status, zero_elapsed};
+use crate::state::{self, Record, Source, Status, zero_elapsed};
 
 /// A request is never made twice inside this, unless a person forces it.
 pub const MIN_PROBE_MS: u64 = 15_000;
@@ -19,6 +20,8 @@ pub const MIN_PROBE_MS: u64 = 15_000;
 pub const TRANSPORT_RETRY_MS: u64 = 60_000;
 /// After the sign-in was refused, asking again soon changes nothing.
 pub const REFUSED_RETRY_MS: u64 = 15 * 60_000;
+/// After Codex failed to answer, asking again at once changes nothing.
+pub const CODEX_RETRY_MS: u64 = 5 * 60_000;
 /// The backoff: 1, 2, 4 ... 60 minutes.
 pub const MAX_BACKOFF_MS: u64 = 60 * 60_000;
 /// Numbers measured this recently still describe the account, even when Anthropic
@@ -50,9 +53,18 @@ fn kept(previous: &Record, now: u64) -> Vec<Window> {
 /// Runs one refresh, writes the record, and returns it. A write that fails is
 /// not an error for the caller: the record is returned all the same.
 pub fn refresh(env: &Env, fetcher: &dyn Fetch) -> Record {
+    refresh_with(env, fetcher, &NoCodex)
+}
+
+/// `refresh`, and Codex's limits asked of `codex` beside Claude's. Claude's
+/// outcome never decides Codex's, or the other way round.
+pub fn refresh_with(env: &Env, fetcher: &dyn Fetch, codex: &dyn Limits) -> Record {
     let previous = state::read(&env.state_file).unwrap_or_else(Record::empty);
-    let (record, write) = decide(env, fetcher, previous);
-    if write {
+    let previous_codex = previous.codex.clone();
+    let (mut record, claude_changed) = decide(env, fetcher, previous);
+    let (section, codex_changed) = decide_codex(env, codex, previous_codex);
+    record.codex = section;
+    if claude_changed || codex_changed {
         let _ = state::write(&env.state_file, &record);
     }
     record
@@ -167,6 +179,83 @@ fn decide(env: &Env, fetcher: &dyn Fetch, previous: Record) -> (Record, bool) {
         }
     };
     (record, true)
+}
+
+/// Codex's turn. Off reads nothing and starts nothing; no Codex leaves no section.
+fn decide_codex(
+    env: &Env,
+    runner: &dyn Limits,
+    previous: Option<Source>,
+) -> (Option<Source>, bool) {
+    let now = env.now_ms;
+    if !env.enabled {
+        return (None, false);
+    }
+    if let Some(p) = &previous {
+        // A person who signed in again, as the panel told them, must not wait
+        // out the rest of the pause; every other wait stands.
+        let waiting_for_sign_in = p.status == Status::WaitingForAuth;
+        if now < p.next_at_ms && !(env.force && waiting_for_sign_in) {
+            return (previous, false);
+        }
+        if !env.force
+            && p.status == Status::Ok
+            && now.saturating_sub(p.fetched_at_ms) < MIN_PROBE_MS
+        {
+            return (previous, false);
+        }
+    }
+    let (kept_plan, kept_fetched, kept_windows) = previous.as_ref().map_or_else(
+        || (String::new(), 0, Vec::new()),
+        |p| {
+            (
+                p.plan.clone(),
+                p.fetched_at_ms,
+                zero_elapsed(&p.windows, now),
+            )
+        },
+    );
+    let failed = |status: Status, retry_ms: u64| Source {
+        status,
+        plan: kept_plan.clone(),
+        stale: !kept_windows.is_empty(),
+        windows: kept_windows.clone(),
+        fetched_at_ms: kept_fetched,
+        next_at_ms: now + retry_ms,
+    };
+    let section = match runner.read() {
+        Err(CodexError::NotInstalled) => None,
+        Err(CodexError::Failed) => Some(failed(Status::Unavailable, CODEX_RETRY_MS)),
+        Ok(reading) => Some(match codex::interpret(&reading) {
+            Outcome::Limits { plan, windows } => Source {
+                status: Status::Ok,
+                plan,
+                windows,
+                stale: false,
+                fetched_at_ms: now,
+                next_at_ms: 0,
+            },
+            Outcome::SignedOut => Source {
+                status: Status::WaitingForAuth,
+                plan: String::new(),
+                windows: Vec::new(),
+                stale: false,
+                fetched_at_ms: 0,
+                next_at_ms: now + MIN_PROBE_MS,
+            },
+            Outcome::NoPlan => Source {
+                status: Status::NoPlan,
+                plan: String::new(),
+                windows: Vec::new(),
+                stale: false,
+                fetched_at_ms: 0,
+                next_at_ms: now + MIN_PROBE_MS,
+            },
+            Outcome::FormatChanged => failed(Status::FormatChanged, CODEX_RETRY_MS),
+        }),
+    };
+    let changed = section != previous;
+    (section, changed)
 }
 
 enum Failure {
@@ -617,5 +706,149 @@ mod tests {
             );
         }
         let _ = Path::new("");
+    }
+
+    /// A pretend Codex that counts how often it is asked.
+    struct FakeCodex<'a> {
+        calls: &'a Cell<u32>,
+        reply: Result<codex::Reading, CodexError>,
+    }
+
+    impl Limits for FakeCodex<'_> {
+        fn read(&self) -> Result<codex::Reading, CodexError> {
+            self.calls.set(self.calls.get() + 1);
+            self.reply.clone()
+        }
+    }
+
+    fn plan_reading() -> codex::Reading {
+        codex::Reading {
+            account: serde_json::json!({"account": {"type": "chatgpt", "email": "me@example.com", "planType": "plus"}}),
+            limits: Some(serde_json::json!({"rateLimits": {
+                "primary": {"usedPercent": 25, "windowDurationMins": 300, "resetsAt": (NOW / 1000) + 3600},
+                "secondary": {"usedPercent": 61, "windowDurationMins": 10080, "resetsAt": (NOW / 1000) + 86400}}})),
+        }
+    }
+
+    fn fake<'a>(calls: &'a Cell<u32>, reply: Result<codex::Reading, CodexError>) -> FakeCodex<'a> {
+        FakeCodex { calls, reply }
+    }
+
+    #[test]
+    fn codex_is_asked_beside_claude_and_claudes_trouble_does_not_stop_it() {
+        // No Claude login at all: Claude waits for a sign-in, Codex still reads.
+        let rig = Rig::new("codex-ok", None);
+        let (claude, codex_calls) = (Cell::new(0), Cell::new(0));
+        let record = refresh_with(
+            &rig.env(NOW, true, false),
+            &ok(&claude),
+            &fake(&codex_calls, Ok(plan_reading())),
+        );
+        assert_eq!(record.status, Status::WaitingForAuth);
+        let section = record.codex.expect("a codex section");
+        assert_eq!(section.status, Status::Ok);
+        assert_eq!(section.plan, "Plus");
+        assert_eq!(section.windows.len(), 2);
+        assert_eq!(rig.saved().unwrap().codex.unwrap().windows.len(), 2);
+        // The email never reaches the file.
+        let file = fs::read_to_string(rig.home.join("state").join(state::FILE)).unwrap();
+        assert!(!file.contains("me@example.com"));
+    }
+
+    #[test]
+    fn switched_off_never_starts_codex_and_forgets_its_numbers() {
+        let rig = Rig::new("codex-off", Some(&good_login()));
+        let (claude, codex_calls) = (Cell::new(0), Cell::new(0));
+        let codex = fake(&codex_calls, Ok(plan_reading()));
+        refresh_with(&rig.env(NOW, true, true), &ok(&claude), &codex);
+        assert_eq!(codex_calls.get(), 1);
+        let record = refresh_with(&rig.env(NOW + 1, false, true), &ok(&claude), &codex);
+        assert_eq!(codex_calls.get(), 1, "not asked while off");
+        assert!(record.codex.is_none());
+        assert!(rig.saved().unwrap().codex.is_none());
+    }
+
+    #[test]
+    fn no_codex_means_no_section() {
+        let rig = Rig::new("codex-none", Some(&good_login()));
+        let (claude, codex_calls) = (Cell::new(0), Cell::new(0));
+        let record = refresh_with(
+            &rig.env(NOW, true, false),
+            &ok(&claude),
+            &fake(&codex_calls, Err(CodexError::NotInstalled)),
+        );
+        assert!(record.codex.is_none());
+        assert_eq!(record.status, Status::Ok);
+    }
+
+    #[test]
+    fn a_failed_codex_keeps_its_numbers_and_waits_five_minutes() {
+        let rig = Rig::new("codex-fail", Some(&good_login()));
+        let (claude, codex_calls) = (Cell::new(0), Cell::new(0));
+        refresh_with(
+            &rig.env(NOW, true, false),
+            &ok(&claude),
+            &fake(&codex_calls, Ok(plan_reading())),
+        );
+        let later = NOW + 2 * MIN_PROBE_MS;
+        let record = refresh_with(
+            &rig.env(later, true, false),
+            &ok(&claude),
+            &fake(&codex_calls, Err(CodexError::Failed)),
+        );
+        let section = record.codex.unwrap();
+        assert_eq!(section.status, Status::Unavailable);
+        assert!(section.stale);
+        assert_eq!(section.windows.len(), 2);
+        assert_eq!(section.next_at_ms, later + CODEX_RETRY_MS);
+        // The wait stands, even for a forced refresh.
+        let asked = codex_calls.get();
+        refresh_with(
+            &rig.env(later + 1_000, true, true),
+            &ok(&claude),
+            &fake(&codex_calls, Ok(plan_reading())),
+        );
+        assert_eq!(codex_calls.get(), asked);
+    }
+
+    #[test]
+    fn the_interval_absorbs_repeats_but_a_forced_refresh_skips_it() {
+        let rig = Rig::new("codex-interval", Some(&good_login()));
+        let (claude, codex_calls) = (Cell::new(0), Cell::new(0));
+        let codex = fake(&codex_calls, Ok(plan_reading()));
+        refresh_with(&rig.env(NOW, true, false), &ok(&claude), &codex);
+        refresh_with(&rig.env(NOW + 1_000, true, false), &ok(&claude), &codex);
+        assert_eq!(codex_calls.get(), 1);
+        refresh_with(&rig.env(NOW + 2_000, true, true), &ok(&claude), &codex);
+        assert_eq!(codex_calls.get(), 2);
+    }
+
+    #[test]
+    fn signing_in_again_is_not_made_to_wait() {
+        let rig = Rig::new("codex-signin", Some(&good_login()));
+        let (claude, codex_calls) = (Cell::new(0), Cell::new(0));
+        let signed_out = codex::Reading {
+            account: serde_json::json!({"account": null}),
+            limits: None,
+        };
+        let record = refresh_with(
+            &rig.env(NOW, true, false),
+            &ok(&claude),
+            &fake(&codex_calls, Ok(signed_out)),
+        );
+        assert_eq!(record.codex.unwrap().status, Status::WaitingForAuth);
+        // Soon after, a plain refresh waits; a forced one asks again.
+        let plain = refresh_with(
+            &rig.env(NOW + 1_000, true, false),
+            &ok(&claude),
+            &fake(&codex_calls, Ok(plan_reading())),
+        );
+        assert_eq!(plain.codex.unwrap().status, Status::WaitingForAuth);
+        let forced = refresh_with(
+            &rig.env(NOW + 2_000, true, true),
+            &ok(&claude),
+            &fake(&codex_calls, Ok(plan_reading())),
+        );
+        assert_eq!(forced.codex.unwrap().status, Status::Ok);
     }
 }

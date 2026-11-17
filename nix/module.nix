@@ -71,7 +71,25 @@ let
   };
 
   extension = mkVexosAiExtension pkgs;
-  usage = mkVexosAiUsage pkgs;
+  # The usage service asks `codex app-server` for Codex's limits, so the Codex
+  # the module was given is on its PATH; with none, it finds `codex` on the
+  # user's PATH, or shows no Codex section.
+  usage =
+    if cfg.codexPackage == null then mkVexosAiUsage pkgs
+    else pkgs.symlinkJoin {
+      name = "vexos-ai-usage";
+      paths = [ (mkVexosAiUsage pkgs) ];
+      nativeBuildInputs = [ pkgs.makeWrapper ];
+      # D-Bus activation must start the wrapped service too.
+      postBuild = ''
+        wrapProgram $out/bin/vexos-ai-usage \
+          --prefix PATH : ${lib.makeBinPath [ cfg.codexPackage ]}
+        service=$out/share/dbus-1/services/io.github.victorytek.VexosAssistant.Usage.service
+        rm $service
+        printf '%s\n' '[D-BUS Service]' 'Name=io.github.victorytek.VexosAssistant.Usage' \
+          "Exec=$out/bin/vexos-ai-usage --gapplication-service" > $service
+      '';
+    };
 
   # A managed policy file the panel relies on: installed, enabled, unchanged.
   managed = path: text:
@@ -195,9 +213,11 @@ in
       defaultText = lib.literalExpression "config.programs.vexos-ai.enablePanelExtension";
       description = ''
         Install the usage service (vexos-ai-usage), which the extension's
-        top-bar panel asks for Claude's plan limits. Installing it reads
-        nothing: the service stays idle, and reads Claude's saved sign-in only
-        after the user turns "Show plan limits" on in the panel.
+        top-bar panel asks for plan limits: Claude's, from Claude Code's saved
+        sign-in, and Codex's, from `codex app-server` (Codex's own login; this
+        service never reads it). Installing it reads nothing: the service stays
+        idle, and asks only after the user turns "Show plan limits" on in the
+        panel. With `codexPackage` set, that Codex is the one it asks.
       '';
     };
   };

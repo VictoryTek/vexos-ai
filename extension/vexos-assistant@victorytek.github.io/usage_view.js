@@ -4,13 +4,15 @@
 // The input is the usage service's record (crates/vexos-ai-usage,
 // $XDG_STATE_HOME/vexos-ai/usage.json): numbers and fixed words. It is read
 // from disk, so every field is checked here and nothing in it is trusted.
+// The record's own fields are Claude's; an optional `codex` section holds
+// Codex's, in the same shape.
 
 export const SCHEMA = 1;
 export const MAX_FILE_BYTES = 64 * 1024;
 export const URGENT_PERCENT = 90;
 
 export const STATUSES = ['ok', 'disabled', 'waiting-for-auth', 'paused',
-    'signin-expired', 'unavailable', 'rate-limited', 'unreachable', 'format-changed'];
+    'signin-expired', 'unavailable', 'rate-limited', 'unreachable', 'format-changed', 'no-plan'];
 
 // The panel's own words, one fixed sentence for each situation.
 export const MESSAGES = {
@@ -22,6 +24,16 @@ export const MESSAGES = {
     'unreachable': "Can't reach Anthropic. Retrying shortly.",
     'format-changed': 'Anthropic changed the usage format, so limits are unavailable.',
 };
+
+// The same for Codex, whose few situations read differently.
+export const CODEX_MESSAGES = {
+    'waiting-for-auth': 'Waiting for a sign-in. Run `codex login`.',
+    'unavailable': 'Codex limits are unavailable right now.',
+    'format-changed': 'Codex changed its usage format, so limits are unavailable.',
+    'no-plan': 'This Codex sign-in has no plan limits.',
+};
+
+export const AGENT_NAMES = {claude: 'Claude Code', codex: 'Codex'};
 
 const MINUTE = 60 * 1000;
 const HOUR = 60 * MINUTE;
@@ -54,6 +66,20 @@ export function parseRecord(text) {
         return null;
     if (!STATUSES.includes(v.status) || !Array.isArray(v.windows))
         return null;
+    const enabled = v.enabled === true;
+    return {
+        ...readSource(v, enabled),
+        enabled,
+        updatedAt: whole(v.updatedAt),
+        probedAt: whole(v.probedAt),
+        codex: v.codex !== null && typeof v.codex === 'object' && !Array.isArray(v.codex) && STATUSES.includes(v.codex.status) && Array.isArray(v.codex.windows)
+            ? {...readSource(v.codex, enabled), enabled} : null,
+    };
+}
+
+// The fields every source has, whichever agent it is: Claude's are the
+// record's own, Codex's are its `codex` section.
+function readSource(v, enabled) {
     const windows = [];
     for (const w of v.windows.slice(0, 16)) {
         if (w === null || typeof w !== 'object')
@@ -68,16 +94,25 @@ export function parseRecord(text) {
         windows.push({id, label, percent: Math.min(100, percent), resetsAt: whole(w.resetsAt)});
     }
     return {
-        enabled: v.enabled === true,
+        enabled,
         status: v.status,
         plan: clean(v.plan ?? '', 24).trim(),
         stale: v.stale === true,
-        updatedAt: whole(v.updatedAt),
         fetchedAt: whole(v.fetchedAt),
-        probedAt: whole(v.probedAt),
         nextAt: whole(v.nextAt),
         windows,
     };
+}
+
+// The agents with something to show: Claude's always (it is the record), then
+// Codex's when the service found Codex.
+export function sources(record) {
+    if (!record)
+        return [];
+    const list = [{agent: 'claude', name: AGENT_NAMES.claude, data: record}];
+    if (record.codex)
+        list.push({agent: 'codex', name: AGENT_NAMES.codex, data: record.codex});
+    return list;
 }
 
 // A window whose reset has passed is untouched, not unknown: it reads 0%.
@@ -120,11 +155,12 @@ export function percentText(percent) {
     return `${Math.round(Math.min(100, Math.max(0, percent)))}%`;
 }
 
-// The icon turns urgent when any window is at 90% or more.
+// The icon turns urgent when any window of any agent is at 90% or more.
 export function isUrgent(record, nowMs) {
     if (!record || !record.enabled)
         return false;
-    return currentWindows(record, nowMs).some(w => w.percent >= URGENT_PERCENT);
+    return sources(record).some(({data}) =>
+        currentWindows(data, nowMs).some(w => w.percent >= URGENT_PERCENT));
 }
 
 // Sorted for display: Session, Weekly, then model-scoped windows.
@@ -136,11 +172,11 @@ export function displayWindows(record, nowMs) {
         .map(({w}) => w);
 }
 
-// The sentence under the meters, if the situation needs one.
-export function statusLine(record, nowMs) {
+// The sentence under an agent's meters, if the situation needs one.
+export function statusLine(record, nowMs, agent = 'claude') {
     if (!record || !record.enabled)
         return null;
-    const text = MESSAGES[record.status];
+    const text = (agent === 'codex' ? CODEX_MESSAGES : MESSAGES)[record.status];
     if (!text)
         return record.stale ? `Last updated ${formatAge(record.fetchedAt, nowMs)}.` : null;
     const age = record.stale && record.fetchedAt > 0
@@ -153,17 +189,21 @@ export function statusLine(record, nowMs) {
 export function refreshDelaySeconds(record, nowMs) {
     let delay = REFRESH_SECONDS;
     if (record && record.enabled) {
-        if (currentWindows(record, nowMs).some(w => w.percent >= URGENT_PERCENT))
+        if (isUrgent(record, nowMs))
             delay = NEAR_LIMIT_REFRESH_SECONDS;
         if (record.status === 'unreachable')
             delay = RETRY_SECONDS;
-        if (record.nextAt > nowMs)
-            delay = Math.max(delay, Math.ceil((record.nextAt - nowMs) / 1000));
+        // A request asks every agent, and each keeps its own backoff, so only
+        // when all of them are waiting is there nothing to ask before the
+        // earliest of those waits ends.
+        const waits = sources(record).map(({data}) => data.nextAt);
+        if (waits.every(at => at > nowMs))
+            delay = Math.max(delay, Math.ceil((Math.min(...waits) - nowMs) / 1000));
     }
     return Math.max(MIN_REFRESH_SECONDS, delay);
 }
 
-// Opening the panel asks for fresh numbers when the last request is old, or
+// Opening the panel asks for fresh numbers when an agent's last request is old, or
 // when plan limits are on but the record does not say so yet (the switch was
 // just turned on, or the record was cleared).
 export function shouldRefreshOnOpen(record, nowMs, settingOn = true) {
@@ -171,5 +211,9 @@ export function shouldRefreshOnOpen(record, nowMs, settingOn = true) {
         return false;
     if (!record || !record.enabled)
         return true;
-    return nowMs - record.probedAt > OPEN_REFRESH_AFTER_MS && nowMs >= record.nextAt;
+    // Due when any agent was last asked long ago and is not in a backoff.
+    return sources(record).some(({agent, data}) => {
+        const asked = agent === 'codex' ? data.fetchedAt : record.probedAt;
+        return nowMs - asked > OPEN_REFRESH_AFTER_MS && nowMs >= data.nextAt;
+    });
 }
