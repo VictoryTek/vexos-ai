@@ -66,7 +66,7 @@ pub use diagnose::{
 pub use markdown::{Block, BlockKind, Run, Style, blocks, markdown};
 pub use notify::{Crashes, FailedUnits, SETTINGS_FILE, Settings};
 pub use proposal::{DiffLine, Proposal, line_diff};
-pub use scroll::{SLACK, at_end, end_value};
+pub use scroll::{Moved, SLACK, after_move, at_end, end_value};
 pub use starters::{STARTERS, Starter, starter};
 pub use usage::{
     CLICK_TOOLTIP, Disabled, FiveHour, PANEL_SETTINGS_FILE, PanelSettings, USAGE_LOCK, UsageButton,

@@ -450,7 +450,17 @@ mod tests {
         use super::*;
         use std::os::unix::fs::PermissionsExt;
 
-        fn script(name: &str, body: &str) -> std::path::PathBuf {
+        /// One process test at a time. A script that was just written can be
+        /// refused as "text file busy" while another test thread is between
+        /// fork and exec holding a copy of its file descriptor, which made
+        /// these tests fail now and then. The guard lives as long as the test.
+        static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+        fn script(
+            name: &str,
+            body: &str,
+        ) -> (std::sync::MutexGuard<'static, ()>, std::path::PathBuf) {
+            let serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
             let dir =
                 std::env::temp_dir().join(format!("vexos-codex-{name}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
@@ -458,7 +468,7 @@ mod tests {
             let path = dir.join("codex");
             std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-            path
+            (serial, path)
         }
 
         const GOOD: &str = r#"
@@ -475,7 +485,7 @@ echo '{"id":3,"result":{"rateLimits":{"primary":{"usedPercent":25,"windowDuratio
 
         #[test]
         fn a_conversation_with_codex_reads_the_limits() {
-            let codex = script("good", GOOD);
+            let (_serial, codex) = script("good", GOOD);
             let got = AppServer::with(&codex, Duration::from_secs(10))
                 .read()
                 .unwrap();
@@ -484,7 +494,7 @@ echo '{"id":3,"result":{"rateLimits":{"primary":{"usedPercent":25,"windowDuratio
 
         #[test]
         fn signed_out_never_asks_for_limits() {
-            let codex = script(
+            let (_serial, codex) = script(
                 "out",
                 r#"read line
 echo '{"id":1,"result":{}}'
@@ -502,7 +512,7 @@ sleep 5"#,
 
         #[test]
         fn a_silent_codex_is_cut_off_at_the_deadline() {
-            let codex = script("hang", "sleep 30");
+            let (_serial, codex) = script("hang", "sleep 30");
             let started = Instant::now();
             let got = AppServer::with(&codex, Duration::from_millis(300)).read();
             assert_eq!(got, Err(CodexError::Failed));
@@ -511,7 +521,7 @@ sleep 5"#,
 
         #[test]
         fn an_error_answer_fails() {
-            let codex = script(
+            let (_serial, codex) = script(
                 "err",
                 r#"read line
 echo '{"id":1,"error":{"code":-32600,"message":"no"}}'
@@ -523,7 +533,7 @@ sleep 5"#,
 
         #[test]
         fn a_flood_is_capped_not_stored() {
-            let codex = script(
+            let (_serial, codex) = script(
                 "flood",
                 "yes 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'",
             );

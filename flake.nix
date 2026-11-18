@@ -198,11 +198,38 @@
         # backoff, the one request's guards (no redirect, size cap, https only),
         # that the token reaches no file or print, and that only one source file
         # names Claude's login file, plus clippy. Its tests run in the build
-        # (buildRustPackage's check phase); the D-Bus service file is checked
-        # in `module`.
+        # (buildRustPackage's check phase). After install, the installed service
+        # is started the way D-Bus starts it: from its own service file, on a
+        # private session bus, then asked to refresh with no sign-in around. It
+        # must answer and write its record. (A check that only compared the
+        # service file's text let a service that exits on start through.) The
+        # service file's text is checked in `module`.
         usage = self.packages.${pkgs.stdenv.hostPlatform.system}.vexos-ai-usage.overrideAttrs (old: {
           nativeBuildInputs = old.nativeBuildInputs ++ [ pkgs.clippy ];
           postCheck = "cargo clippy --offline --all-targets -p vexos-ai-usage -- -D warnings";
+          doInstallCheck = true;
+          nativeInstallCheckInputs = [ pkgs.dbus pkgs.glib ];
+          installCheckPhase = ''
+            export HOME=$TMPDIR/home XDG_STATE_HOME=$TMPDIR/state GSETTINGS_BACKEND=memory
+            export XDG_DATA_DIRS=$out/share
+            mkdir -p "$HOME"
+            unset CLAUDE_CONFIG_DIR
+            dbus-run-session --config-file=${pkgs.dbus}/share/dbus-1/session.conf -- bash -ec '
+              gdbus call --session --timeout 20 \
+                --dest io.github.victorytek.VexosAssistant.Usage \
+                --object-path /io/github/victorytek/VexosAssistant/Usage \
+                --method org.freedesktop.Application.ActivateAction refresh "[]" "{}"
+              for i in $(seq 1 100); do
+                [ -s "$XDG_STATE_HOME/vexos-ai/usage.json" ] && break
+                sleep 0.2
+              done
+              cat "$XDG_STATE_HOME/vexos-ai/usage.json"
+            ' | tee $TMPDIR/record.json
+            # The switch reads as on (the schema default, through the wrapper) and
+            # there is no sign-in to read, so the record says so.
+            grep -q '"enabled": *true' $TMPDIR/record.json
+            grep -q '"status": *"waiting-for-auth"' $TMPDIR/record.json
+          '';
         });
 
         # The extension as built: metadata, layout, JS syntax, compiled schema.

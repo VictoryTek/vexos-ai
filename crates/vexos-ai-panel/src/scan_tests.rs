@@ -803,7 +803,15 @@ fn a_streamed_reply_is_updated_in_place_and_followed_after_layout() {
             "adjustment.set_value(end_value(adjustment.upper(), adjustment.page_size()));"
         )
     );
-    assert!(main.contains("ui.follow.set(at_end("));
+    // Following is lost only when the user was acting on the list; a move
+    // with no input behind it is put back (`Moved::Restore`). Input is seen by
+    // a raw capture controller, because a gesture start and end are unreliable.
+    assert!(main.contains("Moved::Restore => adjustment.set_value(end_value(upper, page)),"));
+    assert!(main.contains("Moved::Resume => ui.follow.set(true),"));
+    assert!(main.contains("Moved::Stop => ui.follow.set(false),"));
+    assert!(main.contains("gtk::EventControllerLegacy::new()"));
+    assert!(main.contains("ui.scroller.add_controller(input);"));
+    assert_eq!(main.matches("ui.follow.set(false)").count(), 1);
     // A grown reply is filled into its existing view; replacing the widget
     // would shrink the list and throw the scroll position.
     let update = body("update");

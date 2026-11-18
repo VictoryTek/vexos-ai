@@ -20,12 +20,16 @@ use style::TagColors;
 use vexos_ai_core::{Agent, Config, Decision, Error, Session};
 use vexos_ai_viewmodel::{
     AGENT_FILE, Answer, ApprovalCard, CARD_LIMIT, Composer, Conversation, DiffLine,
-    EXTENSION_BUS_NAME, Empty, Item, Offer, Outgoing, Placement, Proposal, STARTERS, Sent, Startup,
-    State, Via, WINDOW_MODE_KEY, WINDOW_SCHEMA, WindowMode, agent_label, at_end, docked_layout,
-    end_value, markdown, mode_label, saved_agent, since_process_start, starter, window_look,
+    EXTENSION_BUS_NAME, Empty, Item, Moved, Offer, Outgoing, Placement, Proposal, STARTERS, Sent,
+    Startup, State, Via, WINDOW_MODE_KEY, WINDOW_SCHEMA, WindowMode, after_move, agent_label,
+    docked_layout, end_value, markdown, mode_label, saved_agent, since_process_start, starter,
+    window_look,
 };
 
 const APP_ID: &str = "io.github.victorytek.VexosAssistant";
+/// How long after an input a scroll still counts as the user's: a key or a
+/// swipe goes on moving the list for a moment.
+const ACTIVE_US: i64 = 2_000_000;
 /// Where every session runs, as `vexos-ai` does in the terminal.
 const WORKDIR: &str = "/etc/nixos";
 /// The agent starts after the window's first frame, because its start takes
@@ -282,6 +286,11 @@ struct Ui {
     /// The list scrolls to follow new text: true while the user is at the end
     /// (and after they send), false once they scroll up to read.
     follow: Cell<bool>,
+    /// A button or finger is down over the list, and when the user last did
+    /// anything to it (`glib::monotonic_time`, µs): what tells their scrolling
+    /// from a move nobody asked for.
+    held: Cell<bool>,
+    touched: Cell<i64>,
     input: gtk::TextView,
     send: gtk::Button,
     /// Runs while the window is hidden: when it fires the session ends.
@@ -524,6 +533,8 @@ impl Ui {
             rows: RefCell::new(Vec::new()),
             dirty: RefCell::new(Vec::new()),
             follow: Cell::new(true),
+            held: Cell::new(false),
+            touched: Cell::new(i64::MIN / 2),
             input,
             send,
             hidden_timer: RefCell::new(None),
@@ -547,33 +558,64 @@ impl Ui {
             move |_| ui.submit(Via::SendButton)
         });
         // Follow growing text, once it has been laid out (`upper` is the list's
-        // height after layout). A change of the value that leaves the user short
-        // of the end is them scrolling up to read: stop following until they
-        // come back down or send. The window's own growth never changes the
-        // value, so it never ends following.
+        // height after layout). While following, a change that leaves the list
+        // short of the end is put back unless the user just did something with
+        // the list (a wheel turn, a click, a key, a touch): then it was them
+        // scrolling, and following stops until they come back to the end.
         let adjustment = ui.scroller.vadjustment();
-        adjustment.connect_upper_notify({
+        let snap = {
             let weak = Rc::downgrade(&ui);
-            move |adjustment| {
+            move |adjustment: &gtk::Adjustment| {
                 if let Some(ui) = weak.upgrade()
                     && ui.follow.get()
                 {
                     adjustment.set_value(end_value(adjustment.upper(), adjustment.page_size()));
                 }
             }
-        });
+        };
+        adjustment.connect_upper_notify(snap.clone());
+        adjustment.connect_page_size_notify(snap);
         adjustment.connect_value_changed({
             let weak = Rc::downgrade(&ui);
             move |adjustment| {
-                if let Some(ui) = weak.upgrade() {
-                    ui.follow.set(at_end(
-                        adjustment.value(),
-                        adjustment.upper(),
-                        adjustment.page_size(),
-                    ));
+                let Some(ui) = weak.upgrade() else { return };
+                let (value, upper, page) = (
+                    adjustment.value(),
+                    adjustment.upper(),
+                    adjustment.page_size(),
+                );
+                match after_move(ui.follow.get(), ui.user_active(), value, upper, page) {
+                    Moved::Resume => ui.follow.set(true),
+                    Moved::Stop => ui.follow.set(false),
+                    Moved::Restore => adjustment.set_value(end_value(upper, page)),
+                    Moved::Leave => {}
                 }
             }
         });
+        // Raw input over the list, seen before any gesture can claim it (a
+        // gesture's start and end are not reliable: GTK's own scrolling claims
+        // them). It only notes that the user is acting: a button or finger down
+        // until it is up, and the moment of any wheel, key or touch.
+        let input = gtk::EventControllerLegacy::new();
+        input.set_propagation_phase(gtk::PropagationPhase::Capture);
+        input.connect_event({
+            let weak = Rc::downgrade(&ui);
+            move |_, event| {
+                if let Some(ui) = weak.upgrade() {
+                    use gdk::EventType as E;
+                    match event.event_type() {
+                        E::ButtonPress | E::TouchBegin => ui.input(Some(true)),
+                        E::ButtonRelease | E::TouchEnd | E::TouchCancel | E::GrabBroken => {
+                            ui.input(Some(false))
+                        }
+                        E::Scroll | E::TouchUpdate | E::KeyPress => ui.input(None),
+                        _ => {}
+                    }
+                }
+                glib::Propagation::Proceed
+            }
+        });
+        ui.scroller.add_controller(input);
         // A starter card puts its fixed prompt in the input as a draft. Nothing
         // is sent: the user reads it and clicks Send.
         for (button, prompt) in starter_buttons {
@@ -1078,6 +1120,21 @@ impl Ui {
             .set_visible(self.composer.borrow().text().is_empty());
         self.title.set_tooltip_text(c.launch_summary().as_deref());
         self.cancel.set_sensitive(c.turn_running());
+    }
+
+    /// Notes user input over the list: `down` is a button or finger going down
+    /// or up, `None` any other input.
+    fn input(&self, down: Option<bool>) {
+        if let Some(down) = down {
+            self.held.set(down);
+        }
+        self.touched.set(glib::monotonic_time());
+    }
+
+    /// The user is acting on the list: holding something down, or did within
+    /// the last two seconds (a key or a swipe keeps scrolling after it).
+    fn user_active(&self) -> bool {
+        self.held.get() || glib::monotonic_time() - self.touched.get() < ACTIVE_US
     }
 
     /// Queues row `index` for redraw. Streamed text arrives in many small

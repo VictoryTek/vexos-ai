@@ -94,9 +94,13 @@ mod service {
     }
 
     pub fn run() -> glib::ExitCode {
+        // No `IS_SERVICE` flag here: the D-Bus service file starts this program
+        // with `--gapplication-service`, which sets it, and GLib refuses that
+        // option ("Unknown option") from an app that already has the flag, so
+        // the service would exit on every start. `checks.usage` starts the
+        // installed service the way D-Bus does, to keep it so.
         let app = gio::Application::builder()
             .application_id(APP_ID)
-            .flags(gio::ApplicationFlags::IS_SERVICE)
             .inactivity_timeout(IDLE_MS)
             .build();
         app.connect_startup(|app| {

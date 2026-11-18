@@ -21,6 +21,35 @@ pub fn end_value(upper: f64, page: f64) -> f64 {
     (upper - page).max(0.0)
 }
 
+/// What to do about the list after its scroll value changed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Moved {
+    /// At the end: follow from here on.
+    Resume,
+    /// Off the end because the user scrolled: stop following, leave it.
+    Stop,
+    /// Following, and something other than the user moved the list off the
+    /// end (a focus change, a layout clamp): put it back at the end.
+    Restore,
+    /// Not following: the user is reading; leave it.
+    Leave,
+}
+
+/// The rule for a changed scroll value. `user_active` is whether the user just
+/// did something to the list (wheel, click, key, touch). Without it a move off
+/// the end is not theirs, so it cannot end following.
+pub fn after_move(following: bool, user_active: bool, value: f64, upper: f64, page: f64) -> Moved {
+    if at_end(value, upper, page) {
+        Moved::Resume
+    } else if !following {
+        Moved::Leave
+    } else if user_active {
+        Moved::Stop
+    } else {
+        Moved::Restore
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -60,10 +89,59 @@ mod tests {
     }
 
     #[test]
+    fn a_jump_nobody_asked_for_is_put_back_not_obeyed() {
+        // At the end of 3000 px, and something moved the list: not the user.
+        assert_eq!(after_move(true, false, 0.0, 3000.0, 400.0), Moved::Restore);
+        assert_eq!(
+            after_move(true, false, 1200.0, 3000.0, 400.0),
+            Moved::Restore
+        );
+    }
+
+    #[test]
+    fn the_users_own_scroll_up_stops_following() {
+        assert_eq!(after_move(true, true, 1200.0, 3000.0, 400.0), Moved::Stop);
+        assert_eq!(after_move(true, true, 0.0, 3000.0, 400.0), Moved::Stop);
+    }
+
+    #[test]
+    fn a_reader_who_stopped_following_is_left_alone_until_the_end() {
+        assert_eq!(after_move(false, true, 1200.0, 3000.0, 400.0), Moved::Leave);
+        assert_eq!(
+            after_move(false, false, 1200.0, 3000.0, 400.0),
+            Moved::Leave
+        );
+        assert_eq!(
+            after_move(false, true, 2600.0, 3000.0, 400.0),
+            Moved::Resume
+        );
+        assert_eq!(
+            after_move(false, false, 2590.0, 3000.0, 400.0),
+            Moved::Resume
+        );
+    }
+
+    #[test]
+    fn at_the_end_following_goes_on_whoever_moved_it() {
+        for active in [true, false] {
+            assert_eq!(
+                after_move(true, active, 2600.0, 3000.0, 400.0),
+                Moved::Resume
+            );
+            assert_eq!(after_move(true, active, 0.0, 300.0, 400.0), Moved::Resume);
+        }
+    }
+
+    #[test]
     fn bad_numbers_never_panic() {
         for v in [f64::NAN, f64::INFINITY, -1.0] {
             let _ = at_end(v, v, v);
             let _ = end_value(v, v);
+            for following in [true, false] {
+                for active in [true, false] {
+                    let _ = after_move(following, active, v, v, v);
+                }
+            }
         }
     }
 }
