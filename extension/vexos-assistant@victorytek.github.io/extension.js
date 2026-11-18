@@ -215,6 +215,14 @@ export default class AssistantExtension extends Extension {
             return null;
         const entry = {ids: [], placed: !place, raised: false, slide: null};
         this._windows.set(window, entry);
+        // The window is a drop-down, not an app window: keep it out of the
+        // dock, Alt+Tab and the overview. The Shell lists an app as running
+        // only while it has a window that is not skip-taskbar.
+        try {
+            window.hide_from_window_list();
+        } catch (e) {
+            console.warn(`VexOS Assistant: cannot hide the window from the dock: ${e.message}`);
+        }
         // Open when the extension was enabled (also after a screen lock, which
         // disables it): learn its normal size, and dock it to match the
         // app's look. One move, no slide.
@@ -254,6 +262,9 @@ export default class AssistantExtension extends Extension {
         }
         this._cancelSlide(window, entry);
         if (restore) {
+            try {
+                window.show_in_window_list();
+            } catch {}
             try {
                 const actor = window.get_compositor_private();
                 if (actor) {

@@ -203,6 +203,17 @@ test('source scan: the top-bar button is added once and gives right and middle c
     assert.equal(all['extension.js'].match(/addToStatusArea\(/g).length, 1);
 });
 
+test('source scan: the window is hidden from the window list (no dock icon) and shown again on disable', () => {
+    const ext = all['extension.js'];
+    // Once, in _track, inside a try; the Shell lists an app as running only while
+    // it has a window that is not skip-taskbar.
+    assert.equal(ext.match(/hide_from_window_list\(/g).length, 1);
+    assert.ok(/_track\(window, place\) \{[\s\S]*?try \{\s+window\.hide_from_window_list\(\);\s+\} catch \(e\) \{/.test(ext));
+    // Undone only when the extension lets go of the window (restore), in its own try.
+    assert.equal(ext.match(/show_in_window_list\(/g).length, 1);
+    assert.ok(/if \(restore\) \{\s+try \{\s+window\.show_in_window_list\(\);\s+\} catch \{\}/.test(ext));
+});
+
 test('slide: about 250 ms, ease-out, and a fallback that outlasts the slide start', () => {
     assert.equal(SLIDE_MS, 250);
     assert.equal(SLIDE_EASING, 'EASE_OUT_QUAD');
