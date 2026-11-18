@@ -574,7 +574,24 @@ impl Ui {
             }
         };
         adjustment.connect_upper_notify(snap.clone());
-        adjustment.connect_page_size_notify(snap);
+        adjustment.connect_page_size_notify(snap.clone());
+        // A reply's TextView settles its height in later frames, and `upper`
+        // can lag it: the last lines stayed under the input. While following,
+        // each frame puts the list at its end if it is short of it.
+        // Never while the user is acting on the list, so slow scrolling up
+        // can still leave the end.
+        ui.scroller.add_tick_callback({
+            let adjustment = adjustment.clone();
+            let weak = Rc::downgrade(&ui);
+            move |_, _| {
+                if let Some(ui) = weak.upgrade()
+                    && !ui.user_active()
+                {
+                    snap(&adjustment);
+                }
+                glib::ControlFlow::Continue
+            }
+        });
         adjustment.connect_value_changed({
             let weak = Rc::downgrade(&ui);
             move |adjustment| {

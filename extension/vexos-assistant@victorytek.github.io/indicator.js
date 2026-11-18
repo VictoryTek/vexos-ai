@@ -22,7 +22,7 @@ import {STARTERS} from './starters.js';
 import {Tooltips} from './tooltip.js';
 import {UsageStore} from './usage_store.js';
 import {displayWindows, formatCountdown, isUrgent, pendingDelayMs, pendingLine, percentText,
-    refreshDelaySeconds, shouldRefreshOnOpen, sources, statusLine, URGENT_PERCENT} from './usage_view.js';
+    refreshDelaySeconds, shouldRefreshOnOpen, shownSources, statusLine, URGENT_PERCENT} from './usage_view.js';
 
 const USAGE_KEY = 'usage-enabled';
 const ICON_FILE = 'icons/vexos-assistant-symbolic.svg';
@@ -61,12 +61,9 @@ class VexosMeter extends St.Widget {
         const width = this.get_width();
         if (width <= 0)
             return;
-        const target = Math.round(width * this._percent / 100);
-        this._fill.ease({
-            width: target,
-            duration: 160,
-            mode: Clutter.AnimationMode.EASE_OUT_CUBIC,
-        });
+        // Set, not eased: easing a width animates the allocation, and a new
+        // fill grew out from its middle instead of from the left edge.
+        this._fill.set_width(Math.round(width * this._percent / 100));
     }
 });
 
@@ -293,7 +290,7 @@ class VexosAssistantButton extends PanelMenu.Button {
             return;
         }
         this._waiting(false);
-        for (const source of sources(record))
+        for (const source of shownSources(record))
             this._usage.add_child(this._section(source, now));
         this._usage.add_child(this._offLink());
     }

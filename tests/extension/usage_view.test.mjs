@@ -8,7 +8,7 @@ const dir = resolve(process.env.EXT ?? 'extension/vexos-assistant@victorytek.git
 const view = await import(pathToFileURL(join(dir, 'usage_view.js')));
 const {parseRecord, currentWindows, formatCountdown, formatAge, percentText, isUrgent,
     displayWindows, statusLine, refreshDelaySeconds, shouldRefreshOnOpen, STATUSES, MESSAGES,
-    CODEX_MESSAGES, sources, MAX_FILE_BYTES, URGENT_PERCENT} = view;
+    CODEX_MESSAGES, sources, shownSources, MAX_FILE_BYTES, URGENT_PERCENT} = view;
 
 const NOW = 1_800_000_000_000;
 const MIN = 60_000;
@@ -184,6 +184,15 @@ test('sources: Claude always, Codex when the service found it', () => {
     const both = sources(parseRecord(record({codex: codex()})));
     assert.deepEqual(both.map(x => x.agent), ['claude', 'codex']);
     assert.deepEqual(both.map(x => x.name), ['Claude Code', 'Codex']);
+});
+
+test('shownSources: an agent that is not signed in is not drawn', () => {
+    const out = parseRecord(record({codex: codex({status: 'waiting-for-auth'}, [])}));
+    assert.deepEqual(shownSources(out).map(x => x.agent), ['claude']);
+    assert.deepEqual(sources(out).map(x => x.agent), ['claude', 'codex']);
+    assert.deepEqual(shownSources(parseRecord(record({codex: codex()}))).map(x => x.agent), ['claude', 'codex']);
+    const claudeOut = parseRecord(record({status: 'waiting-for-auth'}));
+    assert.deepEqual(shownSources(claudeOut).map(x => x.agent), ['claude']);
 });
 
 test('isUrgent and the refresh pace follow every agent, not only Claude', () => {

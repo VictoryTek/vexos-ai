@@ -137,6 +137,13 @@ export function sources(record) {
     return list;
 }
 
+// What the panel draws: the same, but an agent that is not signed in is left
+// out (Claude keeps its sign-in sentence, since it is the record itself).
+export function shownSources(record) {
+    return sources(record).filter(({agent, data}) =>
+        agent === 'claude' || data.status !== 'waiting-for-auth');
+}
+
 // A window whose reset has passed is untouched, not unknown: it reads 0%.
 export function currentWindows(record, nowMs) {
     if (!record)
