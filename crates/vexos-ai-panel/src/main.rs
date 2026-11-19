@@ -1216,8 +1216,7 @@ impl Ui {
         };
         let mut rows = self.rows.borrow_mut();
         if let Some(old) = rows.get(index) {
-            self.list.insert_child_after(&widget, Some(old));
-            self.list.remove(old);
+            swap_row(&self.list, &self.scroller, old, &widget);
             rows[index] = widget;
         } else {
             self.list.append(&widget);
@@ -1317,6 +1316,25 @@ impl Ui {
         }
         frame
     }
+}
+
+/// Replaces row `old` with `new` in the chat list. When the focus is inside
+/// `old` (the card the user just clicked, an answered approval), removing it
+/// would let the focus fall to the first focusable widget, a label at the top
+/// of the list, and the scroller would follow it there. That jump came right
+/// after a click, so it read as the user scrolling and following stopped. The
+/// focus goes to the scroller itself first: it is outside the viewport, so
+/// nothing scrolls, and the arrow keys still scroll the list.
+fn swap_row(list: &gtk::Box, scroller: &gtk::ScrolledWindow, old: &gtk::Widget, new: &gtk::Widget) {
+    let focused = list
+        .root()
+        .and_then(|root| root.focus())
+        .is_some_and(|focus| focus == *old || focus.is_ancestor(old));
+    list.insert_child_after(new, Some(old));
+    if focused {
+        scroller.grab_focus();
+    }
+    list.remove(old);
 }
 
 fn text_label(text: &str) -> gtk::Label {
@@ -1469,5 +1487,79 @@ mod tests {
         assert_eq!(toggle(None), Toggle::Open);
         assert_eq!(toggle(Some(false)), Toggle::Show);
         assert_eq!(toggle(Some(true)), Toggle::Hide);
+    }
+
+    /// Needs a display, so it is skipped by default. Run it in a headless
+    /// session (`xvfb-run cargo test -- --ignored`). The card with the focus is
+    /// replaced, as an answered approval is: the list must stay at its end. And
+    /// the list must still scroll to a widget the keyboard focuses.
+    #[test]
+    #[ignore = "needs a display"]
+    fn replacing_the_focused_card_keeps_the_list_at_its_end() {
+        adw::init().expect("a display");
+        let list = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(12)
+            .build();
+        let first = text_label("Row 0");
+        list.append(&first);
+        for n in 1..30 {
+            list.append(&text_label(&format!("Row {n}")));
+        }
+        let button = gtk::Button::with_label("Approve");
+        list.append(&button);
+        let scroller = gtk::ScrolledWindow::builder()
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .vexpand(true)
+            .child(&list)
+            .build();
+        let window = gtk::Window::builder()
+            .default_width(400)
+            .default_height(300)
+            .child(&scroller)
+            .build();
+        window.present();
+        let settle = || {
+            let context = glib::MainContext::default();
+            for _ in 0..40 {
+                while context.iteration(false) {}
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        };
+        settle();
+        let adjustment = scroller.vadjustment();
+        adjustment.set_value(end_value(adjustment.upper(), adjustment.page_size()));
+        assert!(button.grab_focus(), "the button must take the focus");
+        settle();
+        assert_eq!(
+            gtk::prelude::GtkWindowExt::focus(&window).as_ref(),
+            Some(button.upcast_ref::<gtk::Widget>()),
+            "the focus must be on the button before it is replaced"
+        );
+
+        let replacement = gtk::Label::new(Some("Approved once."));
+        swap_row(
+            &list,
+            &scroller,
+            button.upcast_ref(),
+            replacement.upcast_ref(),
+        );
+        settle();
+        let end = end_value(adjustment.upper(), adjustment.page_size());
+        assert!(end > 0.0, "the list must be taller than the window");
+        assert!(
+            (adjustment.value() - end).abs() < 1.0,
+            "the list jumped from its end ({end}) to {}",
+            adjustment.value()
+        );
+
+        // Keyboard users: focusing a widget off screen still scrolls to it.
+        assert!(first.grab_focus(), "the first row must take the focus");
+        settle();
+        assert!(
+            adjustment.value() < end - 1.0,
+            "focusing a row off screen did not scroll to it (value {})",
+            adjustment.value()
+        );
     }
 }

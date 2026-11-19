@@ -820,3 +820,20 @@ fn a_streamed_reply_is_updated_in_place_and_followed_after_layout() {
     // Sending asks to see the answer.
     assert!(body("send_prompt").contains("self.follow.set(true);"));
 }
+
+#[test]
+fn replacing_a_row_never_lets_the_focus_fall_to_the_top_of_the_list() {
+    // Removing the row that holds the focus let it fall to a label at the top,
+    // and the scroller followed it there. Rows are swapped in one place, which
+    // moves the focus to the scroller first; the viewport keeps scrolling to
+    // the focus for keyboard users.
+    let main = code(MAIN);
+    assert!(main.contains("swap_row(&self.list, &self.scroller, old, &widget);"));
+    assert!(!main.contains("self.list.remove(old)"));
+    assert!(!main.contains("set_scroll_to_focus(false)"));
+    // `swap_row` is a free function: up to its closing brace at column 0.
+    let swap = &main[main.find("fn swap_row(").expect("swap_row")..];
+    let swap = &swap[..swap.find("\n}\n").expect("end of swap_row")];
+    assert!(swap.contains("scroller.grab_focus();"));
+    assert!(swap.find("scroller.grab_focus();") < swap.find("list.remove(old);"));
+}

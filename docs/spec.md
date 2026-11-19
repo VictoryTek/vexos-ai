@@ -11,7 +11,8 @@
 > warm for 10 minutes. See `docs/contract.md`, "Usage service".
 
 Status: **decided 2026-10-06** (A: VexPortal deep link · B: Rust, Phase 1 in bash ·
-C: both agents ask · D: top-bar extension last). Phases 0, 1 and 2 done (Phase 2: the Rust core, and the skill-drift check in `checks.skills`).
+C: both agents ask · D: top-bar extension last). Phases 0 and 1 done. Phase 2 is half done: the core crate and the skill-drift check
+(`checks.skills`) exist; the Rust CLI (`crates/vexos-ai`, replacing `bin/vexos-ai.sh`) does not.
 
 Researched 2026-10-06 against:
 
