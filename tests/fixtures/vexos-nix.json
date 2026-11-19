@@ -1,0 +1,140 @@
+{
+  "recipes": {
+    "agent": [],
+    "ai-crash-mute": [
+      "name",
+      "state"
+    ],
+    "ai-pick": [
+      "agent"
+    ],
+    "backup-now": [],
+    "backup-plex": [
+      "dest"
+    ],
+    "beszel": [
+      "action",
+      "args"
+    ],
+    "bootloader": [
+      "action",
+      "args"
+    ],
+    "build": [
+      "role",
+      "variant",
+      "flake"
+    ],
+    "cache": [
+      "action",
+      "args"
+    ],
+    "clean": [],
+    "deploy": [],
+    "diagnose": [
+      "target"
+    ],
+    "feature": [
+      "action",
+      "args"
+    ],
+    "fix-flake": [],
+    "kernel": [
+      "action",
+      "args"
+    ],
+    "kill-switch": [
+      "action",
+      "args"
+    ],
+    "mergerfs-pool": [
+      "args"
+    ],
+    "nas-sync-now": [
+      "name"
+    ],
+    "nas-sync-status": [],
+    "plex-pass": [
+      "action",
+      "args"
+    ],
+    "reboot": [],
+    "rebuild": [],
+    "remote-storage": [
+      "action",
+      "args"
+    ],
+    "reset-defaults": [],
+    "restore-plex": [
+      "tarball"
+    ],
+    "restore-service": [
+      "name",
+      "snapshot"
+    ],
+    "rollback": [],
+    "rollforward": [],
+    "rust-repair": [],
+    "secrets-init": [],
+    "service": [
+      "action",
+      "args"
+    ],
+    "set-hostname": [
+      "name"
+    ],
+    "setup-tailscale": [],
+    "shutdown": [],
+    "ssh": [
+      "target"
+    ],
+    "static-ip": [
+      "action",
+      "args"
+    ],
+    "switch": [
+      "role",
+      "variant",
+      "flake",
+      "de",
+      "vmp"
+    ],
+    "update": [
+      "role",
+      "variant"
+    ],
+    "update-all": [],
+    "upgrade-analysis": [
+      "target_version"
+    ],
+    "variant": [],
+    "vpn": [
+      "action",
+      "args"
+    ],
+    "zfs-pool": [
+      "args"
+    ]
+  },
+  "rev": "213f9d54237f2a53945deda6144955bff424e6ec",
+  "sideFiles": [
+    "bootloader.nix",
+    "features.nix",
+    "flake.nix",
+    "hardware-configuration.nix",
+    "hardware-local.nix",
+    "host.nix",
+    "hostname.nix",
+    "kernel-install-override.nix",
+    "local.nix",
+    "secrets/",
+    "server-services.nix",
+    "stateless-user-override.nix",
+    "storage-pool.nix",
+    "storage-remote.nix",
+    "user-override.nix",
+    "vexos-variant",
+    "vm-platform.nix",
+    "zfs-pools.nix"
+  ]
+}

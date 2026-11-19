@@ -301,12 +301,31 @@
             "the module links no skills" =
               !lib.any (r: lib.hasInfix "skills" r) on.systemd.user.tmpfiles.rules;
           };
-        in pkgs.runCommand "vexos-ai-skills" { } ''
+        in pkgs.runCommand "vexos-ai-skills" { nativeBuildInputs = [ pkgs.jq pkgs.shellcheck ]; } ''
           failed=0
           ${lib.concatStrings (lib.mapAttrsToList (name: ok: ''
             echo ${lib.escapeShellArg ((if ok then "ok   " else "FAIL ") + name)}
             ${lib.optionalString (!ok) "failed=1"}
           '') cases)}
+
+          # The skills name only vexos-nix recipes and side-files that exist
+          # (tests/fixtures/vexos-nix.json, from scripts/update-fixture.sh).
+          shellcheck ${./scripts/check-skill-drift.sh} ${./scripts/update-fixture.sh}
+          ${pkgs.bash}/bin/bash ${./scripts/check-skill-drift.sh} ${./skills} ${./tests/fixtures/vexos-nix.json} \
+            || failed=1
+          # And it does fail on a skill that names one that does not exist.
+          mkdir -p bad
+          cp -r ${./skills} bad/skills
+          chmod -R u+w bad
+          printf '%s\n' 'Run `just no-such-recipe` and edit /etc/nixos/no-such-file.nix.' >> bad/skills/vexos/SKILL.md
+          if ${pkgs.bash}/bin/bash ${./scripts/check-skill-drift.sh} bad/skills ${./tests/fixtures/vexos-nix.json} 2> bad/err; then
+            echo "FAIL the drift check accepted a skill that names a missing recipe and file"
+            failed=1
+          else
+            grep -q 'no-such-recipe' bad/err && grep -q 'no-such-file.nix' bad/err \
+              || { echo "FAIL the drift check did not name both missing names"; cat bad/err; failed=1; }
+          fi
+
           [ "$failed" = 0 ] && touch $out
         '';
 

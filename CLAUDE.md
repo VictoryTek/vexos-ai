@@ -16,7 +16,7 @@ Test (one check at a time; use `x86_64-linux` unless you have an aarch64 builder
 - `nix build .#checks.x86_64-linux.helper` (the D-Bus helper: its rules, and its tests on a private `dbus-daemon`, plus clippy)
 - `nix build .#checks.x86_64-linux.panel` (the GTK panel builds and passes clippy)
 - `nix build .#checks.x86_64-linux.module` (the NixOS module's assertions)
-- `nix build .#checks.x86_64-linux.skills` (`programs.vexos-ai.skills` names exactly `vexos` and `vexos-diagnose`, each with a SKILL.md)
+- `nix build .#checks.x86_64-linux.skills` (`programs.vexos-ai.skills` names exactly `vexos` and `vexos-diagnose`, each with a SKILL.md; and every `just` recipe and `/etc/nixos` side-file the skills name exists in `tests/fixtures/vexos-nix.json`)
 - `nix build .#checks.x86_64-linux.extension` (the GNOME Shell extension as built)
 - `nix develop -c cargo fmt --all --check`
 
@@ -33,7 +33,8 @@ Fast verify (also run by the Stop hook): `scripts/preflight.sh`
   - `skills/` — agent skills (`vexos`, `vexos-diagnose`), shipped here and exposed as `programs.vexos-ai.skills`; vexos-nix links them into `~/.claude/skills` and `~/.agents/skills`, this repo links nothing
   - `docs/` — `contract.md` (argv, exit codes and `status --json` for callers such as VexPortal) and `spec.md` (roadmap and decisions)
   - `tests/contract/` — Bats suite plus PATH stubs (`stubs/`)
-  - `scripts/` — `preflight.sh`, `verify-host.sh` (read-only post-rebuild host check)
+  - `tests/fixtures/` — `vexos-nix.json`: vexos-nix's public recipes and side-files, which `checks.skills` compares the skills against
+  - `scripts/` — `preflight.sh`, `verify-host.sh` (read-only post-rebuild host check), `update-fixture.sh` (regenerates the fixture), `check-skill-drift.sh` (the skills-vs-fixture scan)
 - Architecture: Install-only Nix flake: package + NixOS module + overlay + devShell, with the CLI machine contract (`docs/contract.md`) and the agent safety policy (`nix/policy.nix`) each enforced by a flake check
 - CI environment: GitHub Actions (`ubuntu-latest`, `DeterminateSystems/nix-installer-action`), running `nix build`, `nix flake check` and a module `nix eval` on push to `main` and on pull requests
 - OS requirements: Linux only — the flake exposes only `x86_64-linux` and `aarch64-linux`. `nix` commands cannot run on native Windows or macOS. The shipped CLI also needs a Linux desktop session at runtime (systemd user services, zenity, libnotify, xdg-terminal-exec), but tests stub these out
@@ -45,11 +46,11 @@ Fast verify (also run by the Stop hook): `scripts/preflight.sh`
 ### Project-specific rules
 
 - The feature toggle (`vexos.features.ai.enable`), role gating and the `pkgs.unstable` package choice live in vexos-nix `modules/ai.nix`, not here
-- `skills/` describe vexos-nix's justfile and `/etc/nixos` side-files. When those change in vexos-nix, update the skills here and bump the lock there
+- `skills/` describe vexos-nix's justfile and `/etc/nixos` side-files. When those change in vexos-nix, run `scripts/update-fixture.sh ../vexos-nix` (it rewrites `tests/fixtures/vexos-nix.json`; `checks.skills` fails if a skill names a recipe or file the fixture lacks), update the skills here and bump the lock there
 - `nix/policy.nix` is the assistant's safety policy, asserted by `checks.policy`: agents must never be able to apply a configuration (`nixos-rebuild switch|boot|test`, `just rebuild|switch|update|update-all`) or run `nix flake check`, and must always ask before acting (no Claude auto or bypass mode). Any change to `nix/policy.nix` must keep `checks.policy` in `flake.nix` in step with it
 - Validate with `nix build` here and `dry-build` in vexos-nix; never `nixos-rebuild switch|boot` from automation
 - `docs/contract.md` is a public contract for callers (VexPortal, the GNOME panel, tests); `tests/contract/*.bats` must keep passing unchanged against `bin/vexos-ai.sh` and its planned Rust replacement. A change to argv, exit codes or `status --json` is a contract change and needs `docs/contract.md` and the Bats suite updated together
-- Which check covers which change: `nix build` for `bin/vexos-ai.sh` or `nix/package.nix`; the module `nix eval` for `nix/module.nix` or `flake.nix`; `checks.skills` for `skills/` or the option; `checks.policy` for `nix/policy.nix` or the `policy` check; `checks.contract` for `bin/vexos-ai.sh`, `docs/contract.md` or `tests/contract/`; `checks.core`/`checks.helper`/`checks.panel` for `crates/`; `checks.extension` for `extension/`
+- Which check covers which change: `nix build` for `bin/vexos-ai.sh` or `nix/package.nix`; the module `nix eval` for `nix/module.nix` or `flake.nix`; `checks.skills` for `skills/`, the option, `tests/fixtures/` or the two skill-drift scripts; `checks.policy` for `nix/policy.nix` or the `policy` check; `checks.contract` for `bin/vexos-ai.sh`, `docs/contract.md` or `tests/contract/`; `checks.core`/`checks.helper`/`checks.panel` for `crates/`; `checks.extension` for `extension/`
 - Context7 documents libraries, not nixpkgs or NixOS options; for nixpkgs packages and NixOS options use the `nixos` MCP server (`mcp__nixos__nix`) as the authoritative source
 
 ## Forbidden commands
