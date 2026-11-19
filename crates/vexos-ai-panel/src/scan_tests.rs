@@ -815,7 +815,7 @@ fn a_streamed_reply_is_updated_in_place_and_followed_after_layout() {
     // A grown reply is filled into its existing view; replacing the widget
     // would shrink the list and throw the scroll position.
     let update = body("update");
-    assert!(update.contains("fill_reply(&view.buffer(), &text);"));
+    assert!(update.contains("fill_reply(&view, &text, &TagColors::of(&self.window));"));
     assert!(!update.contains("self.list.remove("));
     // Sending asks to see the answer.
     assert!(body("send_prompt").contains("self.follow.set(true);"));

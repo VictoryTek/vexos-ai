@@ -21,7 +21,7 @@ import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 import {STARTERS} from './starters.js';
 import {Tooltips} from './tooltip.js';
 import {UsageStore} from './usage_store.js';
-import {displayWindows, formatCountdown, isUrgent, pendingDelayMs, pendingLine, percentText,
+import {AGENT_ICONS, displayWindows, formatCountdown, isUrgent, pendingDelayMs, pendingLine, percentText,
     refreshDelaySeconds, shouldRefreshOnOpen, shownSources, statusLine, URGENT_PERCENT} from './usage_view.js';
 
 const USAGE_KEY = 'usage-enabled';
@@ -39,21 +39,20 @@ class VexosMeter extends St.Widget {
             style_class: 'vexos-meter',
             x_expand: true,
             y_align: Clutter.ActorAlign.CENTER,
-            layout_manager: new Clutter.BinLayout(),
+            // A fixed layout puts the fill at the track's left edge by position,
+            // not by alignment, so it can only grow from the left.
+            layout_manager: new Clutter.FixedLayout(),
         });
         this._percent = 0;
-        this._fill = new St.Widget({
-            style_class: 'vexos-meter-fill',
-            x_align: Clutter.ActorAlign.START,
-            y_expand: true,
-        });
+        this._fill = new St.Widget({style_class: 'vexos-meter-fill'});
+        this._fill.set_position(0, 0);
         this.add_child(this._fill);
         this.connect('notify::allocation', () => this._layout());
     }
 
-    set(percent, urgent) {
+    set(percent, urgent, agent) {
         this._percent = Math.min(100, Math.max(0, percent));
-        this._fill.style_class = urgent ? 'vexos-meter-fill vexos-urgent' : 'vexos-meter-fill';
+        this._fill.style_class = `vexos-meter-fill vexos-fill-${agent}${urgent ? ' vexos-urgent' : ''}`;
         this._layout();
     }
 
@@ -63,7 +62,8 @@ class VexosMeter extends St.Widget {
             return;
         // Set, not eased: easing a width animates the allocation, and a new
         // fill grew out from its middle instead of from the left edge.
-        this._fill.set_width(Math.round(width * this._percent / 100));
+        this._fill.set_position(0, 0);
+        this._fill.set_size(Math.round(width * this._percent / 100), this.get_height());
     }
 });
 
@@ -101,6 +101,7 @@ class VexosAssistantButton extends PanelMenu.Button {
         this._pendingTimer = 0;
         this._warmedAt = 0;
         this._tips = new Tooltips();
+        this._path = path;
         this._iconFile = `${path}/${ICON_FILE}`;
 
         this._icon = new St.Icon({
@@ -173,8 +174,7 @@ class VexosAssistantButton extends PanelMenu.Button {
     }
 
     _build() {
-        // The popup's own look (the VexOS palette) hangs on this class.
-        this.menu.actor.add_style_class_name('vexos-menu');
+        // The menu keeps the Shell's own surface; only its content is styled.
         const item = new PopupMenu.PopupBaseMenuItem({reactive: false, can_focus: false});
         this._root = new St.BoxLayout({
             orientation: Clutter.Orientation.VERTICAL,
@@ -189,7 +189,6 @@ class VexosAssistantButton extends PanelMenu.Button {
         hero.add_child(new St.Icon({
             gicon: Gio.icon_new_for_string(this._iconFile),
             icon_size: 32,
-            style_class: 'vexos-hero-icon',
             y_align: Clutter.ActorAlign.CENTER,
         }));
         const names = new St.BoxLayout({
@@ -201,13 +200,13 @@ class VexosAssistantButton extends PanelMenu.Button {
         this._subtitle = label('AI help for this system', 'vexos-subtitle');
         names.add_child(this._subtitle);
         hero.add_child(names);
-        const newChat = iconButton('list-add-symbolic', 'New chat', 'vexos-hero-button', () => {
+        const newChat = iconButton('list-add-symbolic', 'New chat', 'icon-button vexos-hero-button', () => {
             this.menu.close();
             this._bus.newSession();
         });
         this._tips.attach(newChat, 'New chat');
         hero.add_child(newChat);
-        const terminal = iconButton('utilities-terminal-symbolic', 'Open in a terminal', 'vexos-hero-button', () => {
+        const terminal = iconButton('utilities-terminal-symbolic', 'Open in a terminal', 'icon-button vexos-hero-button', () => {
             this.menu.close();
             this._bus.terminal();
         });
@@ -230,7 +229,7 @@ class VexosAssistantButton extends PanelMenu.Button {
         const tiles = new St.BoxLayout({style_class: 'vexos-tiles', x_expand: true});
         for (const starter of STARTERS) {
             const tile = new St.Button({
-                style_class: 'vexos-tile',
+                style_class: 'vexos-tile vexos-tile-' + starter.id,
                 can_focus: true,
                 track_hover: true,
                 x_expand: true,
@@ -241,11 +240,10 @@ class VexosAssistantButton extends PanelMenu.Button {
                 orientation: Clutter.Orientation.VERTICAL,
                 x_align: Clutter.ActorAlign.CENTER,
             });
-            body.add_child(new St.Icon({
-                icon_name: starter.icon,
-                icon_size: 20,
+            body.add_child(new St.Bin({
+                style_class: 'vexos-tile-badge',
                 x_align: Clutter.ActorAlign.CENTER,
-                style_class: 'vexos-tile-icon',
+                child: new St.Icon({icon_name: starter.icon, icon_size: 18, style_class: 'vexos-tile-icon'}),
             }));
             const text = label(starter.title, 'vexos-tile-label');
             text.clutter_text.line_wrap = true;
@@ -326,28 +324,34 @@ class VexosAssistantButton extends PanelMenu.Button {
     _section({agent, name, data}, now) {
         const section = new St.BoxLayout({
             orientation: Clutter.Orientation.VERTICAL,
-            style_class: 'vexos-agent',
+            style_class: `vexos-agent vexos-agent-${agent}`,
             x_expand: true,
         });
-        const head = new St.BoxLayout({x_expand: true});
+        const head = new St.BoxLayout({x_expand: true, style_class: 'vexos-agent-head'});
+        head.add_child(new St.Icon({
+            gicon: Gio.icon_new_for_string(`${this._path}/${AGENT_ICONS[agent]}`),
+            icon_size: 18,
+            style_class: 'vexos-agent-logo',
+            y_align: Clutter.ActorAlign.CENTER,
+        }));
         head.add_child(label(name, 'vexos-agent-name'));
         if (data.plan)
             head.add_child(label(data.plan, 'vexos-agent-plan'));
         section.add_child(head);
         for (const w of displayWindows(data, now))
-            section.add_child(this._row(w, now));
+            section.add_child(this._row(w, now, agent));
         const line = statusLine(data, now, agent);
         if (line)
             section.add_child(this._note(line));
         return section;
     }
 
-    _row(w, now) {
+    _row(w, now, agent) {
         const row = new St.BoxLayout({style_class: 'vexos-limit', x_expand: true});
         const urgent = w.percent >= URGENT_PERCENT;
         row.add_child(label(w.label, 'vexos-limit-label'));
         const meter = new Meter();
-        meter.set(w.percent, urgent);
+        meter.set(w.percent, urgent, agent);
         row.add_child(meter);
         row.add_child(label(percentText(w.percent), urgent ? 'vexos-limit-percent vexos-urgent' : 'vexos-limit-percent'));
         row.add_child(label(formatCountdown(w.resetsAt, now), 'vexos-limit-reset'));

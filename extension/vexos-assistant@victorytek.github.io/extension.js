@@ -184,6 +184,17 @@ export default class AssistantExtension extends Extension {
         try {
             const ids = [];
             this._pending.set(window, ids);
+            // The app id usually arrives before the window is mapped: track and
+            // hide it then, so the Shell never counts it as a running app. Waiting
+            // for 'shown' left the dock icon up until the Shell caught up.
+            const identified = () => {
+                if (!this._isAssistant(window))
+                    return;
+                this._unwatch(window);
+                this._track(window, true);
+            };
+            ids.push(window.connect('notify::gtk-application-id', identified));
+            ids.push(window.connect('notify::wm-class', identified));
             ids.push(window.connect('shown', () => {
                 this._unwatch(window);
                 const entry = this._track(window, true);

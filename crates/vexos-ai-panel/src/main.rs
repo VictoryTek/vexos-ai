@@ -575,7 +575,7 @@ impl Ui {
         };
         adjustment.connect_upper_notify(snap.clone());
         adjustment.connect_page_size_notify(snap.clone());
-        // A reply's TextView settles its height in later frames, and `upper`
+        // A reply's height settles over a frame or two, and `upper`
         // can lag it: the last lines stayed under the input. While following,
         // each frame puts the list at its end if it is short of it.
         // Never while the user is acting on the list, so slow scrolling up
@@ -1199,9 +1199,9 @@ impl Ui {
                 .borrow()
                 .get(index)
                 .and_then(|row| row.first_child())
-                .and_then(|child| child.downcast::<gtk::TextView>().ok());
+                .and_then(|child| child.downcast::<gtk::Label>().ok());
             if let Some(view) = view {
-                fill_reply(&view.buffer(), &text);
+                fill_reply(&view, &text, &TagColors::of(&self.window));
                 return;
             }
         }
@@ -1329,50 +1329,70 @@ fn text_label(text: &str) -> gtk::Label {
         .build()
 }
 
-/// An agent reply, formatted. Each run is inserted as literal text with a tag
-/// per style; nothing here is parsed as markup.
-fn reply(text: &str, colors: &TagColors) -> gtk::TextView {
-    let view = gtk::TextView::builder()
-        .editable(false)
-        .cursor_visible(false)
-        .wrap_mode(gtk::WrapMode::WordChar)
-        .left_margin(0)
-        .right_margin(0)
+/// An agent reply, formatted. A label, not a text view: a label's height
+/// always matches its wrapped text, where a text view under-reported it and
+/// left the last lines clipped. The styles are Pango attributes on byte ranges
+/// of the literal text; nothing here is parsed as markup.
+fn reply(text: &str, colors: &TagColors) -> gtk::Label {
+    let label = gtk::Label::builder()
+        .wrap(true)
+        .wrap_mode(gtk::pango::WrapMode::WordChar)
+        .xalign(0.0)
+        .selectable(true)
         .build();
-    view.add_css_class("vexos-reply");
-    let buffer = view.buffer();
-    buffer.create_tag(Some("bold"), &[("weight", &700)]);
-    buffer.create_tag(Some("italic"), &[("style", &gtk::pango::Style::Italic)]);
-    buffer.create_tag(
-        Some("code"),
-        &[
-            ("family", &"monospace"),
-            ("background-rgba", &colors.code_background),
-        ],
-    );
-    buffer.create_tag(Some("heading"), &[("scale", &1.15), ("weight", &700)]);
-    fill_reply(&buffer, text);
-    view
+    fill_reply(&label, text, colors);
+    label
 }
 
-/// Puts a reply's formatted runs in the buffer, replacing what it held. The
-/// tags are made once, with the view.
-fn fill_reply(buffer: &gtk::TextBuffer, text: &str) {
-    buffer.set_text("");
+/// Puts a reply's formatted runs in the label, replacing what it held.
+fn fill_reply(label: &gtk::Label, text: &str, colors: &TagColors) {
+    use gtk::pango::{
+        AttrColor, AttrFloat, AttrInt, AttrList, AttrString, Attribute, Style, Weight,
+    };
+    let mut plain = String::new();
+    let attrs = AttrList::new();
+    let put = |attr: Attribute, start: usize, end: usize| {
+        let mut attr = attr;
+        attr.set_start_index(start as u32);
+        attr.set_end_index(end as u32);
+        attrs.insert(attr);
+    };
+    let channel = |value: f32| (value.clamp(0.0, 1.0) * 65535.0).round() as u16;
     for run in markdown(text) {
+        let start = plain.len();
+        plain.push_str(&run.text);
+        let end = plain.len();
+        if start == end {
+            continue;
+        }
         let style = run.style;
-        let tags: Vec<&str> = [
-            (style.bold, "bold"),
-            (style.italic, "italic"),
-            (style.code, "code"),
-            (style.heading, "heading"),
-        ]
-        .into_iter()
-        .filter_map(|(on, tag)| on.then_some(tag))
-        .collect();
-        let mut end = buffer.end_iter();
-        buffer.insert_with_tags_by_name(&mut end, &run.text, &tags);
+        if style.bold || style.heading {
+            put(AttrInt::new_weight(Weight::Bold).into(), start, end);
+        }
+        if style.italic {
+            put(AttrInt::new_style(Style::Italic).into(), start, end);
+        }
+        if style.heading {
+            put(AttrFloat::new_scale(1.15).into(), start, end);
+        }
+        if style.code {
+            let c = &colors.code_background;
+            put(AttrString::new_family("monospace").into(), start, end);
+            put(
+                AttrColor::new_background(channel(c.red()), channel(c.green()), channel(c.blue()))
+                    .into(),
+                start,
+                end,
+            );
+            put(
+                AttrInt::new_background_alpha(channel(c.alpha())).into(),
+                start,
+                end,
+            );
+        }
     }
+    label.set_label(&plain);
+    label.set_attributes(Some(&attrs));
 }
 
 fn monospace(text: &str) -> gtk::Label {

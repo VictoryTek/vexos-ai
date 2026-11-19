@@ -214,6 +214,13 @@ test('source scan: the window is hidden from the window list (no dock icon) and 
     assert.ok(/if \(restore\) \{\s+try \{\s+window\.show_in_window_list\(\);\s+\} catch \{\}/.test(ext));
 });
 
+test('source scan: a window is hidden the moment its app id arrives, not only when first shown', () => {
+    const ext = all['extension.js'];
+    assert.ok(ext.includes("window.connect('notify::gtk-application-id', identified)"));
+    assert.ok(ext.includes("window.connect('notify::wm-class', identified)"));
+    assert.ok(/const identified = \(\) => \{\s+if \(!this\._isAssistant\(window\)\)\s+return;\s+this\._unwatch\(window\);\s+this\._track\(window, true\);/.test(ext));
+});
+
 test('slide: about 250 ms, ease-out, and a fallback that outlasts the slide start', () => {
     assert.equal(SLIDE_MS, 250);
     assert.equal(SLIDE_EASING, 'EASE_OUT_QUAD');

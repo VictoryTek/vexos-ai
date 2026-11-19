@@ -1,65 +1,10 @@
 /* The panel's look. Static: bundled into the binary (style.rs), loaded once,
- * and never built from text at run time. Everything below the palette uses
- * libadwaita's variables, so light or dark and high contrast all apply.
- * Spacing steps: 4, 8, 12, 16, 24 px. Type sizes come from libadwaita's own
- * style classes, never from px values here, so large text scales. */
-
-/* palette:start
- * The VexOS Neo-Cyberpunk palette (vexos-nix files/dms/vexos-neo-cyberpunk.json),
- * set as libadwaita's own variables. This block is the only place colours are
- * written out; a test keeps it that way. Light first, dark under the media query. */
-:root {
-  --window-bg-color: #F3F7F8;
-  --window-fg-color: #142230;
-  --view-bg-color: #FBFDFD;
-  --view-fg-color: #142230;
-  --headerbar-bg-color: #EAF1F2;
-  --headerbar-fg-color: #142230;
-  --headerbar-border-color: #0E7A8C;
-  --headerbar-backdrop-color: #F3F7F8;
-  --card-bg-color: #FFFFFF;
-  --card-fg-color: #142230;
-  --popover-bg-color: #FFFFFF;
-  --popover-fg-color: #142230;
-  --dialog-bg-color: #EAF1F2;
-  --dialog-fg-color: #142230;
-  --accent-bg-color: #0E7A8C;
-  --accent-fg-color: #FFFFFF;
-  --accent-color: #0E7A8C;
-  --warning-color: #9A6A00;
-  --error-color: #C81C4A;
-  --destructive-bg-color: #A83B23;
-  --destructive-fg-color: #FFFFFF;
-  --destructive-color: #A83B23;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --window-bg-color: #050A14;
-    --window-fg-color: #E7EEF5;
-    --view-bg-color: #0B1526;
-    --view-fg-color: #E7EEF5;
-    --headerbar-bg-color: #0B1526;
-    --headerbar-fg-color: #E7EEF5;
-    --headerbar-border-color: #016D8E;
-    --headerbar-backdrop-color: #050A14;
-    --card-bg-color: #0F1930;
-    --card-fg-color: #E7EEF5;
-    --popover-bg-color: #16233A;
-    --popover-fg-color: #E7EEF5;
-    --dialog-bg-color: #0B1526;
-    --dialog-fg-color: #E7EEF5;
-    --accent-bg-color: #05F4FA;
-    --accent-fg-color: #00141A;
-    --accent-color: #3EC3E8;
-    --warning-color: #F9B62E;
-    --error-color: #FF4D6D;
-    --destructive-bg-color: #DD4014;
-    --destructive-fg-color: #FFFFFF;
-    --destructive-color: #FF6A3D;
-  }
-}
-/* palette:end */
+ * and never built from text at run time. It follows the desktop: libadwaita's
+ * own light or dark style, the system accent colour and high contrast all
+ * apply, because every colour below is one of libadwaita's variables and none
+ * is written out here. Spacing steps: 4, 8, 12, 16, 24 px. Type sizes come
+ * from libadwaita's own style classes, never from px values here, so large
+ * text scales. */
 
 /* Docked under the top bar by the Shell extension: square top corners, the
  * bottom ones stay round. */
@@ -83,10 +28,6 @@ window.csd.vexos-docked {
   padding: 10px 14px;
 }
 
-textview.vexos-reply,
-textview.vexos-reply > text {
-  background: none;
-}
 
 /* A tool the agent used: a quiet chip. */
 .vexos-tool {

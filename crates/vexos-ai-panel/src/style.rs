@@ -18,12 +18,6 @@ pub fn load(display: &gdk::Display) {
         .bind_property("gtk-interface-contrast", &css, "prefers-contrast")
         .sync_create()
         .build();
-    // The same for light or dark: the palette's dark half sits under
-    // `@media (prefers-color-scheme: dark)`.
-    gtk::Settings::for_display(display)
-        .bind_property("gtk-interface-color-scheme", &css, "prefers-color-scheme")
-        .sync_create()
-        .build();
     css.load_from_string(STYLESHEET);
     gtk::style_context_add_provider_for_display(
         display,
@@ -195,46 +189,13 @@ mod tests {
         }
     }
 
-    /// The sheet without its palette block.
-    fn outside_the_palette() -> String {
-        let start = STYLESHEET.find("/* palette:start").expect("palette start");
-        let end = STYLESHEET.find("/* palette:end */").expect("palette end");
-        assert!(start < end);
-        format!("{}{}", &STYLESHEET[..start], &STYLESHEET[end..])
-    }
-
     #[test]
-    fn colours_are_written_out_only_in_the_palette_block() {
-        // Everywhere else a colour is a libadwaita variable or transparent.
-        let rest = outside_the_palette();
-        for word in ["#", "rgb(", "rgba(", "hsl("] {
-            assert!(!rest.contains(word), "{word}");
+    fn the_panel_follows_the_desktop_and_writes_no_colour_of_its_own() {
+        // Every colour is a libadwaita variable (so light or dark, the system
+        // accent and high contrast apply) or transparent; none is written out.
+        for word in ["#", "rgb(", "rgba(", "hsl(", "palette:", ":root"] {
+            assert!(!STYLESHEET.contains(word), "{word}");
         }
-    }
-
-    #[test]
-    fn the_palette_is_libadwaita_variables_and_the_vexos_colours_only() {
-        let start = STYLESHEET.find("/* palette:start").unwrap();
-        let end = STYLESHEET.find("/* palette:end */").unwrap();
-        let block = &STYLESHEET[start..end];
-        // The VexOS Neo-Cyberpunk theme (vexos-nix files/dms/vexos-neo-cyberpunk.json).
-        const THEME: [&str; 24] = [
-            "#050A14", "#0B1526", "#0F1930", "#16233A", "#E7EEF5", "#05F4FA", "#00141A", "#3EC3E8",
-            "#016D8E", "#F9B62E", "#FF4D6D", "#DD4014", "#FF6A3D", "#FFFFFF", "#F3F7F8", "#142230",
-            "#FBFDFD", "#EAF1F2", "#0E7A8C", "#9A6A00", "#C81C4A", "#A83B23", "#EAF1F2", "#0E7A8C",
-        ];
-        for hex in block.split('#').skip(1) {
-            let hex = format!("#{}", &hex[..6]);
-            assert!(THEME.contains(&hex.as_str()), "{hex} is not in the theme");
-        }
-        // Only declarations of custom properties, inside `:root`.
-        for line in block.lines().map(str::trim) {
-            if line.contains('#') {
-                assert!(line.starts_with("--"), "{line}");
-            }
-        }
-        assert_eq!(block.matches(":root").count(), 2);
-        assert!(block.contains("@media (prefers-color-scheme: dark)"));
     }
 
     /// Needs a display, so it is skipped by default. Run it against a

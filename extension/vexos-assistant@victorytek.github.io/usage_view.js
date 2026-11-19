@@ -34,6 +34,8 @@ export const CODEX_MESSAGES = {
 };
 
 export const AGENT_NAMES = {claude: 'Claude Code', codex: 'Codex'};
+// Each agent's logo, a file in the extension.
+export const AGENT_ICONS = {claude: 'icons/claude.svg', codex: 'icons/codex.svg'};
 
 // With plan limits on and no record yet, the panel says it is checking. If
 // the service has not written anything after this long, it says so instead of
