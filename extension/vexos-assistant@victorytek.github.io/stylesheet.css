@@ -207,22 +207,51 @@
     text-align: center;
 }
 
+/* The sign-in card is the one loud thing in the panel: vivid, because nothing
+   works until it is used. */
+.vexos-signin {
+    border: 1px solid rgba(60, 190, 255, 0.45);
+    background-gradient-direction: vertical;
+    background-gradient-start: rgba(40, 150, 255, 0.22);
+    background-gradient-end: rgba(150, 90, 255, 0.16);
+}
+
+.vexos-signin .vexos-agent-name {
+    font-size: 12pt;
+    color: #5cd0ff;
+}
+
+.vexos-signin .vexos-note {
+    color: rgba(255, 255, 255, 0.82);
+}
+
 .vexos-cta {
-    padding: 8px 12px;
+    padding: 10px 16px;
     border-radius: 999px;
-    font-weight: bold;
-    text-align: center;
+    spacing: 8px;
     color: #ffffff;
-    background-color: rgba(120, 174, 237, 0.30);
+    font-weight: bold;
+    background-gradient-direction: horizontal;
+    background-gradient-start: #12b5ff;
+    background-gradient-end: #9a5cff;
+    box-shadow: 0 4px 16px rgba(60, 170, 255, 0.55);
 }
 
 .vexos-cta:hover,
 .vexos-cta:focus {
-    background-color: rgba(120, 174, 237, 0.45);
+    background-gradient-start: #4cc9ff;
+    background-gradient-end: #b783ff;
+    box-shadow: 0 6px 22px rgba(90, 190, 255, 0.75);
 }
 
 .vexos-cta:active {
-    background-color: rgba(120, 174, 237, 0.20);
+    background-gradient-start: #0b95d6;
+    background-gradient-end: #7c3fe0;
+    box-shadow: 0 2px 8px rgba(60, 170, 255, 0.4);
+}
+
+.vexos-cta-icon {
+    color: #ffffff;
 }
 
 /* The hover hint (tooltip.js): a label on the shell's own layer, in the look

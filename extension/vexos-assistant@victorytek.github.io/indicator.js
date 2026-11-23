@@ -356,18 +356,27 @@ class VexosAssistantButton extends PanelMenu.Button {
     _signIn() {
         const box = new St.BoxLayout({
             orientation: Clutter.Orientation.VERTICAL,
-            style_class: 'vexos-agent',
+            style_class: 'vexos-agent vexos-signin',
             x_expand: true,
         });
         box.add_child(label('Sign in to an assistant', 'vexos-agent-name'));
         box.add_child(this._note('Choose Claude Code, Codex or OpenCode in VexPortal. Its plan limits show here once you are signed in.'));
         const open = new St.Button({
-            label: 'Open AI Assistant settings',
             style_class: 'vexos-cta',
             can_focus: true,
             track_hover: true,
             x_expand: true,
+            accessible_name: 'Open AI Assistant settings',
         });
+        const face = new St.BoxLayout({x_align: Clutter.ActorAlign.CENTER});
+        face.add_child(label('Open AI Assistant settings', 'vexos-cta-label'));
+        face.add_child(new St.Icon({
+            icon_name: 'go-next-symbolic',
+            icon_size: 16,
+            style_class: 'vexos-cta-icon',
+            y_align: Clutter.ActorAlign.CENTER,
+        }));
+        open.set_child(face);
         this._tips.attach(open, 'Opens VexPortal on its AI Assistant page.');
         open.connect('clicked', () => this._openPortal());
         box.add_child(open);
