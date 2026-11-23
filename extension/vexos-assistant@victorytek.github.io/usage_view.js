@@ -33,9 +33,9 @@ export const CODEX_MESSAGES = {
     'no-plan': 'This Codex sign-in has no plan limits.',
 };
 
-export const AGENT_NAMES = {claude: 'Claude Code', codex: 'Codex', opencode: 'OpenCode'};
+export const AGENT_NAMES = {claude: 'Claude Code', codex: 'Codex'};
 // Each agent's logo, a file in the extension.
-export const AGENT_ICONS = {claude: 'icons/claude.svg', codex: 'icons/codex.svg', opencode: 'icons/opencode.svg'};
+export const AGENT_ICONS = {claude: 'icons/claude.svg', codex: 'icons/codex.svg'};
 
 // With plan limits on and no record yet, the panel says it is checking. If
 // the service has not written anything after this long, it says so instead of
@@ -146,15 +146,8 @@ export function shownSources(record) {
         agent === 'claude' || data.status !== 'waiting-for-auth');
 }
 
-// The three assistants one can sign in to, and how. Shown when none is signed
-// in, in place of Claude's lone sign-in sentence. `how` is the maker. Fixed words only.
-export const SIGN_IN_CHOICES = [
-    {agent: 'claude', name: 'Claude Code', how: 'Anthropic'},
-    {agent: 'codex', name: 'Codex', how: 'OpenAI'},
-    {agent: 'opencode', name: 'OpenCode', how: 'Open source'},
-];
-
-// True when no agent has a usable sign-in: Claude is waiting, and Codex is
+// True when no agent has a usable sign-in, so the panel offers VexPortal's
+// AI Assistant page, where one is chosen and signed in: Claude is waiting, and Codex is
 // either absent or waiting too.
 export function needsSignIn(record) {
     if (!record || !record.enabled || record.status !== 'waiting-for-auth')

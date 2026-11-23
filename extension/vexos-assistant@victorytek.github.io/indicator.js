@@ -22,7 +22,7 @@ import {STARTERS} from './starters.js';
 import {Tooltips} from './tooltip.js';
 import {UsageStore} from './usage_store.js';
 import {AGENT_ICONS, displayWindows, formatCountdown, isUrgent, pendingDelayMs, pendingLine, percentText,
-    refreshDelaySeconds, shouldRefreshOnOpen, needsSignIn, SIGN_IN_CHOICES, shownSources, statusLine, URGENT_PERCENT} from './usage_view.js';
+    refreshDelaySeconds, shouldRefreshOnOpen, needsSignIn, shownSources, statusLine, URGENT_PERCENT} from './usage_view.js';
 
 const USAGE_KEY = 'usage-enabled';
 const ICON_FILE = 'icons/vexos-assistant-symbolic.svg';
@@ -351,8 +351,8 @@ class VexosAssistantButton extends PanelMenu.Button {
         return section;
     }
 
-    // No agent is signed in: three tiles, one per assistant. VexPortal's AI
-    // page is where one is chosen and signed in, so every tile opens it.
+    // No agent is signed in: one button to VexPortal's AI Assistant page, where
+    // an assistant is chosen and signed in.
     _signIn() {
         const box = new St.BoxLayout({
             orientation: Clutter.Orientation.VERTICAL,
@@ -360,44 +360,25 @@ class VexosAssistantButton extends PanelMenu.Button {
             x_expand: true,
         });
         box.add_child(label('Sign in to an assistant', 'vexos-agent-name'));
-        box.add_child(this._note('Choose one. Its plan limits show here once you are signed in.'));
-        const tiles = new St.BoxLayout({style_class: 'vexos-tiles', x_expand: true});
-        for (const {agent, name, how} of SIGN_IN_CHOICES) {
-            const tile = new St.Button({
-                style_class: `vexos-tile vexos-choice vexos-choice-${agent}`,
-                can_focus: true,
-                track_hover: true,
-                x_expand: true,
-                accessible_name: `Sign in to ${name}`,
-            });
-            this._tips.attach(tile, 'Opens VexPortal, where you choose an assistant and sign in.');
-            const body = new St.BoxLayout({
-                orientation: Clutter.Orientation.VERTICAL,
-                x_align: Clutter.ActorAlign.CENTER,
-            });
-            body.add_child(new St.Icon({
-                gicon: Gio.icon_new_for_string(`${this._path}/${AGENT_ICONS[agent]}`),
-                icon_size: 32,
-                style_class: 'vexos-choice-logo',
-                x_align: Clutter.ActorAlign.CENTER,
-            }));
-            const title = label(name, 'vexos-tile-label');
-            title.x_align = Clutter.ActorAlign.CENTER;
-            body.add_child(title);
-            const maker = label(how, 'vexos-choice-maker');
-            maker.x_align = Clutter.ActorAlign.CENTER;
-            body.add_child(maker);
-            tile.set_child(body);
-            tile.connect('clicked', () => this._openPortal());
-            tiles.add_child(tile);
-        }
-        box.add_child(tiles);
+        box.add_child(this._note('Choose Claude Code, Codex or OpenCode in VexPortal. Its plan limits show here once you are signed in.'));
+        const open = new St.Button({
+            label: 'Open AI Assistant settings',
+            style_class: 'vexos-cta',
+            can_focus: true,
+            track_hover: true,
+            x_expand: true,
+        });
+        this._tips.attach(open, 'Opens VexPortal on its AI Assistant page.');
+        open.connect('clicked', () => this._openPortal());
+        box.add_child(open);
         return box;
     }
 
     _openPortal() {
         try {
-            Gio.DesktopAppInfo.new('io.github.vexportal.desktop')?.launch([], null);
+            // A fixed command: nothing from the record, an agent or the user is in it.
+            Gio.AppInfo.create_from_commandline('vexportal --page ai', 'VexPortal',
+                Gio.AppInfoCreateFlags.NONE).launch([], null);
         } catch (e) {
             console.warn(`vexos-assistant: could not open VexPortal: ${e.message}`);
         }

@@ -109,6 +109,12 @@ test('source scan: the extension carries no agent text, starts nothing and runs 
     }
 });
 
+test('source scan: the only process the extension starts is VexPortal on its AI page, from a fixed command', () => {
+    for (const [name, text] of Object.entries(all))
+        assert.equal([...text.matchAll(/create_from_commandline\(/g)].length, name === 'indicator.js' ? 1 : 0, name);
+    assert.ok(all['indicator.js'].includes("create_from_commandline('vexportal --page ai', 'VexPortal',"));
+});
+
 test('source scan: only usage_store.js touches the file system, and it only reads one file', () => {
     for (const [name, text] of Object.entries(all)) {
         if (name === 'usage_store.js')

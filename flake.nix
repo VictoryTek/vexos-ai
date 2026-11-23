@@ -241,7 +241,7 @@
           jq -e '.uuid == "${ext.extensionUuid}" and ."shell-version" == ["50"]
                  and ."settings-schema" == "org.gnome.shell.extensions.vexos-assistant"' ${dir}/metadata.json
           # Exactly these files.
-          diff <(cd ${dir} && find . -type f | sort) <(printf '%s\n' ./bus.js ./extension.js ./icons/claude.svg ./icons/codex.svg ./icons/opencode.svg ./icons/vexos-assistant-symbolic.svg \
+          diff <(cd ${dir} && find . -type f | sort) <(printf '%s\n' ./bus.js ./extension.js ./icons/claude.svg ./icons/codex.svg ./icons/vexos-assistant-symbolic.svg \
             ./indicator.js ./layout.js ./metadata.json ./schemas/gschemas.compiled \
             ./schemas/org.gnome.shell.extensions.vexos-assistant.gschema.xml ./starters.js ./stylesheet.css \
             ./tooltip.js ./usage_store.js ./usage_view.js)
