@@ -261,3 +261,13 @@ test('pendingDelayMs: one redraw is scheduled for the deadline, and none after i
     assert.equal(pendingDelayMs(NOW + PENDING_MS, NOW), 0);
     assert.equal(pendingDelayMs(NOW + 5 * PENDING_MS, NOW), 0);
 });
+
+test('needsSignIn: only when no agent is signed in; the choices name all three', () => {
+    const {needsSignIn, SIGN_IN_CHOICES} = view;
+    assert.equal(needsSignIn(parseRecord(record({status: 'waiting-for-auth'}))), true);
+    assert.equal(needsSignIn(parseRecord(record({status: 'waiting-for-auth', codex: codex({status: 'waiting-for-auth'}, [])}))), true);
+    assert.equal(needsSignIn(parseRecord(record({status: 'waiting-for-auth', codex: codex()}))), false, 'Codex is signed in');
+    assert.equal(needsSignIn(parseRecord(record())), false);
+    assert.equal(needsSignIn(null), false);
+    assert.deepEqual(SIGN_IN_CHOICES.map(c => c.agent), ['claude', 'codex', 'opencode']);
+});

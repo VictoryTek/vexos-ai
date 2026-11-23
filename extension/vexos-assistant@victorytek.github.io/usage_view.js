@@ -146,6 +146,22 @@ export function shownSources(record) {
         agent === 'claude' || data.status !== 'waiting-for-auth');
 }
 
+// The three assistants one can sign in to, and how. Shown when none is signed
+// in, in place of Claude's lone sign-in sentence. Fixed words only.
+export const SIGN_IN_CHOICES = [
+    {agent: 'claude', name: 'Claude Code', how: 'Start Claude Code and sign in.'},
+    {agent: 'codex', name: 'Codex', how: 'Run `codex login`.'},
+    {agent: 'opencode', name: 'OpenCode', how: 'Run `opencode auth login`.'},
+];
+
+// True when no agent has a usable sign-in: Claude is waiting, and Codex is
+// either absent or waiting too.
+export function needsSignIn(record) {
+    if (!record || !record.enabled || record.status !== 'waiting-for-auth')
+        return false;
+    return !record.codex || record.codex.status === 'waiting-for-auth';
+}
+
 // A window whose reset has passed is untouched, not unknown: it reads 0%.
 export function currentWindows(record, nowMs) {
     if (!record)

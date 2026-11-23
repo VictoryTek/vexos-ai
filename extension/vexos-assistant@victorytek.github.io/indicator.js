@@ -22,7 +22,7 @@ import {STARTERS} from './starters.js';
 import {Tooltips} from './tooltip.js';
 import {UsageStore} from './usage_store.js';
 import {AGENT_ICONS, displayWindows, formatCountdown, isUrgent, pendingDelayMs, pendingLine, percentText,
-    refreshDelaySeconds, shouldRefreshOnOpen, shownSources, statusLine, URGENT_PERCENT} from './usage_view.js';
+    refreshDelaySeconds, shouldRefreshOnOpen, needsSignIn, SIGN_IN_CHOICES, shownSources, statusLine, URGENT_PERCENT} from './usage_view.js';
 
 const USAGE_KEY = 'usage-enabled';
 const ICON_FILE = 'icons/vexos-assistant-symbolic.svg';
@@ -288,6 +288,11 @@ class VexosAssistantButton extends PanelMenu.Button {
             return;
         }
         this._waiting(false);
+        if (needsSignIn(record)) {
+            this._usage.add_child(this._signIn());
+            this._usage.add_child(this._offLink());
+            return;
+        }
         for (const source of shownSources(record))
             this._usage.add_child(this._section(source, now));
         this._usage.add_child(this._offLink());
@@ -344,6 +349,31 @@ class VexosAssistantButton extends PanelMenu.Button {
         if (line)
             section.add_child(this._note(line));
         return section;
+    }
+
+    // No agent is signed in: offer all of them, and VexPortal, whose AI page
+    // is where one is picked and signed in.
+    _signIn() {
+        const box = new St.BoxLayout({
+            orientation: Clutter.Orientation.VERTICAL,
+            style_class: 'vexos-agent',
+            x_expand: true,
+        });
+        box.add_child(label('Sign in to an assistant', 'vexos-agent-name'));
+        for (const {name, how} of SIGN_IN_CHOICES)
+            box.add_child(this._note(`${name}: ${how}`));
+        const open = this._link('Open VexPortal',
+            'Opens VexPortal, where you can choose an assistant and sign in.');
+        open.connect('clicked', () => {
+            try {
+                Gio.DesktopAppInfo.new('io.github.vexportal.desktop')?.launch([], null);
+            } catch (e) {
+                console.warn(`vexos-assistant: could not open VexPortal: ${e.message}`);
+            }
+            this.menu.close();
+        });
+        box.add_child(open);
+        return box;
     }
 
     _row(w, now, agent) {
