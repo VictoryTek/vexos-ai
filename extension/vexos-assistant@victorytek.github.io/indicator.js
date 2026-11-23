@@ -200,12 +200,15 @@ class VexosAssistantButton extends PanelMenu.Button {
         this._subtitle = label('AI help for this system', 'vexos-subtitle');
         names.add_child(this._subtitle);
         hero.add_child(names);
-        const newChat = iconButton('list-add-symbolic', 'New chat', 'icon-button vexos-hero-button', () => {
+        // Shown only once an agent is signed in; opens VexPortal's AI Assistant
+        // page, where another one can be added.
+        this._add = iconButton('list-add-symbolic', 'Add an assistant', 'icon-button vexos-hero-button', () => {
             this.menu.close();
-            this._bus.newSession();
+            this._openPortal();
         });
-        this._tips.attach(newChat, 'New chat');
-        hero.add_child(newChat);
+        this._add.visible = false;
+        this._tips.attach(this._add, 'Add an assistant in VexPortal');
+        hero.add_child(this._add);
         const terminal = iconButton('utilities-terminal-symbolic', 'Open in a terminal', 'icon-button vexos-hero-button', () => {
             this.menu.close();
             this._bus.terminal();
@@ -270,6 +273,8 @@ class VexosAssistantButton extends PanelMenu.Button {
         this._icon.style_class = urgent
             ? 'system-status-icon vexos-icon vexos-urgent'
             : 'system-status-icon vexos-icon';
+
+        this._add.visible = enabled && !!record?.enabled && !needsSignIn(record);
 
         this._tips.hide();
         this._usage.destroy_all_children();
