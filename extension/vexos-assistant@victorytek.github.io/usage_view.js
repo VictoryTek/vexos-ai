@@ -33,9 +33,9 @@ export const CODEX_MESSAGES = {
     'no-plan': 'This Codex sign-in has no plan limits.',
 };
 
-export const AGENT_NAMES = {claude: 'Claude Code', codex: 'Codex'};
+export const AGENT_NAMES = {claude: 'Claude Code', codex: 'Codex', opencode: 'OpenCode'};
 // Each agent's logo, a file in the extension.
-export const AGENT_ICONS = {claude: 'icons/claude.svg', codex: 'icons/codex.svg'};
+export const AGENT_ICONS = {claude: 'icons/claude.svg', codex: 'icons/codex.svg', opencode: 'icons/opencode.svg'};
 
 // With plan limits on and no record yet, the panel says it is checking. If
 // the service has not written anything after this long, it says so instead of
@@ -147,11 +147,11 @@ export function shownSources(record) {
 }
 
 // The three assistants one can sign in to, and how. Shown when none is signed
-// in, in place of Claude's lone sign-in sentence. Fixed words only.
+// in, in place of Claude's lone sign-in sentence. `how` is the maker. Fixed words only.
 export const SIGN_IN_CHOICES = [
-    {agent: 'claude', name: 'Claude Code', how: 'Start Claude Code and sign in.'},
-    {agent: 'codex', name: 'Codex', how: 'Run `codex login`.'},
-    {agent: 'opencode', name: 'OpenCode', how: 'Run `opencode auth login`.'},
+    {agent: 'claude', name: 'Claude Code', how: 'Anthropic'},
+    {agent: 'codex', name: 'Codex', how: 'OpenAI'},
+    {agent: 'opencode', name: 'OpenCode', how: 'Open source'},
 ];
 
 // True when no agent has a usable sign-in: Claude is waiting, and Codex is

@@ -207,6 +207,21 @@
     text-align: center;
 }
 
+.vexos-choice {
+    padding: 14px 6px 12px 6px;
+    background-color: rgba(255, 255, 255, 0.07);
+}
+
+.vexos-choice-logo {
+    margin-bottom: 8px;
+}
+
+.vexos-choice-maker {
+    font-size: 8pt;
+    text-align: center;
+    color: rgba(255, 255, 255, 0.55);
+}
+
 /* The hover hint (tooltip.js): a label on the shell's own layer, in the look
    of the Shell's own tooltips. */
 .vexos-tooltip {

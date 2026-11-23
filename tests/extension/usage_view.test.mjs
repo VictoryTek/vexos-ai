@@ -270,4 +270,8 @@ test('needsSignIn: only when no agent is signed in; the choices name all three',
     assert.equal(needsSignIn(parseRecord(record())), false);
     assert.equal(needsSignIn(null), false);
     assert.deepEqual(SIGN_IN_CHOICES.map(c => c.agent), ['claude', 'codex', 'opencode']);
+    for (const c of SIGN_IN_CHOICES) {
+        assert.equal(view.AGENT_NAMES[c.agent], c.name);
+        assert.ok(view.AGENT_ICONS[c.agent], c.agent);
+    }
 });

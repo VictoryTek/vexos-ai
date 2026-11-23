@@ -351,8 +351,8 @@ class VexosAssistantButton extends PanelMenu.Button {
         return section;
     }
 
-    // No agent is signed in: offer all of them, and VexPortal, whose AI page
-    // is where one is picked and signed in.
+    // No agent is signed in: three tiles, one per assistant. VexPortal's AI
+    // page is where one is chosen and signed in, so every tile opens it.
     _signIn() {
         const box = new St.BoxLayout({
             orientation: Clutter.Orientation.VERTICAL,
@@ -360,20 +360,48 @@ class VexosAssistantButton extends PanelMenu.Button {
             x_expand: true,
         });
         box.add_child(label('Sign in to an assistant', 'vexos-agent-name'));
-        for (const {name, how} of SIGN_IN_CHOICES)
-            box.add_child(this._note(`${name}: ${how}`));
-        const open = this._link('Open VexPortal',
-            'Opens VexPortal, where you can choose an assistant and sign in.');
-        open.connect('clicked', () => {
-            try {
-                Gio.DesktopAppInfo.new('io.github.vexportal.desktop')?.launch([], null);
-            } catch (e) {
-                console.warn(`vexos-assistant: could not open VexPortal: ${e.message}`);
-            }
-            this.menu.close();
-        });
-        box.add_child(open);
+        box.add_child(this._note('Choose one. Its plan limits show here once you are signed in.'));
+        const tiles = new St.BoxLayout({style_class: 'vexos-tiles', x_expand: true});
+        for (const {agent, name, how} of SIGN_IN_CHOICES) {
+            const tile = new St.Button({
+                style_class: `vexos-tile vexos-choice vexos-choice-${agent}`,
+                can_focus: true,
+                track_hover: true,
+                x_expand: true,
+                accessible_name: `Sign in to ${name}`,
+            });
+            this._tips.attach(tile, 'Opens VexPortal, where you choose an assistant and sign in.');
+            const body = new St.BoxLayout({
+                orientation: Clutter.Orientation.VERTICAL,
+                x_align: Clutter.ActorAlign.CENTER,
+            });
+            body.add_child(new St.Icon({
+                gicon: Gio.icon_new_for_string(`${this._path}/${AGENT_ICONS[agent]}`),
+                icon_size: 32,
+                style_class: 'vexos-choice-logo',
+                x_align: Clutter.ActorAlign.CENTER,
+            }));
+            const title = label(name, 'vexos-tile-label');
+            title.x_align = Clutter.ActorAlign.CENTER;
+            body.add_child(title);
+            const maker = label(how, 'vexos-choice-maker');
+            maker.x_align = Clutter.ActorAlign.CENTER;
+            body.add_child(maker);
+            tile.set_child(body);
+            tile.connect('clicked', () => this._openPortal());
+            tiles.add_child(tile);
+        }
+        box.add_child(tiles);
         return box;
+    }
+
+    _openPortal() {
+        try {
+            Gio.DesktopAppInfo.new('io.github.vexportal.desktop')?.launch([], null);
+        } catch (e) {
+            console.warn(`vexos-assistant: could not open VexPortal: ${e.message}`);
+        }
+        this.menu.close();
     }
 
     _row(w, now, agent) {
