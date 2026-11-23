@@ -1,19 +1,18 @@
-/* The top-bar panel, dressed as part of GNOME Shell: it keeps the Shell's own
-   menu surface, its round `icon-button` buttons and its text colour, and adds
-   only what the Shell has no class for. Cards and tracks are the same soft
-   white overlays Adwaita uses on a dark surface; the accent is Adwaita's blue,
-   and a limit that is nearly used up turns Adwaita's red. Shell's stylesheet
-   has no variables, so these few values are written out here:
+/* The top-bar panel, dressed to match this desktop: the Shell's own dark menu
+   surface and round `icon-button` shape, with the saturated colours of the
+   wallpaper and theme (electric blue, hot magenta, orange) instead of soft
+   pastels. Fills are gradients, accents glow, text is white.
+   Shell's stylesheet has no variables, so the few values are written out:
 
-     card      rgba(255, 255, 255, 0.06)   track  rgba(255, 255, 255, 0.12)
-     dim text  rgba(255, 255, 255, 0.65)   blue   #78aeed
-     red       #ff7b63                     Claude #d97757
+     blue    #1e9bff / #00d2ff     violet  #8a4dff     magenta #ff2d9a
+     orange  #ff7a1a               red     #ff2d4f     green   #19e6a0
+     card    rgba(255, 255, 255, 0.07)    track  rgba(255, 255, 255, 0.14)
+     dim     rgba(255, 255, 255, 0.72)
 
-   Shell's own popups are dark, so this is dark only; there is no light
-   variant here (the chat window follows the system). */
+   Shell's own popups are dark, so this is dark only. */
 
 .vexos-icon.vexos-urgent {
-    color: #ff7b63;
+    color: #ff2d4f;
 }
 
 /* A fixed width: a long note wraps inside it instead of widening the popup. */
@@ -28,41 +27,75 @@
     padding: 2px 0;
 }
 
+/* The two quick actions: blue discs that light up. */
 .vexos-hero-button {
     margin-left: 4px;
+    color: #ffffff;
+    background-color: rgba(30, 155, 255, 0.30);
+    border: 1px solid rgba(0, 210, 255, 0.55);
+}
+
+.vexos-hero-button:hover,
+.vexos-hero-button:focus {
+    background-color: rgba(30, 155, 255, 0.60);
+    box-shadow: 0 0 14px rgba(0, 210, 255, 0.65);
+}
+
+.vexos-hero-button:active {
+    background-color: rgba(30, 155, 255, 0.40);
 }
 
 .vexos-title {
-    font-size: 14pt;
+    font-size: 15pt;
     font-weight: bold;
+    color: #ffffff;
 }
 
 .vexos-subtitle {
     font-size: 9pt;
-    color: rgba(255, 255, 255, 0.65);
+    color: #00d2ff;
 }
 
+/* A thin line that fades from blue to magenta. */
 .vexos-separator {
-    height: 1px;
-    background-color: rgba(255, 255, 255, 0.10);
+    height: 2px;
+    border-radius: 1px;
+    background-gradient-direction: horizontal;
+    background-gradient-start: rgba(0, 210, 255, 0.55);
+    background-gradient-end: rgba(255, 45, 154, 0.55);
 }
 
 .vexos-section {
     font-size: 9pt;
     font-weight: bold;
-    color: rgba(255, 255, 255, 0.65);
+    color: #ff2d9a;
 }
 
 .vexos-usage {
     spacing: 10px;
 }
 
-/* One card for each agent. */
+/* One card for each agent, edged in that agent's colour. */
 .vexos-agent {
     spacing: 8px;
     padding: 12px;
-    border-radius: 12px;
-    background-color: rgba(255, 255, 255, 0.06);
+    border-radius: 14px;
+    background-color: rgba(255, 255, 255, 0.07);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.vexos-agent-claude {
+    background-gradient-direction: vertical;
+    background-gradient-start: rgba(255, 122, 26, 0.22);
+    background-gradient-end: rgba(255, 45, 154, 0.10);
+    border: 1px solid rgba(255, 122, 26, 0.55);
+}
+
+.vexos-agent-codex {
+    background-gradient-direction: vertical;
+    background-gradient-start: rgba(0, 210, 255, 0.22);
+    background-gradient-end: rgba(30, 80, 255, 0.12);
+    border: 1px solid rgba(0, 210, 255, 0.55);
 }
 
 .vexos-agent-head {
@@ -71,15 +104,25 @@
 
 .vexos-agent-name {
     font-weight: bold;
+    color: #ffffff;
 }
 
 .vexos-agent-plan {
     margin-left: 2px;
-    padding: 1px 8px;
+    padding: 1px 9px;
     border-radius: 999px;
     font-size: 8.5pt;
     font-weight: bold;
-    background-color: rgba(255, 255, 255, 0.12);
+    color: #ffffff;
+    background-color: rgba(255, 255, 255, 0.20);
+}
+
+.vexos-agent-claude .vexos-agent-plan {
+    background-color: #ff7a1a;
+}
+
+.vexos-agent-codex .vexos-agent-plan {
+    background-color: #1e9bff;
 }
 
 .vexos-limit {
@@ -90,29 +133,34 @@
 .vexos-limit-label {
     min-width: 58px;
     font-size: 10pt;
-    color: rgba(255, 255, 255, 0.65);
+    color: rgba(255, 255, 255, 0.72);
 }
 
 .vexos-meter {
     min-width: 90px;
-    height: 6px;
-    border-radius: 3px;
-    background-color: rgba(255, 255, 255, 0.12);
+    height: 8px;
+    border-radius: 4px;
+    background-color: rgba(255, 255, 255, 0.14);
 }
 
 .vexos-meter-fill {
-    height: 6px;
+    height: 8px;
     min-width: 0;
-    border-radius: 3px;
-    background-color: #78aeed;
+    border-radius: 4px;
+    background-gradient-direction: horizontal;
+    background-gradient-start: #00d2ff;
+    background-gradient-end: #1e6bff;
 }
 
 .vexos-meter-fill.vexos-fill-claude {
-    background-color: #d97757;
+    background-gradient-start: #ff7a1a;
+    background-gradient-end: #ff2d9a;
 }
 
 .vexos-meter-fill.vexos-urgent {
-    background-color: #ff7b63;
+    background-gradient-start: #ff7a1a;
+    background-gradient-end: #ff2d4f;
+    box-shadow: 0 0 8px rgba(255, 45, 79, 0.75);
 }
 
 .vexos-limit-percent {
@@ -120,27 +168,29 @@
     font-size: 10pt;
     font-weight: bold;
     text-align: right;
+    color: #ffffff;
 }
 
 .vexos-limit-percent.vexos-urgent {
-    color: #ff7b63;
+    color: #ff4d6a;
 }
 
 .vexos-limit-reset {
     min-width: 56px;
     font-size: 9pt;
     text-align: right;
-    color: rgba(255, 255, 255, 0.65);
+    color: rgba(255, 255, 255, 0.72);
 }
 
 .vexos-note {
     font-size: 9pt;
-    color: rgba(255, 255, 255, 0.65);
+    color: rgba(255, 255, 255, 0.78);
 }
 
 .vexos-link {
     font-size: 9pt;
-    color: rgba(255, 255, 255, 0.65);
+    font-weight: bold;
+    color: #00d2ff;
     padding: 4px 8px;
     margin-left: -8px;
     border-radius: 8px;
@@ -149,80 +199,82 @@
 .vexos-link:hover,
 .vexos-link:focus {
     color: #ffffff;
-    background-color: rgba(255, 255, 255, 0.10);
+    background-color: rgba(0, 210, 255, 0.25);
 }
 
 .vexos-tiles {
     spacing: 8px;
 }
 
-/* Like a Quick Settings tile: a soft rounded surface that lightens on hover. */
+/* A bold tile: a lit surface that glows its own colour on hover. */
 .vexos-tile {
     padding: 12px 6px 10px 6px;
-    border-radius: 12px;
-    background-color: rgba(255, 255, 255, 0.06);
+    border-radius: 14px;
+    background-color: rgba(255, 255, 255, 0.07);
+    border: 1px solid rgba(255, 255, 255, 0.12);
 }
 
 .vexos-tile:hover,
 .vexos-tile:focus {
-    background-color: rgba(255, 255, 255, 0.12);
+    background-color: rgba(255, 255, 255, 0.15);
+    border: 1px solid rgba(255, 255, 255, 0.40);
 }
 
 .vexos-tile:active {
-    background-color: rgba(255, 255, 255, 0.04);
+    background-color: rgba(255, 255, 255, 0.05);
 }
 
-/* Each starter's icon sits in a round badge tinted with one Adwaita colour. */
+/* Each starter's icon is white on a solid gradient disc of its own colour. */
 .vexos-tile-badge {
-    width: 36px;
-    height: 36px;
-    border-radius: 18px;
+    width: 38px;
+    height: 38px;
+    border-radius: 19px;
     margin-bottom: 6px;
-    background-color: rgba(120, 174, 237, 0.20);
+    background-gradient-direction: vertical;
+    background-gradient-start: #00d2ff;
+    background-gradient-end: #1e6bff;
+    box-shadow: 0 2px 10px rgba(30, 155, 255, 0.55);
 }
 
 .vexos-tile-icon {
-    color: #78aeed;
+    color: #ffffff;
 }
 
 .vexos-tile-diagnose .vexos-tile-badge {
-    background-color: rgba(255, 190, 111, 0.20);
-}
-
-.vexos-tile-diagnose .vexos-tile-icon {
-    color: #ffbe6f;
+    background-gradient-start: #ffb21a;
+    background-gradient-end: #ff5a1a;
+    box-shadow: 0 2px 10px rgba(255, 122, 26, 0.55);
 }
 
 .vexos-tile-explain .vexos-tile-badge {
-    background-color: rgba(220, 138, 221, 0.20);
-}
-
-.vexos-tile-explain .vexos-tile-icon {
-    color: #dc8add;
+    background-gradient-start: #ff2d9a;
+    background-gradient-end: #8a4dff;
+    box-shadow: 0 2px 10px rgba(255, 45, 154, 0.55);
 }
 
 .vexos-tile-label {
     font-size: 9pt;
     font-weight: bold;
     text-align: center;
+    color: #ffffff;
 }
 
-/* The sign-in card is the one loud thing in the panel: vivid, because nothing
-   works until it is used. */
+/* The sign-in card is the loudest thing in the panel: nothing works until it
+   is used. */
 .vexos-signin {
-    border: 1px solid rgba(60, 190, 255, 0.45);
+    border: 1px solid rgba(0, 210, 255, 0.65);
     background-gradient-direction: vertical;
-    background-gradient-start: rgba(40, 150, 255, 0.22);
-    background-gradient-end: rgba(150, 90, 255, 0.16);
+    background-gradient-start: rgba(30, 155, 255, 0.30);
+    background-gradient-end: rgba(138, 77, 255, 0.24);
 }
 
 .vexos-signin .vexos-agent-name {
     font-size: 12pt;
-    color: #5cd0ff;
+    color: #00d2ff;
 }
 
 .vexos-signin .vexos-note {
-    color: rgba(255, 255, 255, 0.82);
+    color: rgba(255, 255, 255, 0.90);
 }
 
 .vexos-cta {
@@ -232,22 +284,22 @@
     color: #ffffff;
     font-weight: bold;
     background-gradient-direction: horizontal;
-    background-gradient-start: #12b5ff;
-    background-gradient-end: #9a5cff;
-    box-shadow: 0 4px 16px rgba(60, 170, 255, 0.55);
+    background-gradient-start: #00b4ff;
+    background-gradient-end: #ff2d9a;
+    box-shadow: 0 4px 18px rgba(0, 180, 255, 0.60);
 }
 
 .vexos-cta:hover,
 .vexos-cta:focus {
-    background-gradient-start: #4cc9ff;
-    background-gradient-end: #b783ff;
-    box-shadow: 0 6px 22px rgba(90, 190, 255, 0.75);
+    background-gradient-start: #33c6ff;
+    background-gradient-end: #ff5cb4;
+    box-shadow: 0 6px 24px rgba(0, 210, 255, 0.80);
 }
 
 .vexos-cta:active {
-    background-gradient-start: #0b95d6;
-    background-gradient-end: #7c3fe0;
-    box-shadow: 0 2px 8px rgba(60, 170, 255, 0.4);
+    background-gradient-start: #0090d6;
+    background-gradient-end: #d6157f;
+    box-shadow: 0 2px 8px rgba(0, 180, 255, 0.45);
 }
 
 .vexos-cta-icon {
